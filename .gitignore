@@ -8,3 +8,5 @@
 *.sh
 *.iso
 /build/
+*.sys
+*.bin
