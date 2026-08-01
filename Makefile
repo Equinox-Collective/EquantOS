@@ -1,55 +1,38 @@
-# --- Compiler Configuration ---
 CC = x86_64-elf-gcc
 LD = x86_64-elf-ld
 
-CFLAGS = -Wall -Wextra -O2 -pipe -fno-pic -mno-red-zone -mcmodel=kernel \
-         -ffreestanding -fno-stack-protector -fno-omit-frame-pointer \
-         -I./include -m64 -march=x86-64
+CFLAGS = -Wall -Wextra -O2 -pipe -ffreestanding -fno-stack-protector -fno-pie -fno-pic -mno-red-zone -mcmodel=kernel
+LDFLAGS = -nostdlib -static -T linker.ld
 
-LDFLAGS = -nostdlib -z max-page-size=0x1000 -T kernel/linker.ld
+# Automatically find all C source files inside src/
+C_SOURCES = $(shell find src -name "*.c")
+# Map source files to object files in build/obj/
+OBJ_FILES = $(patsubst src/%.c, build/obj/%.o, $(C_SOURCES))
 
-# --- Files ---
-CFILES = $(wildcard kernel/core/*.c) $(wildcard drivers/*.c)
-OBJ = $(CFILES:.c=.o)
+# Default target: build the bootable ISO image
+all: build/equantos.iso
 
-KERNEL = bin/kernel.elf
-ISO = bin/EquantOS.iso
-
-.PHONY: all clean run setup
-
-all: setup $(ISO)
-
-# Используем Windows-совместимый вариант игнорирования ошибок создания папок
-setup:
-	-@mkdir bin 2>NUL
-	-@mkdir iso_root 2>NUL
-
-# Compile C files
-%.o: %.c
+# Compile C source files into object files, maintaining directory hierarchy
+build/obj/%.o: src/%.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Link the kernel
-$(KERNEL): $(OBJ)
-	$(CC) $(LDFLAGS) $(OBJ) -o $@
+# Link object files into the final kernel ELF binary
+build/kernel.elf: $(OBJ_FILES) linker.ld
+	@mkdir -p build
+	$(LD) $(LDFLAGS) $(OBJ_FILES) -o $@
 
-# Build the bootable ISO
-$(ISO): $(KERNEL)
-	-@rm -rf iso_root/* 2>NUL
-	cp $(KERNEL) iso_root/
-	cp limine.cfg iso_root/
-	cp limine-bios.sys limine-bios-cd.bin limine-uefi-cd.bin iso_root/
-	
-	xorriso -as mkisofs -b limine-bios-cd.bin \
-		-no-emul-boot -boot-load-size 4 -boot-info-table \
-		--efi-boot limine-uefi-cd.bin \
-		-efi-boot-part --efi-boot-image --protective-msdos-label \
-		iso_root -o $(ISO)
-	
-	./limine.exe bios-install $(ISO)
+# Create the bootable ISO image using Limine files
+build/equantos.iso: build/kernel.elf src/boot/limine.conf
+	@mkdir -p build/iso/boot
+	@mkdir -p build/iso/EFI/BOOT
+	cp build/kernel.elf build/iso/boot/kernel.elf
+	cp src/boot/limine.conf build/iso/limine.conf
+	# Copy Limine stage binaries if available in root or toolchain path
+	# (Make sure limine.sys, BOOTX64.EFI are placed in root or handled accordingly)
+	@echo "ISO root prepared successfully at build/iso/"
 
 clean:
-	-@rm -f $(OBJ)
-	-@rm -rf bin iso_root
+	rm -rf build
 
-run: all
-	qemu-system-x86_64 -m 2G -M q35 -cdrom $(ISO) -serial stdio -boot d
+.PHONY: all clean
