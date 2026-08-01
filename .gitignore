@@ -7,3 +7,4 @@
 *.ps1
 *.sh
 *.iso
+/build/
