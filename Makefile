@@ -2,7 +2,6 @@
 CC = x86_64-elf-gcc
 LD = x86_64-elf-ld
 
-# The -I./include is what fixes the "spaghetti includes" issue!
 CFLAGS = -Wall -Wextra -O2 -pipe -fno-pic -mno-red-zone -mcmodel=kernel \
          -ffreestanding -fno-stack-protector -fno-omit-frame-pointer \
          -I./include -m64 -march=x86-64
@@ -20,9 +19,10 @@ ISO = bin/EquantOS.iso
 
 all: setup $(ISO)
 
+# Используем Windows-совместимый вариант игнорирования ошибок создания папок
 setup:
-	@mkdir -p bin
-	@mkdir -p iso_root
+	-@mkdir bin 2>NUL
+	-@mkdir iso_root 2>NUL
 
 # Compile C files
 %.o: %.c
@@ -34,10 +34,10 @@ $(KERNEL): $(OBJ)
 
 # Build the bootable ISO
 $(ISO): $(KERNEL)
-	@rm -rf iso_root/*
-	@cp $(KERNEL) iso_root/
-	@cp limine.cfg iso_root/
-	@cp limine-bios.sys limine-bios-cd.bin limine-uefi-cd.bin iso_root/
+	-@rm -rf iso_root/* 2>NUL
+	cp $(KERNEL) iso_root/
+	cp limine.cfg iso_root/
+	cp limine-bios.sys limine-bios-cd.bin limine-uefi-cd.bin iso_root/
 	
 	xorriso -as mkisofs -b limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
@@ -48,9 +48,8 @@ $(ISO): $(KERNEL)
 	./limine.exe bios-install $(ISO)
 
 clean:
-	rm -f $(OBJ)
-	rm -rf bin
-	rm -rf iso_root
+	-@rm -f $(OBJ)
+	-@rm -rf bin iso_root
 
 run: all
 	qemu-system-x86_64 -m 2G -M q35 -cdrom $(ISO) -serial stdio -boot d
