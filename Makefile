@@ -114,7 +114,7 @@ build/equantos.iso: build/kernel.elf limine.conf limine-bios-cd.bin limine-uefi-
 	@echo [SUCCESS] EquantOS ISO created at build/equantos.iso!
 
 run: build/equantos.iso
-	qemu-system-x86_64 -cdrom build/equantos.iso -serial stdio -m 2G
+	qemu-system-x86_64 -cdrom build/equantos.iso -serial stdio -m 2G -d cpu_reset,guest_errors,int -D qemu_log.txt
 
 clean:
 	@$(call RMDIR,build)
