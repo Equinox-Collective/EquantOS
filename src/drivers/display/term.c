@@ -18,6 +18,13 @@ void term_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch) {
     term_pitch = pitch / 4; // Pitch in 32-bit pixels
     cursor_x = 0;
     cursor_y = 0;
+
+    // Clear the entire screen to solid black (wipes out Limine/UEFI VRAM garbage)
+    for (size_t y = 0; y < term_height; y++) {
+        for (size_t x = 0; x < term_width; x++) {
+            term_fb_address[y * term_pitch + x] = 0x00000000;
+        }
+    }
 }
 
 // Minimalist 8x8 bitmap font glyph for fallback character rendering
