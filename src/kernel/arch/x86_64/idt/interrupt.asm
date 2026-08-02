@@ -1,10 +1,8 @@
 [bits 64]
 [extern kernel_panic]
 [extern keyboard_callback]
-[extern mouse_callback]
 [extern timer_callback]
 
-; Macro to save all general purpose registers symmetrically
 %macro SAVE_REGS 0
     push rax
     push rbx
@@ -46,20 +44,18 @@ section .text
 %macro ISR_NOERRCODE 1
 [global isr%1]
 isr%1:
-    push qword 0    ; Push fake error code for symmetry
-    push qword %1   ; Push interrupt vector number
+    push qword 0
+    push qword %1
     jmp exception_common
 %endmacro
 
 %macro ISR_ERRCODE 1
 [global isr%1]
 isr%1:
-    ; CPU already pushed error code
-    push qword %1   ; Push interrupt vector number
+    push qword %1
     jmp exception_common
 %endmacro
 
-; Generate CPU exception stubs (0 - 31)
 ISR_NOERRCODE 0
 ISR_NOERRCODE 1
 ISR_NOERRCODE 2
@@ -68,7 +64,7 @@ ISR_NOERRCODE 4
 ISR_NOERRCODE 5
 ISR_NOERRCODE 6
 ISR_NOERRCODE 7
-ISR_ERRCODE   8   ; Double Fault
+ISR_ERRCODE   8
 ISR_NOERRCODE 9
 ISR_ERRCODE   10
 ISR_ERRCODE   11
@@ -95,9 +91,7 @@ ISR_NOERRCODE 31
 
 exception_common:
     SAVE_REGS
-    ; Pass pointer to registers structure as first argument (RDI)
     mov rdi, rsp
-    ; Call kernel panic handler (or a dedicated exception formatter)
     call kernel_panic
 .halt_loop:
     cli
@@ -109,7 +103,7 @@ keyboard_handler:
     SAVE_REGS
     call keyboard_callback
     mov al, 0x20
-    out 0x20, al        ; Send EOI to master PIC
+    out 0x20, al
     RESTORE_REGS
     iretq 
 
@@ -118,17 +112,7 @@ timer_handler:
     SAVE_REGS
     call timer_callback
     mov al, 0x20
-    out 0x20, al        ; Send EOI to master PIC
-    RESTORE_REGS
-    iretq
-    
-[global mouse_handler]
-mouse_handler:
-    SAVE_REGS
-    call mouse_callback
-    mov al, 0x20
-    out 0xA0, al        ; Send EOI to slave PIC
-    out 0x20, al        ; Send EOI to master PIC
+    out 0x20, al
     RESTORE_REGS
     iretq
 

@@ -6,7 +6,6 @@ idt_register_t idt_reg;
 extern uint64_t isr_stub_table[];
 extern void keyboard_handler(void);
 extern void timer_handler(void);
-extern void mouse_handler(void);
 
 void set_idt_gate(int n, uint64_t handler, uint16_t sel) {
     idt[n].low_offset = (uint16_t)(handler & 0xFFFF);
@@ -22,18 +21,15 @@ void init_idt(void) {
     idt_reg.limit = (uint16_t)(sizeof(idt_gate_t) * 256 - 1);
     idt_reg.base = (uint64_t)&idt;
 
-    uint16_t kcode_sel = 0x08; // Kernel code segment selector
+    uint16_t kcode_sel = 0x08;
 
-    // Populate CPU exception handlers (0 - 31)
     for (int i = 0; i < 32; i++) {
         set_idt_gate(i, isr_stub_table[i], kcode_sel); 
     }
 
-    // Hardware IRQs (PIC remap or basic stubs)
+    // Hardware IRQs
     set_idt_gate(32, (uint64_t)timer_handler, kcode_sel);    // IRQ0: PIT Timer
     set_idt_gate(33, (uint64_t)keyboard_handler, kcode_sel); // IRQ1: PS/2 Keyboard
-    set_idt_gate(44, (uint64_t)mouse_handler, kcode_sel);    // IRQ12: PS/2 Mouse
 
-    // Load IDT into CPU
     __asm__ __volatile__("lidt %0" : : "m"(idt_reg));
 }
