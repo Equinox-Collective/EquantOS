@@ -5,7 +5,7 @@
 
 typedef struct {
     uint32_t reserved0;
-    uint64_t rsp0;      // Стек ядра для Ring 0
+    uint64_t rsp0;      // Kernel stack pointer for Ring 0 transitions
     uint64_t rsp1;
     uint64_t rsp2;
     uint64_t reserved1;
@@ -24,7 +24,7 @@ typedef struct {
     uint8_t  base_high;
 } __attribute__((packed)) gdt_entry_t;
 
-// Для x86_64 TSS дескриптор занимает 16 байт
+// In x86_64, a TSS descriptor takes 16 bytes (2 slots)
 typedef struct {
     uint16_t limit_low;
     uint16_t base_low;
@@ -37,8 +37,8 @@ typedef struct {
 } __attribute__((packed)) gdt_tss_entry_t;
 
 typedef struct {
-    gdt_entry_t entries[5]; // Null, KCode, KData, UData, UCode
-    gdt_tss_entry_t tss;
+    gdt_entry_t entries[5]; // Null, Kernel Code, Kernel Data, User Data, User Code
+    gdt_tss_entry_t tss;    // Task State Segment descriptor
 } __attribute__((packed)) gdt_table_t;
 
 typedef struct {
@@ -46,7 +46,7 @@ typedef struct {
     uint64_t base;
 } __attribute__((packed)) gdt_ptr_t;
 
-void init_gdt();
+void init_gdt(void);
 void gdt_set_tss_stack(uint64_t stack);
 
-#endif
+#endif // GDT_H

@@ -1,33 +1,67 @@
 #include "panic.h"
 #include "../../drivers/serial/serial.h"
+#include <string.h>
 
-// Forward declaration or global reference to framebuffer info if needed for visual panic screen
-extern void *kernel_fb_address;
-extern uint64_t kernel_fb_pitch;
-extern uint64_t kernel_fb_width;
-extern uint64_t kernel_fb_height;
-
-void __attribute__((noreturn)) kernel_panic(const char *file, int line, const char *message) {
-    // 1. Disable all CPU interrupts immediately
+void __attribute__((noreturn)) kernel_panic(cpu_state_t *state, const char *file, int line, const char *message) {
+    // 1. Instantly disable all CPU interrupts
     asm volatile ("cli");
 
-    // 2. Output structured error report to serial port COM1
+    // 2. Print header banner to serial port COM1
     serial_puts(COM1, "\n\n");
     serial_puts(COM1, "==================================================\n");
     serial_puts(COM1, "                 [EQUANTOS PANIC]                 \n");
     serial_puts(COM1, "==================================================\n");
-    serial_puts(COM1, "Reason : ");
-    serial_puts(COM1, message);
-    serial_puts(COM1, "\n");
-    serial_puts(COM1, "File   : ");
-    serial_puts(COM1, file);
-    serial_puts(COM1, "\n");
-    serial_puts(COM1, "Status : System halted safely. Kernel execution stopped.\n");
-    serial_puts(COM1, "==================================================\n");
 
-    // 3. Optional: Paint the entire screen red if framebuffer parameters are initialized
-    // (We will wire up global FB pointers in main.c so panic can use them)
-    
+    if (message) {
+        serial_puts(COM1, "Reason : ");
+        serial_puts(COM1, message);
+        serial_puts(COM1, "\n");
+    }
+
+    if (file) {
+        serial_puts(COM1, "File   : ");
+        serial_puts(COM1, file);
+        serial_puts(COM1, "\n");
+    }
+
+    // 3. If triggered by a CPU exception, dump registers and error codes
+    if (state != NULL) {
+        char buf[32];
+        serial_puts(COM1, "\n--- CPU EXCEPTION / INTERRUPT FRAME ---\n");
+
+        serial_puts(COM1, "Vector Int : 0x");
+        itoa_hex(state->int_no, buf);
+        serial_puts(COM1, buf);
+
+        serial_puts(COM1, " | Error Code : 0x");
+        itoa_hex(state->error_code, buf);
+        serial_puts(COM1, buf);
+        serial_puts(COM1, "\n");
+
+        serial_puts(COM1, "RIP        : 0x");
+        itoa_hex(state->rip, buf);
+        serial_puts(COM1, buf);
+
+        serial_puts(COM1, " | RSP        : 0x");
+        itoa_hex(state->user_rsp, buf);
+        serial_puts(COM1, buf);
+        serial_puts(COM1, "\n");
+
+        serial_puts(COM1, "RAX: 0x"); itoa_hex(state->rax, buf); serial_puts(COM1, buf);
+        serial_puts(COM1, " | RBX: 0x"); itoa_hex(state->rbx, buf); serial_puts(COM1, buf);
+        serial_puts(COM1, " | RCX: 0x"); itoa_hex(state->rcx, buf); serial_puts(COM1, buf);
+        serial_puts(COM1, " | RDX: 0x"); itoa_hex(state->rdx, buf); serial_puts(COM1, buf);
+        serial_puts(COM1, "\n");
+
+        serial_puts(COM1, "RSI: 0x"); itoa_hex(state->rsi, buf); serial_puts(COM1, buf);
+        serial_puts(COM1, " | RDI: 0x"); itoa_hex(state->rdi, buf); serial_puts(COM1, buf);
+        serial_puts(COM1, " | RBP: 0x"); itoa_hex(state->rbp, buf); serial_puts(COM1, buf);
+        serial_puts(COM1, "\n");
+    }
+
+    serial_puts(COM1, "==================================================\n");
+    serial_puts(COM1, "System halted safely. Kernel execution stopped.\n");
+
     // 4. Infinite safe halt loop
     for (;;) {
         asm volatile ("cli; hlt");

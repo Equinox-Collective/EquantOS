@@ -3,27 +3,24 @@
 
 #include <stdint.h>
 
-// Структура записи в IDT для 64-битного режима
+// IDT gate descriptor for 64-bit mode
 typedef struct {
-    uint16_t low_offset;    // 0-15 бит адреса обработчика
-    uint16_t sel;           // Сегментный селектор
-    uint8_t  ist;           // Interrupt Stack Table
-    uint8_t  flags;         // Флаги (P, DPL, S, Type)
-    uint16_t mid_offset;    // 16-31 бит адреса обработчика
-    uint32_t high_offset;   // 32-63 бит адреса обработчика
-    uint32_t reserved;      // Зарезервировано
+    uint16_t low_offset;    // Lower 16 bits of handler address
+    uint16_t sel;           // Kernel segment selector (0x08)
+    uint8_t  ist;           // Interrupt Stack Table offset
+    uint8_t  flags;         // Type and attributes (Present, DPL, Gate Type)
+    uint16_t mid_offset;    // Middle 16 bits of handler address
+    uint32_t high_offset;   // Upper 32 bits of handler address
+    uint32_t reserved;      // Reserved, must be zero
 } __attribute__((packed)) idt_gate_t;
 
-// Указатель на IDT
+// IDT register structure for LIDT instruction
 typedef struct {
     uint16_t limit;
     uint64_t base;
 } __attribute__((packed)) idt_register_t;
 
-// ВАЖНО: Добавлен третий аргумент uint16_t sel
 void set_idt_gate(int n, uint64_t handler, uint16_t sel);
-void init_idt();
-// on=1 -> trap gate (IF не гасится в сисколле), on=0 -> штатный interrupt gate.
-void idt_set_syscall_trap_gate(int on);
+void init_idt(void);
 
-#endif
+#endif // IDT_H
