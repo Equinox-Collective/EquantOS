@@ -2,7 +2,14 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "limine.h"
+#include "panic.h"
 #include "../../drivers/serial/serial.h"
+
+// Global framebuffer state variables for subsystem access (like Panic)
+void *kernel_fb_address = NULL;
+uint64_t kernel_fb_pitch = 0;
+uint64_t kernel_fb_width = 0;
+uint64_t kernel_fb_height = 0;
 
 // Set base revision using the official macro from limine.h
 __attribute__((used, section(".requests")))
@@ -20,20 +27,25 @@ void _start(void) {
     serial_init(COM1);
     serial_puts(COM1, "[KERNEL] EquantOS booting up successfully...\n");
 
-    // Check if Limine supports our requested base revision using official macro
+    // Check if Limine supports our requested base revision
     if (!LIMINE_BASE_REVISION_SUPPORTED(base_revision)) {
-        serial_puts(COM1, "[KERNEL PANIC] Limine base revision mismatch or unsupported bootloader!\n");
-        for (;;) { asm volatile ("cli; hlt"); }
+        PANIC("Unsupported Limine base revision!");
     }
     serial_puts(COM1, "[KERNEL] Base revision verified successfully by Limine.\n");
 
     // Verify if we got a valid framebuffer response
     if (framebuffer_request.response == NULL || framebuffer_request.response->framebuffer_count < 1) {
-        serial_puts(COM1, "[KERNEL PANIC] No graphic framebuffers provided by Limine!\n");
-        for (;;) { asm volatile ("cli; hlt"); }
+        PANIC("No graphic framebuffers provided by Limine!");
     }
 
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+    
+    // Save parameters globally
+    kernel_fb_address = fb->address;
+    kernel_fb_pitch = fb->pitch;
+    kernel_fb_width = fb->width;
+    kernel_fb_height = fb->height;
+
     serial_puts(COM1, "[KERNEL] Framebuffer acquired successfully. Painting screen...\n");
 
     // Draw a test color pattern to the screen (Magenta strip)
@@ -44,7 +56,10 @@ void _start(void) {
         }
     }
 
-    serial_puts(COM1, "[KERNEL] Initialization sequence completed cleanly. Halting.\n");
+    serial_puts(COM1, "[KERNEL] Initialization sequence completed cleanly.\n");
+
+    // --- TEST PANIC HANDLER (Uncomment to test panic screen/serial log) ---
+    // PANIC("Testing EquantOS panic subsystem handler!");
 
     // Main system idle loop
     for (;;) {
