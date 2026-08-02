@@ -1,5 +1,5 @@
 ~~Make OS even boot ; Serial Logs~~
-Panic handler
+Panic handler <
 Keyboard (PS/2)
 Heap, PMM, VMM, Scheduler
 RAMFS, VFS
