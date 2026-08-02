@@ -1,4 +1,5 @@
 #include "idt.h"
+#include "../../drivers/pic/pic.h"
 
 idt_gate_t idt[256];
 idt_register_t idt_reg;
@@ -18,18 +19,23 @@ void set_idt_gate(int n, uint64_t handler, uint16_t sel) {
 }
 
 void init_idt(void) {
+    // 1. Remap the 8259 PIC chips to avoid CPU exception vector collisions (IRQs -> 32-47)
+    pic_remap();
+
     idt_reg.limit = (uint16_t)(sizeof(idt_gate_t) * 256 - 1);
     idt_reg.base = (uint64_t)&idt;
 
-    uint16_t kcode_sel = 0x08;
+    uint16_t kcode_sel = 0x08; // Kernel code segment selector
 
+    // Populate CPU exception handlers (0 - 31)
     for (int i = 0; i < 32; i++) {
         set_idt_gate(i, isr_stub_table[i], kcode_sel); 
     }
 
-    // Hardware IRQs
-    set_idt_gate(32, (uint64_t)timer_handler, kcode_sel);    // IRQ0: PIT Timer
-    set_idt_gate(33, (uint64_t)keyboard_handler, kcode_sel); // IRQ1: PS/2 Keyboard
+    // Populate remapped hardware IRQs
+    set_idt_gate(32, (uint64_t)timer_handler, kcode_sel);    // IRQ0 -> Vector 32 (PIT Timer)
+    set_idt_gate(33, (uint64_t)keyboard_handler, kcode_sel); // IRQ1 -> Vector 33 (PS/2 Keyboard)
 
+    // Load IDT register into CPU
     __asm__ __volatile__("lidt %0" : : "m"(idt_reg));
 }
