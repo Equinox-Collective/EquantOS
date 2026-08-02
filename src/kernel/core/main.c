@@ -29,9 +29,9 @@ void _start(void) {
 
     // 2. Initialize CPU architecture tables (GDT & IDT)
     init_gdt();
-    serial_puts(COM1, "GDT INTED SO IDT FAULTY.\n");
+    serial_puts(COM1, "GDT INTED.\n");
     init_idt();
-    
+    serial_puts(COM1, "IDT INTED.\n");
 
     serial_puts(COM1, "[KERNEL] GDT and IDT initialized successfully.\n");
 

@@ -1,5 +1,5 @@
-// src/system/pic.c - УБЕДИСЬ, ЧТО ЭТОТ КОД АКТУАЛЕН!
-#include "io.h"
+#include "pic.h"
+#include "../../kernel/core/io.h"
 
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA    0x21
@@ -7,16 +7,8 @@
 #define PIC2_DATA    0xA1
 
 #define ICW1_ICW4	0x01
-#define ICW1_SINGLE	0x02
-#define ICW1_INTERVAL4	0x04
-#define ICW1_LEVEL	0x08
 #define ICW1_INIT	0x10
- 
 #define ICW4_8086	0x01
-#define ICW4_AUTO	0x02
-#define ICW4_BUF_SLAVE	0x08
-#define ICW4_BUF_MASTER	0x0C
-#define ICW4_SFNM	0x10
 
 void pic_remap() {
     // ICW1 - Начало инициализации
@@ -35,12 +27,7 @@ void pic_remap() {
     outb(PIC1_DATA, ICW4_8086); 
     outb(PIC2_DATA, ICW4_8086); 
 
-    // ЖЕСТКАЯ МАСКА (0 - разрешено, 1 - запрещено)
-    // Разрешаем: IRQ0 (Таймер), IRQ1 (Клава), IRQ2 (Каскад)
-    // В двоичном: 1111 1000 = 0xF8
-    outb(PIC1_DATA, 0xF8); 
-
-    // Разрешаем: IRQ12 (Мышь)
-    // В двоичном: 1110 1111 = 0xEF
-    outb(PIC2_DATA, 0xEF); 
+    // Разрешаем: IRQ0 (Таймер), IRQ1 (Клава)
+    outb(PIC1_DATA, 0xFC); 
+    outb(PIC2_DATA, 0xFF); 
 }

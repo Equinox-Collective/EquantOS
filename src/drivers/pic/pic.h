@@ -1,6 +1,12 @@
 #ifndef PIC_H
 #define PIC_H
 
-void pic_remap();
+#include <stdint.h>
 
-#endif
+/**
+ * @brief Remap 8259 PIC interrupts to avoid CPU exception vector collisions.
+ * Master IRQs -> 32-39, Slave IRQs -> 40-47.
+ */
+void pic_remap(void);
+
+#endif // PIC_H

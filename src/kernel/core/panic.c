@@ -2,6 +2,11 @@
 #include "../../drivers/serial/serial.h"
 #include <string.h>
 
+// Bridge for assembly exception stubs in interrupt.asm
+void __attribute__((noreturn)) panic_handler(cpu_state_t *state) {
+    kernel_panic(state, NULL, 0, "Unhandled CPU Exception");
+}
+
 void __attribute__((noreturn)) kernel_panic(cpu_state_t *state, const char *file, int line, const char *message) {
     // 1. Instantly disable all CPU interrupts
     asm volatile ("cli");
@@ -52,17 +57,11 @@ void __attribute__((noreturn)) kernel_panic(cpu_state_t *state, const char *file
         serial_puts(COM1, " | RCX: 0x"); itoa_hex(state->rcx, buf); serial_puts(COM1, buf);
         serial_puts(COM1, " | RDX: 0x"); itoa_hex(state->rdx, buf); serial_puts(COM1, buf);
         serial_puts(COM1, "\n");
-
-        serial_puts(COM1, "RSI: 0x"); itoa_hex(state->rsi, buf); serial_puts(COM1, buf);
-        serial_puts(COM1, " | RDI: 0x"); itoa_hex(state->rdi, buf); serial_puts(COM1, buf);
-        serial_puts(COM1, " | RBP: 0x"); itoa_hex(state->rbp, buf); serial_puts(COM1, buf);
-        serial_puts(COM1, "\n");
     }
 
     serial_puts(COM1, "==================================================\n");
     serial_puts(COM1, "System halted safely. Kernel execution stopped.\n");
 
-    // 4. Infinite safe halt loop
     for (;;) {
         asm volatile ("cli; hlt");
     }

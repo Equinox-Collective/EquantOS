@@ -1,5 +1,5 @@
 [bits 64]
-[extern kernel_panic]
+[extern panic_handler]
 [extern keyboard_callback]
 [extern timer_callback]
 
@@ -92,7 +92,7 @@ ISR_NOERRCODE 31
 exception_common:
     SAVE_REGS
     mov rdi, rsp
-    call kernel_panic
+    call panic_handler
 .halt_loop:
     cli
     hlt
