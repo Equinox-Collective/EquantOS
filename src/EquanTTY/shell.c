@@ -128,10 +128,10 @@ static void cmd_uptime(int argc, char **argv) {
 static void cmd_eqfetch(int argc, char **argv) {
     (void)argc; (void)argv;
     term_print("    _/_/_/_/   | Equant OS\n");
-    term_print("   _/             \n");
-    term_print("  _/_/_/        | v0.0.1 Alpha\n");
-    term_print(" _/\n");
-    term_print("    _/_/_/_/   | Nothing to see here for now.\n");
+    term_print("   _/          |  \n");
+    term_print("  _/_/_/       | v0.0.1 Alpha\n");
+    term_print(" _/            |  \n");
+    term_print("_/_/_/_/       | Nothing to see here for now.\n");
 }
 
 static void cmd_ver(int argc, char **argv) {

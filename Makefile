@@ -111,10 +111,15 @@ build/equantos.iso: build/kernel.elf limine.conf limine-bios-cd.bin limine-uefi-
 		--efi-boot boot/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		build/iso -o build/equantos.iso
+	@echo [BUILD] Cleaning up Limine binaries from project root...
+	@$(call RM,limine-bios-cd.bin)
+	@$(call RM,limine-bios.sys)
+	@$(call RM,limine-uefi-cd.bin)
+	@$(call RM,BOOTX64.EFI)
 	@echo [SUCCESS] EquantOS ISO created at build/equantos.iso!
 
 run: build/equantos.iso
-	qemu-system-x86_64 -cdrom build/equantos.iso -serial stdio -m 2G -d cpu_reset,guest_errors,int -D qemu_log.txt
+	qemu-system-x86_64 -cdrom build/equantos.iso -serial stdio -m 2G
 
 clean:
 	@$(call RMDIR,build)
