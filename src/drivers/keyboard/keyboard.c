@@ -55,6 +55,7 @@ void keyboard_push(uint8_t scancode) {
 }
 
 uint8_t keyboard_pop(void) {
+    
     if (key_head == key_tail) return 0;
     uint8_t sc = key_buffer[key_tail];
     key_tail = (key_tail + 1) % 128;
@@ -63,6 +64,7 @@ uint8_t keyboard_pop(void) {
 
 void keyboard_callback(void) {
     uint8_t scancode = inb(0x60);
+
 
     // 1. Handle extended scancode prefix
     if (scancode == 0xE0) {

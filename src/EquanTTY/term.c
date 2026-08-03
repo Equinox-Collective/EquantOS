@@ -101,13 +101,15 @@ void term_putchar(char c) {
             cursor_x -= GLYPH_W;
             for (size_t y = 0; y < GLYPH_H; y++) {
                 for (size_t x = 0; x < GLYPH_W; x++) {
-                    term_fb_address[(cursor_y + y) * term_pitch + (cursor_x + x)] = 0x00000000;
+                    size_t px = cursor_x + x;
+                    size_t py = cursor_y + y;
+                    // Strict bounds check prevents out-of-bounds kernel memory corruption
+                    if (px < term_width && py < term_height) {
+                        term_fb_address[py * term_pitch + px] = 0x00000000;
+                    }
                 }
             }
         }
-        // Note: only erases within the current visual line. Fine for
-        // now since command input can't wrap past the buffer before
-        // Enter is pressed with the current shell.
         return;
     }
 
@@ -115,6 +117,7 @@ void term_putchar(char c) {
         term_advance_line();
     }
 
+    // Render 8x8 bitmap glyph with strict bounds checking
     if ((unsigned char)c < 128) {
         const uint8_t *glyph = font8x8_basic[(unsigned char)c];
         for (size_t y = 0; y < GLYPH_H; y++) {
@@ -123,7 +126,9 @@ void term_putchar(char c) {
                 if (row & (1 << x)) {
                     size_t px = cursor_x + x;
                     size_t py = cursor_y + y;
-                    term_fb_address[py * term_pitch + px] = term_fg_color;
+                    if (px < term_width && py < term_height) {
+                        term_fb_address[py * term_pitch + px] = term_fg_color;
+                    }
                 }
             }
         }
