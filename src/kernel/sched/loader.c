@@ -13,22 +13,21 @@ extern uint64_t hhdm_offset;
 
 bool elf_load(void *elf_data, uint64_t size) {
     if (!elf_data || size < sizeof(Elf64_Ehdr)) {
-        printf("ELF Loader: Invalid ELF data pointer or size.\n");
+        printf("ELF Loader: Invalid ELF data pointer or size (size: %u bytes).\n", (unsigned int)size);
         return false;
     }
 
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
 
+    // DEBUG: Print actual bytes found at the start of the module
+    printf("ELF Debug: Size = %u bytes\n", (unsigned int)size);
+    printf("ELF Debug: Magic bytes found = %x %x %x %x (Expected: 7f 45 4c 46)\n", 
+           ehdr->e_ident[0], ehdr->e_ident[1], ehdr->e_ident[2], ehdr->e_ident[3]);
+
     // Verify ELF Magic bytes: 0x7F 'E' 'L' 'F'
     if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' ||
-        ehdr->e_ident[2] != 'F'  || ehdr->e_ident[3] != 'F') {
+        ehdr->e_ident[2] != 'L'  || ehdr->e_ident[3] != 'F') {
         printf("ELF Loader: Invalid ELF magic signature.\n");
-        return false;
-    }
-
-    // Verify 64-bit ELF
-    if (ehdr->e_ident[4] != 2) { // 2 = ELFCLASS64
-        printf("ELF Loader: Not a 64-bit ELF file.\n");
         return false;
     }
 

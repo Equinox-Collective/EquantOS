@@ -1,5 +1,7 @@
 // equantmemtest.c - Memory and Scheduler stress-test program for EquantOS
 
+#include <stdint.h>
+
 // External yield function (if linked or available via trap/syscall)
 extern void yield(void);
 

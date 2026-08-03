@@ -16,6 +16,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "memory.h"
+#include "loader.h"
 
 // Limine base revision request (revision 3)
 __attribute__((used, section(".requests")))
@@ -40,7 +41,7 @@ static volatile struct limine_hhdm_request hhdm_request = {
 
 __attribute__((used, section(".requests")))
 static volatile struct limine_module_request module_request = {
-    .id = { 0x3e7e279702be32af, 0xca1c4f3bd1280cee },
+    .id = { 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b, 0x3e7e279702be32af, 0xca1c4f3bd1280cee },
     .revision = 0,
     .response = NULL
 };
@@ -104,8 +105,9 @@ void _start(void) {
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     term_init(fb->address, fb->width, fb->height, fb->pitch);
 
-    if (module_request.response != NULL && module_request.response->file_count > 0) {
-        struct limine_file *mod = module_request.response->files[0];
+    // 7. Load and spawn equantmemtest ELF module if present
+    if (module_request.response != NULL && module_request.response->module_count > 0) {
+        struct limine_file *mod = module_request.response->modules[0];
         serial_puts(COM1, "[KERNEL] Loading boot module: ");
         serial_puts(COM1, mod->path);
         serial_puts(COM1, "\n");
@@ -115,6 +117,8 @@ void _start(void) {
         } else {
             serial_puts(COM1, "[KERNEL PANIC] Failed to load equantmemtest ELF!\n");
         }
+    } else {
+        serial_puts(COM1, "[KERNEL] No boot modules found by Limine.\n");
     }
 
     // 7. Keyboard & Interrupts
