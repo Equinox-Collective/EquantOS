@@ -56,11 +56,13 @@ void *kmalloc(size_t size) {
   if (size == 0 || !heap_start)
     return NULL;
 
+  // Ensure total requested size + header is strictly aligned to HEAP_ALIGNMENT (16 bytes)
   size_t total_needed = align_size(size) + sizeof(block_header_t);
+  total_needed = align_size(total_needed); // Strict block alignment
+
   block_header_t *current = heap_start;
 
   while (current) {
-    // ПРОВЕРКА ЦЕЛОСТНОСТИ: если магия сломана - кто-то затер память
     if (current->magic != HEAP_MAGIC_FREE &&
         current->magic != HEAP_MAGIC_ACTIVE) {
       printf("\n!!! KERNEL PANIC: HEAP CORRUPTION DETECTED AT %x !!!\n",
@@ -69,7 +71,7 @@ void *kmalloc(size_t size) {
     }
 
     if (current->free && current->size >= total_needed) {
-      // Split блока
+      // Split block if remaining space is large enough
       if (current->size >= total_needed + sizeof(block_header_t) + 32) {
         block_header_t *next_node =
             (block_header_t *)((uint8_t *)current + total_needed);
@@ -87,7 +89,9 @@ void *kmalloc(size_t size) {
       current->magic = HEAP_MAGIC_ACTIVE;
       used_memory += current->size;
 
-      return (void *)((uint8_t *)current + sizeof(block_header_t));
+      // Return data payload strictly aligned to 16 bytes
+      void *ptr = (void *)((uint8_t *)current + sizeof(block_header_t));
+      return ptr;
     }
     current = current->next;
   }

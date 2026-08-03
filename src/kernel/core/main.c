@@ -10,6 +10,12 @@
 #include "gdt.h"
 #include "idt.h"
 #include "stdio.h"
+#include "task.h"
+#include "sched.h"
+#include "keyboard.h"
+#include "vmm.h"
+#include "pmm.h"
+#include "memory.h"
 
 // Limine base revision request (revision 3)
 __attribute__((used, section(".requests")))
@@ -25,65 +31,80 @@ static volatile struct limine_framebuffer_request framebuffer_request = {
 // Global Higher-Half Direct Map offset provided by Limine
 uint64_t hhdm_offset = 0;
 
-// Limine HHDM (Higher-Half Direct Map) request
+// Limine HHDM (Higher-Half Direct Map) request using official macro from limine.h
 __attribute__((used, section(".requests")))
 static volatile struct limine_hhdm_request hhdm_request = {
-    .id = { 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b, 0x48dcf1cb8ad2b852, 0x63984e959a98244b },
-    .revision = 0,
-    .response = NULL
+    .id = LIMINE_HHDM_REQUEST_ID,
+    .revision = 0
 };
 
+static void init_sse(void) {
+    uint64_t cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1 << 2); // Clear CR0.EM (Emulation bit)
+    cr0 |= (1 << 1);  // Set CR0.MP (Monitor Coprocessor bit)
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1 << 9);  // Set CR4.OSFXSR (Enable FXSAVE/FXRSTOR for SSE)
+    cr4 |= (1 << 10); // Set CR4.OSXMMEXCPT (Enable unmasked SIMD exceptions)
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+}
+
 void _start(void) {
-    // 1. Initialize serial port for early core logging
+    // 1. Initialize serial port & CPU descriptors
     serial_init(COM1);
-    serial_puts(COM1, "[KERNEL] EquantOS kernel execution started.\n");
-
-    // 2. Initialize CPU architecture tables (GDT & IDT)
+    init_sse();
     init_gdt();
-    serial_puts(COM1, "GDT INTED.\n");
     init_idt();
-    serial_puts(COM1, "IDT INTED.\n");
-
-    serial_puts(COM1, "[KERNEL] GDT and IDT initialized successfully.\n");
-
-    // 3. Initialize Programmable Interval Timer (PIT) at 100 Hz
     init_timer(100);
-    serial_puts(COM1, "[KERNEL] PIT Timer initialized at 100 Hz.\n");
 
-    // 4. Verify Limine base revision compliance
-    if (!LIMINE_BASE_REVISION_SUPPORTED(base_revision)) {
-        PANIC("Unsupported Limine base revision!");
+    // 2. Safely obtain HHDM offset from Limine
+    if (hhdm_request.response == NULL) {
+        PANIC("Limine HHDM response is NULL!");
+    }
+    hhdm_offset = hhdm_request.response->offset;
+
+    if (hhdm_offset == 0) {
+        PANIC("HHDM offset is zero!");
     }
 
-    // 5. Verify graphical framebuffer availability
+    // 3. Initialize Memory Management (PMM & VMM)
+    pmm_init();
+    vmm_init();
+    serial_puts(COM1, "[KERNEL] PMM and VMM Initialized successfully.\n");
+
+    // 4. Initialize Kernel Heap (allocate a safe 1 MB continuous block to avoid fragmentation)
+    void *heap_phys = pmm_alloc_continuous(256); // 256 pages * 4KB = 1 MB
+    if (heap_phys == NULL) {
+        PANIC("Failed to allocate physical memory for kernel heap!");
+    }
+    
+    uint64_t heap_virt = VIRT(heap_phys);
+    init_heap(heap_virt, 256 * 4096);
+    serial_puts(COM1, "[KERNEL] Kernel Heap Initialized (1 MB).\n");
+
+    // 5. Initialize Tasking & Scheduler
+    task_init();
+    sched_init(current_task);
+    serial_puts(COM1, "[KERNEL] Tasking & Scheduler Initialized.\n");
+
+    // 6. Framebuffer & Terminal
     if (framebuffer_request.response == NULL || framebuffer_request.response->framebuffer_count < 1) {
         PANIC("No graphic framebuffers provided by Limine!");
     }
-
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
-
-    // 6. Initialize graphical terminal over Limine framebuffer
-    term_init(fb->address, fb->width, fb->height, fb->pitch);
-    serial_puts(COM1, "[KERNEL] Graphical terminal initialized.\n");
-
-    // 7. Test syslibc printf output on both screen and serial
-    printf("booted\n");
-    printf("Framebuffer  : %ux%u @ %u bpp\n", (unsigned int)fb->width, (unsigned int)fb->height, fb->bpp);
-
     term_init(fb->address, fb->width, fb->height, fb->pitch);
 
+    // 7. Keyboard & Interrupts
     keyboard_init();
-    serial_puts(COM1, "[KERNEL] Keyboard initialized.\n");
-    
-    // Enable global CPU interrupts safely
     asm volatile ("sti");
 
-    // Print welcome prompt
-    term_print("Welcome\n");
-    term_print("Type 'eqfetch' or 'uptime'.\n\n");
+    // 8. Shell welcome & idle loop
+    term_print("Welcome to EquantOS!\n\n");
     term_print("EquantOS> ");
 
-    // 9. Main system idle loop
     for (;;) {
         term_poll_keyboard();
         asm volatile ("hlt");

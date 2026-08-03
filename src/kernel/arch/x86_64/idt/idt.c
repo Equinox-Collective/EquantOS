@@ -7,6 +7,7 @@ idt_register_t idt_reg;
 extern uint64_t isr_stub_table[];
 extern void keyboard_handler(void);
 extern void timer_handler(void);
+extern void irq0_handler_asm(void);
 
 // Temporary stubs for syscalls until we implement userland ring 3
 static void dummy_syscall_handler(void) {
@@ -39,8 +40,8 @@ void init_idt() {
 
   // Hardware IRQs
   set_idt_gate(32, (uint64_t)timer_handler, sel);    // IRQ0: PIT Timer
-  set_idt_gate(33, (uint64_t)keyboard_handler, sel); // IRQ1: PS/2 Keyboard
-  
+  set_idt_gate(32, (uint64_t)irq0_handler_asm, sel); // IRQ0 -> Context Switcher & PIT Timer
+  set_idt_gate(33, (uint64_t)keyboard_handler, sel);
   // Syscall stubs (0x80 and 0x81)
   set_idt_gate(0x80, (uint64_t)dummy_syscall_handler, sel);
   idt[0x80].flags = 0xEF; // Trap gate

@@ -1,6 +1,7 @@
 #include "pmm.h"
 #include "../core/limine.h"
 #include "string.h"
+#include "../core/panic.h"
 
 #include <stdint.h>
 
@@ -22,49 +23,76 @@ uint64_t free_memory = 0;
 static uint64_t last_page = 0;
 uint64_t pmm_used_pages = 0;
 
+__attribute__((used, section(".requests")))
 static volatile struct limine_memmap_request memmap_request = {
-    .id = LIMINE_MEMMAP_REQUEST_ID, .revision = 0};
+    .id = { 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b, 0x67cf3d9d378a806f, 0xe304acdfc50c3c62 },
+    .revision = 0,
+    .response = NULL
+};
 
 // =========================================================================
 //                        ИНИЦИАЛИЗАЦИЯ PMM
 // =========================================================================
 
 void pmm_init() {
-  struct limine_memmap_response *map = memmap_request.response;
+  // Safety check: ensure Limine actually populated the memory map response
+  if (memmap_request.response == NULL) {
+      PANIC("PMM: Limine memory map request response is NULL!");
+  }
 
+  struct limine_memmap_response *map = memmap_request.response;
   uint64_t max_addr = 0;
 
-  // 1. Ищем максимальный физический адрес
+  printf("PMM: Scanning memmap entries (count: %u)...\n", (unsigned int)map->entry_count);
+
+  // 1. Find the highest physical address
   for (uint64_t i = 0; i < map->entry_count; i++) {
     if (map->entries[i]->type == LIMINE_MEMMAP_USABLE) {
       uint64_t end = map->entries[i]->base + map->entries[i]->length;
+      printf("PMM: Usable region -> Base: %x, Length: %x, End: %x\n", 
+             map->entries[i]->base, map->entries[i]->length, end);
       if (end > max_addr)
         max_addr = end;
     }
   }
 
+  printf("PMM: Max physical address found: %x\n", max_addr);
+
+  if (max_addr == 0) {
+      PANIC("PMM: Max physical address is 0! No usable memory found.");
+  }
+
   total_pages = max_addr / PAGE_SIZE;
   uint64_t bitmap_size = (total_pages + 7) / 8;
-  // Выравниваем размер битмапа вверх до целой страницы!
   uint64_t bitmap_pages = (bitmap_size + PAGE_SIZE - 1) / PAGE_SIZE;
+  
+  // Safe calculation step-by-step
   uint64_t bitmap_size_aligned = bitmap_pages * PAGE_SIZE;
 
-  // 2. Ищем место под битмап
+  printf("PMM: Total pages: %u, Bitmap size aligned: %u bytes\n", 
+         (unsigned int)total_pages, (unsigned int)bitmap_size_aligned);
+
+  // 2. Find a place to put the bitmap
+  bitmap = NULL;
   for (uint64_t i = 0; i < map->entry_count; i++) {
     if (map->entries[i]->type == LIMINE_MEMMAP_USABLE &&
         map->entries[i]->length >= bitmap_size_aligned) {
       bitmap = (uint8_t *)VIRT(map->entries[i]->base);
-      memset(bitmap, 0xFF, bitmap_size_aligned); // Сначала всё занято
+      memset(bitmap, 0xFF, bitmap_size_aligned); // Mark everything as used initially
 
-      // Смещаем базу региона, чтобы PMM не считал эти страницы свободными
       map->entries[i]->base += bitmap_size_aligned;
       map->entries[i]->length -= bitmap_size_aligned;
+      printf("PMM: Bitmap placed at virtual address: %x\n", (uint64_t)bitmap);
       break;
     }
   }
 
-  // 3. Сканируем карту памяти Limine и помечаем реально доступные страницы как
-  // 0 (свободно)
+  // CRITICAL SAFETY CHECK: If bitmap is still NULL, we can't track physical memory!
+  if (bitmap == NULL) {
+      PANIC("PMM: Failed to find a continuous memory block for the allocation bitmap!");
+  }
+
+  // 3. Scan Limine memory map and mark usable pages as 0 (free)
   for (uint64_t i = 0; i < map->entry_count; i++) {
     if (map->entries[i]->type == LIMINE_MEMMAP_USABLE) {
       for (uint64_t addr = map->entries[i]->base;
@@ -72,24 +100,30 @@ void pmm_init() {
            addr += PAGE_SIZE) {
         uint64_t page = addr / PAGE_SIZE;
         if (page == 0)
-          continue; // НИКОГДА не освобождаем 0-ю страницу
+          continue; // NEVER free page 0
         BITMAP_CLEAR(page);
         free_memory += PAGE_SIZE;
       }
     }
   }
 
-  // Помечаем 1-й мегабайт (включая 0-ю страницу) как занятый железно
+  // Mark first megabyte as permanently used
   for (uint32_t i = 0; i < 256; i++) {
-    BITMAP_SET(i);
+    if (i < total_pages) {
+        BITMAP_SET(i);
+    }
   }
 
-  // Инициализируем счетчик в самом конце
+  // Safe manual iteration without aggressive compiler loop-unrolling or 128-bit math
   pmm_used_pages = 0;
-  for (uint64_t i = 0; i < total_pages; i++) {
-    if (BITMAP_TEST(i))
+  uint64_t limit = total_pages;
+  for (volatile uint64_t i = 0; i < limit; i++) {
+    if (BITMAP_TEST(i)) {
       pmm_used_pages++;
+    }
   }
+  
+  printf("PMM: Initialization complete. Free memory: %u MB\n", (unsigned int)(free_memory / (1024 * 1024)));
 }
 
 // =========================================================================
