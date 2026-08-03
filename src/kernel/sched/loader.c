@@ -39,6 +39,8 @@ bool elf_load(void *elf_data, uint64_t size) {
         printf("ELF Loader: Failed to create address space.\n");
         return false;
     }
+    
+    task_init_fpu(task);
 
     // 2. Iterate through Program Headers and load PT_LOAD segments
     Elf64_Phdr *phdr = (Elf64_Phdr *)((uint8_t * )elf_data + ehdr->e_phoff);
@@ -68,7 +70,7 @@ bool elf_load(void *elf_data, uint64_t size) {
                 uint64_t phys_page = (uint64_t)phys_pages + (j * PAGE_SIZE);
                 
                 // Map with Present, Writable, and User flags
-                vmm_map(new_pml4, virt_page, phys_page, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+                vmm_map(new_pml4, virt_page, phys_page, PTE_PRESENT | PTE_WRITABLE);
             }
 
             // Copy segment data from file buffer into newly allocated virtual space
@@ -90,7 +92,7 @@ bool elf_load(void *elf_data, uint64_t size) {
     for (uint32_t j = 0; j < stack_pages; j++) {
         vmm_map(new_pml4, user_stack_bottom + (j * PAGE_SIZE), 
                 (uint64_t)stack_phys + (j * PAGE_SIZE), 
-                PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+                PTE_PRESENT | PTE_WRITABLE);
     }
 
     // 4. Create process and task structures
@@ -102,6 +104,12 @@ bool elf_load(void *elf_data, uint64_t size) {
 
     task_t *task = (task_t *)kmalloc(sizeof(task_t));
     memset(task, 0, sizeof(task_t));
+
+    uint16_t *fpu_cw = (uint16_t *)task_fpu_area(task);
+    fpu_cw[0] = 0x037F; // FPU Control Word default
+    fpu_cw[2] = 0xFFFF; // FPU Tag Word
+    uint32_t *fpu_mxcsr = (uint32_t *)((uint8_t *)task_fpu_area(task) + 24);
+    *fpu_mxcsr = 0x1F80; // MXCSR default
     
     task->id = proc->pid;
     task->state = TASK_STATE_RUNNABLE;

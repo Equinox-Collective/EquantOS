@@ -9,10 +9,24 @@ task_t *current_task = NULL;
 static task_t *task_list = NULL;
 static uint64_t next_pid = 1;
 
+void task_init_fpu(task_t *task) {
+    memset(task->fpu_state, 0, sizeof(task->fpu_state));
+    uint16_t *fpu_cw = (uint16_t *)task_fpu_area(task);
+    fpu_cw[0] = 0x037F; // Default FPU Control Word
+    fpu_cw[2] = 0xFFFF; // Default FPU Tag Word
+    uint32_t *fpu_mxcsr = (uint32_t *)((uint8_t *)task_fpu_area(task) + 24);
+    *fpu_mxcsr = 0x1F80; // Default MXCSR state for SSE
+}
+
 void task_init(void) {
     current_task = (task_t *)kmalloc(sizeof(task_t));
     memset(current_task, 0, sizeof(task_t));
-    
+
+    uint16_t *fpu_cw = (uint16_t *)task_fpu_area(current_task);
+    fpu_cw[0] = 0x037F;
+    uint32_t *fpu_mxcsr = (uint32_t *)((uint8_t *)task_fpu_area(current_task) + 24);
+    *fpu_mxcsr = 0x1F80;
+    task_init_fpu(current_task);
     current_task->id = next_pid++;
     current_task->running = true;
     current_task->state = TASK_STATE_RUNNABLE;

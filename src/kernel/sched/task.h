@@ -48,6 +48,7 @@ extern task_t *current_task;
 
 void task_init(void);
 void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2);
+void task_init_fpu(task_t *task);
 void yield(void);
 
 #endif // TASK_H
