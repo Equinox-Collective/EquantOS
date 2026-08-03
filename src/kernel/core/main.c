@@ -56,16 +56,21 @@ void _start(void) {
     serial_puts(COM1, "[KERNEL] Graphical terminal initialized.\n");
 
     // 7. Test syslibc printf output on both screen and serial
-    printf("========================================\n");
-    printf("         EQUANTOS KERNEL BOOTED         \n");
-    printf("========================================\n");
-    printf("Architecture : x86_64 Higher-Half\n");
+    printf("booted\n");
     printf("Framebuffer  : %ux%u @ %u bpp\n", (unsigned int)fb->width, (unsigned int)fb->height, fb->bpp);
-    printf("Status       : All core systems online.\n");
 
-    // 8. Enable global CPU interrupts safely
+    term_init(fb->address, fb->width, fb->height, fb->pitch);
+
+    keyboard_init();
+    serial_puts(COM1, "[KERNEL] Keyboard initialized.\n");
+    
+    // Enable global CPU interrupts safely
     asm volatile ("sti");
-    serial_puts(COM1, "[KERNEL] CPU interrupts enabled. Entering idle loop.\n");
+
+    // Print welcome prompt
+    term_print("Welcome\n");
+    term_print("Type 'eqfetch' or 'uptime'.\n\n");
+    term_print("EquantOS> ");
 
     // 9. Main system idle loop
     for (;;) {

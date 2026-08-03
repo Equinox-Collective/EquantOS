@@ -90,3 +90,10 @@ void keyboard_callback(void) {
     // 3. Push raw scancode into the circular buffer
     keyboard_push(scancode);
 }
+
+void keyboard_init(void) {
+    // Flush any leftover bytes in the PS/2 output buffer
+    while (inb(0x64) & 0x01) {
+        inb(0x60);
+    }
+}
