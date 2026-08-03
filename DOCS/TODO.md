@@ -1,7 +1,8 @@
 ~~Make OS even boot ; Serial Logs~~
 ~~Panic handler~~
 ~~Keyboard (PS/2) + Basic TERM commands in other file so it wont mess up the code of the terminal itself~~
-Heap, PMM, VMM, Scheduler <
+~~Heap, PMM, VMM~~
+Better Scheduler + equantmemtest <
 RAMFS, VFS
 SATA, MBR
 FAT32
