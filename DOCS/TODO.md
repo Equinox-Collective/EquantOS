@@ -8,7 +8,7 @@ FAT32
 EXT2/3/4
 NVME, GPT
 Ring 3 (For SDK, Userland)
-Musl, Busybox, LABI (POSIX syscalls)
+Musl/mlibc, Busybox, LABI (POSIX syscalls)
 Bash
 USB
 Installer
