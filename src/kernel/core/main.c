@@ -22,6 +22,17 @@ static volatile struct limine_framebuffer_request framebuffer_request = {
     .revision = 0
 };
 
+// Global Higher-Half Direct Map offset provided by Limine
+uint64_t hhdm_offset = 0;
+
+// Limine HHDM (Higher-Half Direct Map) request
+__attribute__((used, section(".requests")))
+static volatile struct limine_hhdm_request hhdm_request = {
+    .id = { 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b, 0x48dcf1cb8ad2b852, 0x63984e959a98244b },
+    .revision = 0,
+    .response = NULL
+};
+
 void _start(void) {
     // 1. Initialize serial port for early core logging
     serial_init(COM1);
