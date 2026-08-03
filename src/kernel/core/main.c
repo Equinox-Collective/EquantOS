@@ -38,6 +38,13 @@ static volatile struct limine_hhdm_request hhdm_request = {
     .revision = 0
 };
 
+__attribute__((used, section(".requests")))
+static volatile struct limine_module_request module_request = {
+    .id = { 0x3e7e279702be32af, 0xca1c4f3bd1280cee },
+    .revision = 0,
+    .response = NULL
+};
+
 static void init_sse(void) {
     uint64_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -96,6 +103,19 @@ void _start(void) {
     }
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     term_init(fb->address, fb->width, fb->height, fb->pitch);
+
+    if (module_request.response != NULL && module_request.response->file_count > 0) {
+        struct limine_file *mod = module_request.response->files[0];
+        serial_puts(COM1, "[KERNEL] Loading boot module: ");
+        serial_puts(COM1, mod->path);
+        serial_puts(COM1, "\n");
+
+        if (elf_load(mod->address, mod->size)) {
+            serial_puts(COM1, "[KERNEL] equantmemtest loaded and spawned successfully!\n");
+        } else {
+            serial_puts(COM1, "[KERNEL PANIC] Failed to load equantmemtest ELF!\n");
+        }
+    }
 
     // 7. Keyboard & Interrupts
     keyboard_init();
