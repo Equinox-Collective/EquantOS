@@ -74,6 +74,7 @@ void _start(void) {
 
     // 9. Main system idle loop
     for (;;) {
+        term_poll_keyboard();
         asm volatile ("hlt");
     }
 }
