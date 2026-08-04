@@ -156,6 +156,11 @@ uint64_t sched_switch(uint64_t current_rsp) {
     // Берём первую задачу из очереди готовых к исполнению
     current_task = run_queue_head;
     
+    // DEBUG: print task switch info
+    printf("SCHED: Switching to Task ID %u (RSP: %x, CR3: %x)\n", 
+            (unsigned int)current_task->id, current_task->rsp, 
+            current_task->process ? current_task->process->cr3 : kernel_cr3);
+
     // Легковесное сохранение/восстановление FPU/SSE-контекста
     if (current_task != prev_task) {
         __asm__ volatile("fxsave64 (%0)"  :: "r"(task_fpu_area(prev_task))    : "memory");
