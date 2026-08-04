@@ -40,7 +40,6 @@ bool elf_load(void *elf_data, uint64_t size) {
         return false;
     }
     
-    task_init_fpu(task);
 
     // 2. Iterate through Program Headers and load PT_LOAD segments
     Elf64_Phdr *phdr = (Elf64_Phdr *)((uint8_t * )elf_data + ehdr->e_phoff);
@@ -104,6 +103,8 @@ bool elf_load(void *elf_data, uint64_t size) {
 
     task_t *task = (task_t *)kmalloc(sizeof(task_t));
     memset(task, 0, sizeof(task_t));
+
+    task_init_fpu(task);
 
     uint16_t *fpu_cw = (uint16_t *)task_fpu_area(task);
     fpu_cw[0] = 0x037F; // FPU Control Word default
