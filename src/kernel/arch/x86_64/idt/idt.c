@@ -1,6 +1,7 @@
 // idt.c
 #include "idt.h"
 #include "../../drivers/pic/pic.h"
+#include "syscall.h"
 
 idt_gate_t idt[256];
 idt_register_t idt_reg;
@@ -45,9 +46,9 @@ void init_idt(void) {
 
     set_idt_gate(33, (uint64_t)keyboard_handler, sel);
 
-    // Syscall stubs (0x80 and 0x81)
-    set_idt_gate(0x80, (uint64_t)dummy_syscall_handler, sel);
-    idt[0x80].flags = 0xEF; // Trap gate, DPL 3
+    // Syscall stub (0x80) for Linux/POSIX ABI & EquantOS API
+    set_idt_gate(0x80, (uint64_t)syscall_interrupt_asm, sel);
+    idt[0x80].flags = 0xEF;
 
     set_idt_gate(0x81, (uint64_t)dummy_syscall_handler, sel);
     idt[0x81].flags = 0xEF; // Trap gate, DPL 3

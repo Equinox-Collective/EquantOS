@@ -10,6 +10,12 @@
 #include "panic.h"
 #include "string.h"
 
+// External kernel memory metrics
+extern uint64_t pmm_used_pages;
+extern size_t used_memory;
+extern uint64_t free_memory;
+extern uint64_t total_pages;
+
 // Register state pushed by syscall_interrupt_asm in interrupt.asm
 typedef struct {
     uint64_t rax;
@@ -39,7 +45,6 @@ static int64_t sys_exit_handler(int code) {
     serial_puts(COM1, buf);
     serial_puts(COM1, "\n");
 
-    // Mark task as zombie or terminate
     current_task->state = TASK_STATE_ZOMBIE;
     current_task->running = false;
     sched_yield();
@@ -69,7 +74,6 @@ static int64_t sys_brk_handler(uint64_t new_brk) {
         return new_brk;
     }
 
-    // Expand heap/brk in user address space
     uint64_t page_table = current_task->process->cr3;
     page_table_t *pml4 = (page_table_t *)VIRT(page_table);
 
