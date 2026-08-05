@@ -29,8 +29,8 @@ static int64_t sys_write_handler(int fd, const char *buf, size_t count) {
         // Print to serial and terminal safely
         for (size_t i = 0; i < count; i++) {
             char c = buf[i];
-            serial_putc(COM1, c);
             char str[2] = {c, '\0'};
+            serial_puts(COM1, str);
             term_print(str);
         }
         return count;

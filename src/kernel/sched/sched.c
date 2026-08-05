@@ -191,12 +191,3 @@ void sched_yield(void) {
 uint64_t schedule(uint64_t current_rsp) {
     return sched_switch(current_rsp);
 }
-
-// Temporary stubs for system calls until we implement Userland / POSIX syscalls
-void syscall_handler(void *regs) {
-    (void)regs;
-}
-
-void linux_syscall_handler(void *regs) {
-    (void)regs;
-}
