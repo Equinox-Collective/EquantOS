@@ -24,6 +24,10 @@ typedef struct {
     uint64_t r10, r11, r12, r13, r14, r15;
 } __attribute__((packed)) syscall_regs_t;
 
+void linux_syscall_handler(void *regs_ptr) {
+    syscall_handler(regs_ptr);
+}
+
 static int64_t sys_write_handler(int fd, const char *buf, size_t count) {
     if (fd == 1 || fd == 2) { // stdout / stderr
         // Print to serial and terminal safely
