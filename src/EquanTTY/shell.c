@@ -1,11 +1,18 @@
+// shell.c - Interactive Shell with VFS, RAMFS and Memory diagnostics
 #include "shell.h"
 #include "term.h"
 #include "string.h"
 #include "timer.h"
+#include "../fs/vfs.h"
+#include "../mm/pmm.h"
+#include "../mm/memory.h"
 #include <stdint.h>
 #include <stddef.h>
 
-#define SHELL_PROMPT_COLOR 0x0000FF00 // green
+extern size_t used_memory;
+extern uint64_t free_memory;
+
+#define SHELL_PROMPT_COLOR 0x0000FF00 // Green
 #define MAX_ARGS 8
 #define LINE_BUF_SIZE 256
 
@@ -23,21 +30,25 @@ static void cmd_echo(int argc, char **argv);
 static void cmd_uptime(int argc, char **argv);
 static void cmd_eqfetch(int argc, char **argv);
 static void cmd_ver(int argc, char **argv);
+static void cmd_ls(int argc, char **argv);
+static void cmd_cat(int argc, char **argv);
+static void cmd_mem(int argc, char **argv);
 
-// Add new builtins here — nothing else needs to change to register one.
+// Registered shell builtins
 static const shell_command_t commands[] = {
-    { "help",    "List available commands",        cmd_help },
+    { "help",    "List available commands",         cmd_help },
     { "clear",   "Clear the terminal screen",       cmd_clear },
     { "echo",    "Print text back to the terminal", cmd_echo },
     { "uptime",  "Show time since boot",            cmd_uptime },
     { "eqfetch", "Show the system info banner",     cmd_eqfetch },
     { "ver",     "Show OS version",                 cmd_ver },
+    { "ls",      "List files in VFS root directory", cmd_ls },
+    { "cat",     "Display file contents",           cmd_cat },
+    { "mem",     "Show RAM and heap usage stats",   cmd_mem },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
 
-// Splits line in place on spaces using the libc strtok. Returns argc
-// and fills argv with pointers into line (no allocation/copying).
 static int tokenize(char *line, char **argv, int max_args) {
     int argc = 0;
     char *token = strtok(line, " ");
@@ -130,11 +141,108 @@ static void cmd_eqfetch(int argc, char **argv) {
     term_print("    _/_/_/_/   | Equant OS\n");
     term_print("   _/          |  \n");
     term_print("  _/_/_/       | v0.0.1 Alpha\n");
-    term_print(" _/            |  \n");
-    term_print("_/_/_/_/       | Nothing to see here for now.\n");
+    term_print(" _/            | VFS & RAMFS Active\n");
+    term_print("_/_/_/_/       | Multi-tasking Ring 3\n");
 }
 
 static void cmd_ver(int argc, char **argv) {
     (void)argc; (void)argv;
-    term_print("Equant OS v0.0.1 Alpha\n");
+    term_print("Equant OS v0.0.1 Alpha (x86_64)\n");
+}
+
+// VFS Command: List files in root directory
+static void cmd_ls(int argc, char **argv) {
+    (void)argc; (void)argv;
+    vfs_node_t *dir = vfs_open("/", 0);
+    if (!dir) {
+        term_print("Error: cannot open root directory\n");
+        return;
+    }
+    term_print("Directory /:\n");
+    uint32_t index = 0;
+    vfs_node_t *child;
+    while ((child = vfs_readdir(dir, index++)) != NULL) {
+        term_print("  ");
+        if (child->flags & FS_DIRECTORY) {
+            term_print("[DIR]  ");
+        } else {
+            term_print("[FILE] ");
+        }
+        term_print(child->name);
+        
+        char size_buf[32];
+        term_print(" (size: ");
+        itoa((int64_t)child->length, 10, size_buf);
+        term_print(size_buf);
+        term_print(" bytes)\n");
+    }
+}
+
+// VFS Command: Display file contents
+static void cmd_cat(int argc, char **argv) {
+    if (argc < 2) {
+        term_print("Usage: cat <filename>\n");
+        return;
+    }
+
+    // Prepend leading slash if omitted
+    char path[128];
+    if (argv[1][0] != '/') {
+        path[0] = '/';
+        strcpy(path + 1, argv[1]);
+    } else {
+        strcpy(path, argv[1]);
+    }
+
+    vfs_node_t *file = vfs_open(path, 0);
+    if (!file) {
+        term_print("File not found: ");
+        term_print(path);
+        term_print("\n");
+        return;
+    }
+
+    if (file->flags & FS_DIRECTORY) {
+        term_print("Error: '");
+        term_print(path);
+        term_print("' is a directory\n");
+        return;
+    }
+
+    uint8_t buf[256];
+    uint64_t offset = 0;
+    int64_t bytes_read;
+    while ((bytes_read = vfs_read(file, offset, sizeof(buf) - 1, buf)) > 0) {
+        buf[bytes_read] = '\0';
+        term_print((char *)buf);
+        offset += bytes_read;
+    }
+    term_print("\n");
+}
+
+// Memory Command: Show PMM and Heap stats
+static void cmd_mem(int argc, char **argv) {
+    (void)argc; (void)argv;
+    uint64_t total_bytes = pmm_get_total_memory();
+    uint64_t free_bytes = free_memory;
+    uint64_t used_bytes = pmm_get_used_memory();
+
+    char buf[32];
+    term_print("=== EquantOS Memory Statistics ===\n");
+    
+    term_print("Total RAM    : "); 
+    itoa((int64_t)(total_bytes / (1024 * 1024)), 10, buf); 
+    term_print(buf); term_print(" MB\n");
+
+    term_print("Free RAM     : "); 
+    itoa((int64_t)(free_bytes / (1024 * 1024)), 10, buf); 
+    term_print(buf); term_print(" MB\n");
+
+    term_print("Used RAM     : "); 
+    itoa((int64_t)(used_bytes / (1024 * 1024)), 10, buf); 
+    term_print(buf); term_print(" MB\n");
+
+    term_print("Kernel Heap  : "); 
+    itoa((int64_t)(used_memory / 1024), 10, buf); 
+    term_print(buf); term_print(" KB used\n");
 }
