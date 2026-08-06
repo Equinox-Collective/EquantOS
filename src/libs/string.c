@@ -245,3 +245,21 @@ char *strrchr(const char *s, int c) {
     } while (*s++);
     return last;
 }
+
+char *strsep(char **stringp, const char *delim) {
+    char *start = *stringp;
+    char *ptr;
+    if (start == NULL)
+        return NULL;
+    for (ptr = start; *ptr; ptr++) {
+        for (const char *d = delim; *d; d++) {
+            if (*ptr == *d) {
+                *ptr++ = '\0';
+                *stringp = ptr;
+                return start;
+            }
+        }
+    }
+    *stringp = NULL;
+    return start;
+}

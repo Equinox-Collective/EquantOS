@@ -144,14 +144,7 @@ void _start(void) {
         serial_puts(COM1, "[KERNEL] equantmemtest.elf not found in VFS.\n");
     }
 
-    // 8 fb and terminal
-    if (framebuffer_request.response == NULL || framebuffer_request.response->framebuffer_count < 1) {
-        PANIC("No graphic framebuffers provided by Limine!");
-    }
-    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
-    term_init(fb->address, fb->width, fb->height, fb->pitch);
-
-    // 7. Load and spawn equantmemtest ELF module if present
+    // 8. Load and spawn equantmemtest ELF module if present
     if (module_request.response != NULL && module_request.response->module_count > 0) {
         struct limine_file *mod = module_request.response->modules[0];
         serial_puts(COM1, "[KERNEL] Loading boot module: ");

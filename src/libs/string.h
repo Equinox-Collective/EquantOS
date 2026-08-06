@@ -27,5 +27,6 @@ char *strrchr(const char *s, int c);
 // Конвертация чисел в строки (супер-важно для будущего printf!)
 void itoa(int64_t num, int base, char *buffer);
 void itoa_hex(uint64_t num, char *buffer);
+char *strsep(char **stringp, const char *delim);
 
 #endif

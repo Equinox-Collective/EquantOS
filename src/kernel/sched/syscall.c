@@ -41,20 +41,6 @@ void linux_syscall_handler(void *regs_ptr) {
     syscall_handler(regs_ptr);
 }
 
-static int64_t sys_write_handler(int fd, const char *buf, size_t count) {
-    if (fd == 1 || fd == 2) { // stdout / stderr
-        // Print to serial and terminal safely
-        for (size_t i = 0; i < count; i++) {
-            char c = buf[i];
-            char str[2] = {c, '\0'};
-            serial_puts(COM1, str);
-            term_print(str);
-        }
-        return count;
-    }
-    return -1;
-}
-
 static int64_t sys_exit_handler(int code) {
     serial_puts(COM1, "[KERNEL] User task exited with code ");
     char buf[32];
@@ -168,8 +154,9 @@ static int64_t sys_read_handler(int fd, void *user_buf, size_t count) {
 
 static int64_t sys_write_handler(int fd, const void *user_buf, size_t count) {
     if (fd == 1 || fd == 2) { // stdout / stderr
+        const char *buf = (const char *)user_buf;
         for (size_t i = 0; i < count; i++) {
-            char c = ((const char *)user_buf)[i];
+            char c = buf[i];
             char str[2] = {c, '\0'};
             serial_puts(COM1, str);
             term_print(str);

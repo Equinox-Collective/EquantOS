@@ -1,6 +1,6 @@
 // vfs.c - Virtual File System core implementation
 #include "vfs.h"
-#include "../mm/memory.h"
+#include "memory.h"
 #include "string.h"
 #include "stdio.h"
 
