@@ -17,6 +17,8 @@
 #include "pmm.h"
 #include "memory.h"
 #include "loader.h"
+#include "vfs.h"
+#include "ramfs.h"
 
 // Limine base revision request (revision 3)
 __attribute__((used, section(".requests")))
@@ -98,7 +100,51 @@ void _start(void) {
     sched_init(current_task);
     serial_puts(COM1, "[KERNEL] Tasking & Scheduler Initialized.\n");
 
-    // 6. Framebuffer & Terminal
+    // 6. Initialize VFS and RAMFS
+    vfs_init();
+    vfs_node_t *ramfs_root = ramfs_create_root();
+    vfs_mount("/", ramfs_root);
+    serial_puts(COM1, "[KERNEL] VFS and RAMFS mounted at root '/'.\n");
+
+    // Populate RAMFS with Limine boot modules
+    if (module_request.response != NULL && module_request.response->module_count > 0) {
+        for (uint64_t i = 0; i < module_request.response->module_count; i++) {
+            struct limine_file *mod = module_request.response->modules[i];
+            // mod->path usually starts with '/', e.g., "/equantmemtest.elf"
+            const char *filename = (mod->path[0] == '/') ? mod->path + 1 : mod->path;
+            ramfs_create_file(ramfs_root, filename, mod->address, mod->size);
+            
+            serial_puts(COM1, "[KERNEL] RAMFS loaded module: /");
+            serial_puts(COM1, filename);
+            serial_puts(COM1, "\n");
+        }
+    } else {
+        serial_puts(COM1, "[KERNEL] No boot modules found by Limine to mount.\n");
+    }
+
+    // Framebuffer & Terminal
+    if (framebuffer_request.response == NULL || framebuffer_request.response->framebuffer_count < 1) {
+        PANIC("No graphic framebuffers provided by Limine!");
+    }
+    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+    term_init(fb->address, fb->width, fb->height, fb->pitch);
+
+    // 7. Load and spawn equantmemtest ELF module from VFS (or direct pointer)
+    vfs_node_t *test_file = vfs_open("/equantmemtest.elf", 0);
+    if (test_file != NULL) {
+        serial_puts(COM1, "[KERNEL] Found equantmemtest.elf in VFS. Spawning...\n");
+        // We can load it using its memory buffer via RAMFS node pointer
+        ramfs_file_data_t *fdata = (ramfs_file_data_t *)test_file->ptr;
+        if (fdata && elf_load(fdata->buffer, test_file->length)) {
+            serial_puts(COM1, "[KERNEL] equantmemtest loaded and spawned successfully from VFS!\n");
+        } else {
+            serial_puts(COM1, "[KERNEL PANIC] Failed to parse/load equantmemtest ELF from VFS!\n");
+        }
+    } else {
+        serial_puts(COM1, "[KERNEL] equantmemtest.elf not found in VFS.\n");
+    }
+
+    // 8 fb and terminal
     if (framebuffer_request.response == NULL || framebuffer_request.response->framebuffer_count < 1) {
         PANIC("No graphic framebuffers provided by Limine!");
     }
@@ -121,11 +167,11 @@ void _start(void) {
         serial_puts(COM1, "[KERNEL] No boot modules found by Limine.\n");
     }
 
-    // 7. Keyboard & Interrupts
+    // 9. Keyboard & Interrupts
     keyboard_init();
     asm volatile ("sti");
 
-    // 8. Shell welcome & idle loop
+    // 10. Shell welcome & idle loop
     term_print("Welcome to EquantOS!\n\n");
     term_print("EquantOS> ");
 

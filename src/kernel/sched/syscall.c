@@ -9,6 +9,19 @@
 #include "term.h"
 #include "panic.h"
 #include "string.h"
+#include "vfs.h"
+
+#define SYS_READ      0
+#define SYS_WRITE     1
+#define SYS_OPEN      2
+#define SYS_CLOSE     3
+#define SYS_MMAP      9
+#define SYS_MUNMAP    11
+#define SYS_BRK       12
+#define SYS_GETPID    39
+#define SYS_EXIT      60
+#define SYS_YIELD     158
+#define SYS_SYSINFO   99
 
 // External kernel memory metrics
 extern uint64_t pmm_used_pages;
@@ -111,6 +124,68 @@ static int64_t sys_sysinfo_handler(equant_sysinfo_t *user_info) {
     return 0;
 }
 
+static int find_free_fd(process_t *proc) {
+    for (int i = 3; i < MAX_OPEN_FILES; i++) { // 0: stdin, 1: stdout, 2: stderr reserved
+        if (proc->files[i] == NULL) return i;
+    }
+    return -1;
+}
+
+static int64_t sys_open_handler(const char *user_path, int flags) {
+    if (!current_task || !current_task->process) return -1;
+    
+    vfs_node_t *node = vfs_open(user_path, flags);
+    if (!node) return -1;
+
+    int fd = find_free_fd(current_task->process);
+    if (fd == -1) return -1; // Too many open files
+
+    current_task->process->files[fd] = node;
+    return fd;
+}
+
+static int64_t sys_close_handler(int fd) {
+    if (!current_task || !current_task->process) return -1;
+    if (fd < 3 || fd >= MAX_OPEN_FILES) return -1;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -1;
+
+    vfs_close(node);
+    current_task->process->files[fd] = NULL;
+    return 0;
+}
+
+static int64_t sys_read_handler(int fd, void *user_buf, size_t count) {
+    if (!current_task || !current_task->process) return -1;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -1;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -1;
+
+    return vfs_read(node, 0, count, (uint8_t *)user_buf);
+}
+
+static int64_t sys_write_handler(int fd, const void *user_buf, size_t count) {
+    if (fd == 1 || fd == 2) { // stdout / stderr
+        for (size_t i = 0; i < count; i++) {
+            char c = ((const char *)user_buf)[i];
+            char str[2] = {c, '\0'};
+            serial_puts(COM1, str);
+            term_print(str);
+        }
+        return count;
+    }
+
+    if (!current_task || !current_task->process) return -1;
+    if (fd < 3 || fd >= MAX_OPEN_FILES) return -1;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -1;
+
+    return vfs_write(node, 0, count, (uint8_t *)user_buf);
+}
+
 void syscall_handler(void *regs_ptr) {
     syscall_regs_t *regs = (syscall_regs_t *)regs_ptr;
     uint64_t syscall_no = regs->rax;
@@ -118,8 +193,17 @@ void syscall_handler(void *regs_ptr) {
     int64_t ret = -1;
 
     switch (syscall_no) {
+        case SYS_OPEN:
+            ret = sys_open_handler((const char *)regs->rdi, (int)regs->rsi);
+            break;
+        case SYS_CLOSE:
+            ret = sys_close_handler((int)regs->rdi);
+            break;
+        case SYS_READ:
+            ret = sys_read_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
+            break;
         case SYS_WRITE:
-            ret = sys_write_handler((int)regs->rdi, (const char *)regs->rsi, (size_t)regs->rdx);
+            ret = sys_write_handler((int)regs->rdi, (const void *)regs->rsi, (size_t)regs->rdx);
             break;
         case SYS_EXIT:
             ret = sys_exit_handler((int)regs->rdi);
