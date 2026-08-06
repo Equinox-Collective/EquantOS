@@ -1,24 +1,27 @@
+// main.c - EquantOS Kernel Entry Point
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include "limine.h"
 #include "panic.h"
-#include "io.h"
-#include "serial.h"
-#include "term.h"
-#include "timer.h"
-#include "gdt.h"
-#include "idt.h"
-#include "stdio.h"
-#include "task.h"
-#include "sched.h"
-#include "keyboard.h"
-#include "vmm.h"
-#include "pmm.h"
-#include "memory.h"
-#include "loader.h"
-#include "vfs.h"
-#include "ramfs.h"
+#include "../../drivers/serial/serial.h"
+#include "../../EquanTTY/term.h"
+#include "../../drivers/timer/timer.h"
+#include "../arch/x86_64/gdt/gdt.h"
+#include "../arch/x86_64/idt/idt.h"
+#include "../sched/task.h"
+#include "../../drivers/keyboard/keyboard.h"
+#include "../mm/vmm.h"
+#include "../mm/pmm.h"
+#include "../../fs/vfs.h"
+#include "../../fs/ramfs.h"
+#include "../sched/syscall.h"
+#include "../sched/loader.h"
+#include "../sched/sched.h"
+#include "../../drivers/ata/ata.h"
+#include "../../fs/mbr.h"
+#include "../../drivers/pci/pci.h"
+#include "../mm/memory.h"
 
 // Limine base revision request (revision 3)
 __attribute__((used, section(".requests")))
@@ -34,7 +37,7 @@ static volatile struct limine_framebuffer_request framebuffer_request = {
 // Global Higher-Half Direct Map offset provided by Limine
 uint64_t hhdm_offset = 0;
 
-// Limine HHDM (Higher-Half Direct Map) request using official macro from limine.h
+// Limine HHDM (Higher-Half Direct Map) request
 __attribute__((used, section(".requests")))
 static volatile struct limine_hhdm_request hhdm_request = {
     .id = LIMINE_HHDM_REQUEST_ID,
@@ -85,7 +88,7 @@ void _start(void) {
     vmm_init();
     serial_puts(COM1, "[KERNEL] PMM and VMM Initialized successfully.\n");
 
-    // 4. Initialize Kernel Heap (allocate a safe 1 MB continuous block to avoid fragmentation)
+    // 4. Initialize Kernel Heap (allocate a safe 1 MB continuous block)
     void *heap_phys = pmm_alloc_continuous(256); // 256 pages * 4KB = 1 MB
     if (heap_phys == NULL) {
         PANIC("Failed to allocate physical memory for kernel heap!");
@@ -95,10 +98,11 @@ void _start(void) {
     init_heap(heap_virt, 256 * 4096);
     serial_puts(COM1, "[KERNEL] Kernel Heap Initialized (1 MB).\n");
 
-    // 5. Initialize Tasking & Scheduler
+    // 5. Initialize Tasking, Scheduler & System Calls
     task_init();
     sched_init(current_task);
-    serial_puts(COM1, "[KERNEL] Tasking & Scheduler Initialized.\n");
+    init_syscalls();
+    serial_puts(COM1, "[KERNEL] Tasking, Scheduler & System Calls Initialized.\n");
 
     // 6. Initialize VFS and RAMFS
     vfs_init();
@@ -110,7 +114,6 @@ void _start(void) {
     if (module_request.response != NULL && module_request.response->module_count > 0) {
         for (uint64_t i = 0; i < module_request.response->module_count; i++) {
             struct limine_file *mod = module_request.response->modules[i];
-            // mod->path usually starts with '/', e.g., "/equantmemtest.elf"
             const char *filename = (mod->path[0] == '/') ? mod->path + 1 : mod->path;
             ramfs_create_file(ramfs_root, filename, mod->address, mod->size);
             
@@ -122,18 +125,23 @@ void _start(void) {
         serial_puts(COM1, "[KERNEL] No boot modules found by Limine to mount.\n");
     }
 
-    // Framebuffer & Terminal
+    // 7. Initialize Hardware Drivers (PCI, ATA, MBR Partition Scanning)
+    pci_init();
+    ata_identify();
+    mbr_init();
+    serial_puts(COM1, "[KERNEL] Hardware drivers and MBR scan completed.\n");
+
+    // 8. Framebuffer & Terminal
     if (framebuffer_request.response == NULL || framebuffer_request.response->framebuffer_count < 1) {
         PANIC("No graphic framebuffers provided by Limine!");
     }
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     term_init(fb->address, fb->width, fb->height, fb->pitch);
 
-    // 7. Load and spawn equantmemtest ELF module from VFS (or direct pointer)
+    // 9. Load and spawn equantmemtest ELF module from VFS (Clean single load)
     vfs_node_t *test_file = vfs_open("/equantmemtest.elf", 0);
     if (test_file != NULL) {
         serial_puts(COM1, "[KERNEL] Found equantmemtest.elf in VFS. Spawning...\n");
-        // We can load it using its memory buffer via RAMFS node pointer
         ramfs_file_data_t *fdata = (ramfs_file_data_t *)test_file->ptr;
         if (fdata && elf_load(fdata->buffer, test_file->length)) {
             serial_puts(COM1, "[KERNEL] equantmemtest loaded and spawned successfully from VFS!\n");
@@ -144,27 +152,11 @@ void _start(void) {
         serial_puts(COM1, "[KERNEL] equantmemtest.elf not found in VFS.\n");
     }
 
-    // 8. Load and spawn equantmemtest ELF module if present
-    if (module_request.response != NULL && module_request.response->module_count > 0) {
-        struct limine_file *mod = module_request.response->modules[0];
-        serial_puts(COM1, "[KERNEL] Loading boot module: ");
-        serial_puts(COM1, mod->path);
-        serial_puts(COM1, "\n");
-
-        if (elf_load(mod->address, mod->size)) {
-            serial_puts(COM1, "[KERNEL] equantmemtest loaded and spawned successfully!\n");
-        } else {
-            serial_puts(COM1, "[KERNEL PANIC] Failed to load equantmemtest ELF!\n");
-        }
-    } else {
-        serial_puts(COM1, "[KERNEL] No boot modules found by Limine.\n");
-    }
-
-    // 9. Keyboard & Interrupts
+    // 10. Keyboard & Interrupts
     keyboard_init();
     asm volatile ("sti");
 
-    // 10. Shell welcome & idle loop
+    // 11. Shell welcome & idle loop
     term_print("Welcome to EquantOS!\n\n");
     term_print("EquantOS> ");
 

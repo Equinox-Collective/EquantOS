@@ -1,6 +1,6 @@
 // mbr.c - Master Boot Record (MBR) and Partition Table parser implementation
 #include "mbr.h"
-#include "../drivers/disk/ata.h"
+#include "ata.h"
 #include "serial.h"
 #include "string.h"
 #include "stdio.h"

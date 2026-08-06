@@ -38,4 +38,9 @@ typedef struct {
     uint8_t  index;              // Partition slot index (0 to 3)
 } partition_info_t;
 
+
+void mbr_init(void);
+int mbr_get_partition_count(void);
+partition_info_t *mbr_get_partition(int index);
+
 #endif // MBR_H
