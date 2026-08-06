@@ -4,7 +4,7 @@
 ~~Heap, PMM, VMM~~
 ~~Better Scheduler + equantmemtest + Syscalls~~
 ~~RAMFS, VFS~~
-SATA, MBR <
+~~SATA, MBR~~
 FAT32
 EXT2/3/4
 NVME, GPT

@@ -366,13 +366,27 @@ static void cmd_writefile(int argc, char **argv) {
         term_print("Usage: writefile <filename> <text>\n");
         return;
     }
-    // Simple helper to create/write files in RAMFS root
+
+    // Reconstruct full text from argv[2] onwards, joining with spaces
+    char text_buf[512] = {0};
+    size_t pos = 0;
+    for (int i = 2; i < argc; i++) {
+        size_t arg_len = strlen(argv[i]);
+        if (pos + arg_len >= sizeof(text_buf) - 1) break;
+        if (i > 2) {
+            text_buf[pos++] = ' ';
+        }
+        strcpy(text_buf + pos, argv[i]);
+        pos += arg_len;
+    }
+
     vfs_node_t *root = vfs_open("/", 0);
     if (!root) {
         term_print("Error opening root directory\n");
         return;
     }
-    vfs_node_t *new_file = ramfs_create_file(root, argv[1], argv[2], strlen(argv[2]));
+
+    vfs_node_t *new_file = ramfs_create_file(root, argv[1], text_buf, strlen(text_buf));
     if (new_file) {
         term_print("File created successfully: /");
         term_print(argv[1]);
