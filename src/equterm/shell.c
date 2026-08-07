@@ -2,15 +2,14 @@
 #include "shell.h"
 #include "term.h"
 #include "string.h"
-#include "timer.h"
-#include "serial.h"
-#include "vfs.h"
-#include "ramfs.h"
-#include "mbr.h"
-#include "pmm.h"
-#include "memory.h"
-#include "ata.h"
-#include "pci.h"
+#include "../kernel/misc/timer.h"
+#include "../kernel/fs/vfs.h"
+#include "../kernel/fs/ramfs.h"
+#include "../kernel/fs/mbr.h"
+#include "../kernel/core/mem/pmm.h"
+#include "../kernel/core/mem/memory.h"
+#include "../kernel/drivers/pci/pci.h"
+#include "../kernel/misc/power.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -48,6 +47,8 @@ static void cmd_writefile(int argc, char **argv);
 static void cmd_pciscan(int argc, char **argv);
 static void cmd_sysinfo(int argc, char **argv);
 static void cmd_panic_test(int argc, char **argv);
+static void cmd_reboot(int argc, char **argv);
+static void cmd_shutdown(int argc, char **argv);
 
 // The Ultimate Command Registry
 static const shell_command_t commands[] = {
@@ -68,6 +69,8 @@ static const shell_command_t commands[] = {
     { "pciscan",    "Resкан and print all PCI devices",      cmd_pciscan },
     { "sysinfo",    "Show detailed memory metrics struct",   cmd_sysinfo },
     { "panic_test", "Trigger Ring 0 #UD exception (panic)",  cmd_panic_test },
+    { "reboot",   "Reboot the system hardware",              cmd_reboot },
+    { "shutdown", "Power off the system hardware",           cmd_shutdown },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -425,4 +428,16 @@ static void cmd_panic_test(int argc, char **argv) {
     term_print("CRITICAL: Triggering deliberate Ring 0 invalid opcode (ud2)...\n");
     // Execute UD2 instruction which explicitly triggers #UD CPU exception vector 6
     __asm__ volatile("ud2");
+}
+
+static void cmd_reboot(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("Initiating system reboot...\n");
+    system_reboot();
+}
+
+static void cmd_shutdown(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("Initiating system shutdown...\n");
+    system_power_off();
 }
