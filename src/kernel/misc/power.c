@@ -15,10 +15,13 @@ void system_reboot(void) {
 
     // 2. Fallback: Triple fault via invalid IDT descriptor
     __asm__ volatile (
+        ".intel_syntax noprefix\n\t"
         "cli\n\t"
         "xor rax, rax\n\t"
+        "mov qword ptr [rax], 0\n\t"
         "lidt [rax]\n\t"
-        "int 3"
+        "int 3\n\t"
+        ".att_syntax"
     );
 
     for (;;) {
