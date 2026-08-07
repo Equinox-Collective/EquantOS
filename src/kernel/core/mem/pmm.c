@@ -1,7 +1,7 @@
 #include "pmm.h"
-#include "../core/limine.h"
+#include "../../../limine.h"
 #include "string.h"
-#include "../core/panic.h"
+#include "../panic.h"
 
 #include <stdint.h>
 

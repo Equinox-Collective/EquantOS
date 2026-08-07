@@ -1,8 +1,7 @@
 // pci.c - PCI Bus enumeration and MMIO mapping implementation
 #include "pci.h"
-#include "../../core/io.h"
-#include "../../mm/vmm.h"
-#include "serial.h"
+#include "../../core/mem/vmm.h"
+#include "../serial/serial.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC

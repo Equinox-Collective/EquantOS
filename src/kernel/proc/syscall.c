@@ -2,14 +2,12 @@
 #include "syscall.h"
 #include "task.h"
 #include "sched.h"
-#include "../mm/vmm.h"
-#include "../mm/pmm.h"
-#include "../mm/memory.h"
-#include "../../drivers/serial/serial.h"
-#include "term.h"
-#include "panic.h"
+#include "../core/mem/vmm.h"
+#include "../core/mem/pmm.h"
+#include "../drivers/serial/serial.h"
+#include "../../equterm/term.h"
 #include "string.h"
-#include "vfs.h"
+#include "../fs/vfs.h"
 
 #define SYS_READ      0
 #define SYS_WRITE     1

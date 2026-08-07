@@ -1,6 +1,6 @@
 // idt.c
 #include "idt.h"
-#include "../../drivers/pic/pic.h"
+#include "pic.h"
 extern void syscall_interrupt_asm(void);
 
 idt_gate_t idt[256];

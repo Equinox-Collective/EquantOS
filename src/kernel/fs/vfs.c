@@ -1,6 +1,6 @@
 // vfs.c - Virtual File System core implementation
 #include "vfs.h"
-#include "memory.h"
+#include "../core/mem/memory.h"
 #include "string.h"
 #include "stdio.h"
 
@@ -32,10 +32,11 @@ static vfs_node_t *vfs_resolve_path(const char *path) {
         return vfs_root; // Root directory
     }
 
-    // Skip leading slash and tokenize path
-    char buffer[256];
+    // Динамически выделяем память под буфер пути с учетом 'path + 1' и '\0'
     size_t len = strlen(path);
-    if (len >= sizeof(buffer)) return NULL;
+    char *buffer = (char *)kmalloc(len + 1);
+    if (!buffer) return NULL; // Ошибка выделения памяти
+
     strcpy(buffer, path + 1);
 
     char *token = buffer;
@@ -46,10 +47,14 @@ static vfs_node_t *vfs_resolve_path(const char *path) {
         if (!token || token[0] == '\0') continue;
 
         vfs_node_t *next = vfs_finddir(current, token);
-        if (!next) return NULL; // Not found
+        if (!next) {
+            kfree(buffer); // Освобождаем память перед выходом, если путь не найден
+            return NULL; 
+        }
         current = next;
     }
 
+    kfree(buffer); // Освобождаем динамический буфер после парсинга
     return current;
 }
 

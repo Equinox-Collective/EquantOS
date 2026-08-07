@@ -1,9 +1,9 @@
 #include "loader.h"
 #include "task.h"
-#include "../mm/vmm.h"
-#include "../mm/pmm.h"
-#include "../mm/memory.h"
-#include "../core/panic.h"
+#include "../core/mem/vmm.h"
+#include "../core/mem/pmm.h"
+#include "../core/mem/memory.h"
+#include "sched.h"
 #include "string.h"
 #include "stdio.h"
 

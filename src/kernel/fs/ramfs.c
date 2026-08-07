@@ -1,6 +1,6 @@
 // ramfs.c - In-memory RAM File System implementation
 #include "ramfs.h"
-#include "../mm/memory.h"
+#include "../core/mem/memory.h"
 #include "string.h"
 #include "stdio.h"
 

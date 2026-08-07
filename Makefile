@@ -5,7 +5,7 @@ ASM = nasm
 
 CFLAGS = -Wall -Wextra -O2 -g -pipe -ffreestanding -fno-stack-protector -fno-pie -fno-pic -mno-red-zone -mcmodel=kernel
 ASMFLAGS = -f elf64
-LDFLAGS = -nostdlib -static -T linker.ld
+LDFLAGS = -nostdlib -static -T src/linker.ld
 
 # ==============================================================================
 # Smart Environment & Shell Detection
@@ -72,7 +72,7 @@ build/obj/%.o: src/%.s
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Link Kernel ELF
-build/kernel.elf: $(ALL_OBJECTS) linker.ld
+build/kernel.elf: $(ALL_OBJECTS) src/linker.ld
 	@$(call MKDIR,build)
 	$(LD) $(LDFLAGS) $(ALL_OBJECTS) -o $@
 

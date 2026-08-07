@@ -1,5 +1,5 @@
 #include "timer.h"
-#include "../../kernel/core/io.h"
+#include "../core/gen/io.h"
 
 volatile uint32_t tick = 0;
 

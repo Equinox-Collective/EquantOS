@@ -1,5 +1,5 @@
 #include "keyboard.h"
-#include "../../kernel/core/io.h"
+#include "../../core/gen/io.h"
 #include <stdbool.h>
 #include <stdint.h>
 

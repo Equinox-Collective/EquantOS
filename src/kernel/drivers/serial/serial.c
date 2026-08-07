@@ -1,5 +1,5 @@
 #include "serial.h"
-#include "../../kernel/core/io.h"
+#include "../../core/gen/io.h"
 
 // Serial port register offsets relative to base address
 #define SERIAL_DATA         0

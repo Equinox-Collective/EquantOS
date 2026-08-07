@@ -1,7 +1,6 @@
 #include "sched.h"
-#include "gdt.h"
+#include "../core/gen/gdt.h"
 #include "string.h"
-#include "timer.h"
 
 #define IA32_FS_BASE_MSR 0xC0000100
 
@@ -11,7 +10,6 @@ static inline void wrmsr(uint32_t msr, uint64_t value) {
     __asm__ volatile("wrmsr" : : "c"(msr), "a"(low), "d"(high));
 }
 
-extern uint64_t hhdm_offset;
 static uint64_t kernel_cr3 = 0;
 
 // Очередь готовых задач (Run Queue)
