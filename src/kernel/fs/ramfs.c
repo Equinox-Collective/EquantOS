@@ -80,11 +80,17 @@ vfs_node_t *ramfs_create_root(void) {
 
 vfs_node_t *ramfs_create_directory(vfs_node_t *parent, const char *name) {
     vfs_node_t *dir = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!dir) return NULL; // Safety guard against OOM
+    
     strcpy(dir->name, name);
     dir->flags = FS_DIRECTORY;
     dir->permissions = 0755;
     dir->ops = &ramfs_fops;
     dir->parent = parent;
+
+    if (!parent) {
+        parent = dir; // Root self-parenting fallback
+    }
 
     // Append to parent children list
     if (!parent->children) {
@@ -99,6 +105,8 @@ vfs_node_t *ramfs_create_directory(vfs_node_t *parent, const char *name) {
 
 vfs_node_t *ramfs_create_file(vfs_node_t *parent, const char *name, void *data, size_t size) {
     vfs_node_t *file = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!file) return NULL; // Safety guard against OOM
+
     strcpy(file->name, name);
     file->flags = FS_FILE;
     file->permissions = 0644;
@@ -107,23 +115,35 @@ vfs_node_t *ramfs_create_file(vfs_node_t *parent, const char *name, void *data, 
     file->parent = parent;
 
     ramfs_file_data_t *fdata = (ramfs_file_data_t *)kzalloc(sizeof(ramfs_file_data_t));
-    if (size > 0) {
+    if (!fdata) {
+        kfree(file);
+        return NULL;
+    }
+
+    if (size > 0 && data) {
         fdata->buffer = (uint8_t *)kmalloc(size);
-        memcpy(fdata->buffer, data, size);
-        fdata->capacity = size;
+        if (fdata->buffer) {
+            memcpy(fdata->buffer, data, size);
+            fdata->capacity = size;
+        } else {
+            kfree(fdata);
+            kfree(file);
+            return NULL;
+        }
     } else {
         fdata->buffer = NULL;
         fdata->capacity = 0;
     }
     file->ptr = (vfs_node_t *)fdata;
 
-    // Append to parent children list
-    if (!parent->children) {
-        parent->children = file;
-    } else {
-        vfs_node_t *curr = parent->children;
-        while (curr->next) curr = curr->next;
-        curr->next = file;
+    if (parent) {
+        if (!parent->children) {
+            parent->children = file;
+        } else {
+            vfs_node_t *curr = parent->children;
+            while (curr->next) curr = curr->next;
+            curr->next = file;
+        }
     }
     return file;
 }

@@ -2,6 +2,7 @@
 #include "fat32.h"
 #include "mbr.h"
 #include "../drivers/ata/ata.h"
+#include "ramfs.h"
 #include "../core/mem/memory.h"
 #include "string.h"
 #include "../drivers/serial/serial.h"
@@ -204,17 +205,47 @@ vfs_node_t *fat32_mount_partition(uint32_t partition_lba) {
 void fat32_init(void) {
     serial_puts(COM1, "[FAT32] Initializing FAT32 file system driver...\n");
     
+    if (!vfs_root) {
+        serial_puts(COM1, "[FAT32 ERROR] VFS Root is NULL! Cannot mount FAT32.\n");
+        return;
+    }
+
     int p_count = mbr_get_partition_count();
     if (p_count > 0) {
         partition_info_t *part = mbr_get_partition(0);
         if (part && (part->type == 0x0B || part->type == 0x0C)) {
             serial_puts(COM1, "[FAT32] Found FAT32 partition in MBR. Mounting at /disk...\n");
-            vfs_node_t *fat_root = fat32_mount_partition(part->start_lba);
             
-            // Create /disk directory in RAMFS root and mark it as a mount point
+            vfs_node_t *fat_root = fat32_mount_partition(part->start_lba);
+            if (!fat_root) {
+                serial_puts(COM1, "[FAT32 ERROR] Failed to mount FAT32 partition!\n");
+                return;
+            }
+            
+            // DEBUG LOG: Print fat_root address
+            char dbg[32];
+            serial_puts(COM1, "[FAT32 DEBUG] fat_root ptr = 0x");
+            itoa_hex((uint64_t)fat_root, dbg);
+            serial_puts(COM1, dbg);
+            serial_puts(COM1, "\n");
+
+            // Create /disk directory in RAMFS root safely
             vfs_node_t *disk_dir = ramfs_create_directory(vfs_root, "disk");
+            if (!disk_dir) {
+                serial_puts(COM1, "[FAT32 ERROR] Failed to allocate /disk directory node in RAMFS!\n");
+                return;
+            }
+
+            // DEBUG LOG: Print disk_dir address
+            serial_puts(COM1, "[FAT32 DEBUG] disk_dir ptr = 0x");
+            itoa_hex((uint64_t)disk_dir, dbg);
+            serial_puts(COM1, dbg);
+            serial_puts(COM1, "\n");
+
             disk_dir->flags |= FS_MOUNTPOINT;
-            disk_dir->ptr = (struct vfs_node *)fat_root;
+            
+            // SAFE ASSIGNMENT WITH EXPLICIT CAST
+            disk_dir->ptr = (vfs_node_t *)fat_root;
             
             serial_puts(COM1, "[FAT32] FAT32 successfully mounted at /disk!\n");
         } else {
