@@ -12,6 +12,7 @@
 #include "../kernel/misc/power.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 extern uint64_t free_memory;
 extern uint64_t total_pages;
@@ -20,6 +21,7 @@ extern size_t used_memory;
 #define SHELL_PROMPT_COLOR 0x0000FF00 // Neon Green
 #define MAX_ARGS 8
 #define LINE_BUF_SIZE 256
+extern bool elf_load(void *elf_data, uint64_t size);
 
 typedef void (*shell_handler_t)(int argc, char **argv);
 
@@ -28,6 +30,9 @@ typedef struct {
     const char *description;
     shell_handler_t handler;
 } shell_command_t;
+
+// Track current working directory in the shell
+static char current_dir[256] = "/";
 
 // Command prototypes
 static void cmd_help(int argc, char **argv);
@@ -49,6 +54,10 @@ static void cmd_sysinfo(int argc, char **argv);
 static void cmd_panic_test(int argc, char **argv);
 static void cmd_reboot(int argc, char **argv);
 static void cmd_shutdown(int argc, char **argv);
+static void resolve_path(const char *input, char *output, size_t max_len);
+static void cmd_pwd(int argc, char **argv);
+static void cmd_cd(int argc, char **argv);
+static void cmd_run(int argc, char **argv);
 
 // The Ultimate Command Registry
 static const shell_command_t commands[] = {
@@ -71,6 +80,9 @@ static const shell_command_t commands[] = {
     { "panic_test", "Trigger Ring 0 #UD exception (panic)",  cmd_panic_test },
     { "reboot",   "Reboot the system hardware",              cmd_reboot },
     { "shutdown", "Power off the system hardware",           cmd_shutdown },
+    { "pwd",    "Print current working directory",           cmd_pwd },
+    { "cd",     "Change working directory",                  cmd_cd },
+    { "run",    "Load and execute an ELF binary",            cmd_run },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -440,4 +452,108 @@ static void cmd_shutdown(int argc, char **argv) {
     (void)argc; (void)argv;
     term_print("Initiating system shutdown...\n");
     system_power_off();
+}
+
+// Helper to resolve paths relative to current_dir
+static void resolve_path(const char *input, char *output, size_t max_len) {
+    if (!input || input[0] == '\0') {
+        strcpy(output, current_dir);
+        return;
+    }
+
+    if (input[0] == '/') {
+        // Absolute path
+        strncpy(output, input, max_len);
+    } else {
+        // Relative path
+        strcpy(output, current_dir);
+        if (output[strlen(output) - 1] != '/') {
+            strcat(output, "/");
+        }
+        strcat(output, input);
+    }
+}
+
+static void cmd_pwd(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print(current_dir);
+    term_print("\n");
+}
+
+static void cmd_cd(int argc, char **argv) {
+    if (argc < 2) {
+        strcpy(current_dir, "/");
+        return;
+    }
+
+    char resolved[256];
+    resolve_path(argv[1], resolved, sizeof(resolved));
+
+    // Verify if directory exists via VFS
+    vfs_node_t *node = vfs_open(resolved, 0);
+    if (!node) {
+        term_print("cd: no such file or directory: ");
+        term_print(argv[1]);
+        term_print("\n");
+        return;
+    }
+
+    if (!(node->flags & FS_DIRECTORY)) {
+        term_print("cd: not a directory: ");
+        term_print(argv[1]);
+        term_print("\n");
+        return;
+    }
+
+    strcpy(current_dir, resolved);
+}
+
+static void cmd_run(int argc, char **argv) {
+    if (argc < 2) {
+        term_print("Usage: run <executable>\n");
+        return;
+    }
+
+    char resolved[256];
+    resolve_path(argv[1], resolved, sizeof(resolved));
+
+    vfs_node_t *file = vfs_open(resolved, 0);
+    if (!file) {
+        term_print("run: file not found: ");
+        term_print(resolved);
+        term_print("\n");
+        return;
+    }
+
+    if (file->flags & FS_DIRECTORY) {
+        term_print("run: is a directory: ");
+        term_print(resolved);
+        term_print("\n");
+        return;
+    }
+
+    // Read file contents into a temporary kernel heap buffer
+    uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
+    if (!elf_buf) {
+        term_print("run: out of memory for loading file\n");
+        return;
+    }
+
+    int64_t read_bytes = vfs_read(file, 0, file->length, elf_buf);
+    if (read_bytes <= 0) {
+        term_print("run: failed to read ELF file data\n");
+        kfree(elf_buf);
+        return;
+    }
+
+    term_print("Spawning process from VFS: ");
+    term_print(resolved);
+    term_print("\n");
+
+    if (elf_load(elf_buf, file->length)) {
+        term_print("Process spawned successfully!\n");
+    } else {
+        term_print("run: ELF load failed\n");
+        kfree(elf_buf);
+    }
 }
