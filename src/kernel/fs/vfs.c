@@ -28,14 +28,18 @@ static vfs_node_t *vfs_resolve_path(const char *path) {
     vfs_node_t *current = vfs_root;
     if (!current) return NULL;
 
-    if (path[1] == '\0' || (path[1] == '/' && path[2] == '\0')) {
-        return vfs_root; // Root directory
+    // If root itself is a mount point
+    if (current->flags & FS_MOUNTPOINT && current->ptr) {
+        current = (vfs_node_t *)current->ptr;
     }
 
-    // Динамически выделяем память под буфер пути с учетом 'path + 1' и '\0'
+    if (path[1] == '\0' || (path[1] == '/' && path[2] == '\0')) {
+        return current;
+    }
+
     size_t len = strlen(path);
     char *buffer = (char *)kmalloc(len + 1);
-    if (!buffer) return NULL; // Ошибка выделения памяти
+    if (!buffer) return NULL;
 
     strcpy(buffer, path + 1);
 
@@ -48,13 +52,18 @@ static vfs_node_t *vfs_resolve_path(const char *path) {
 
         vfs_node_t *next = vfs_finddir(current, token);
         if (!next) {
-            kfree(buffer); // Освобождаем память перед выходом, если путь не найден
+            kfree(buffer);
             return NULL; 
         }
         current = next;
+
+        // CRITICAL: If reached node is a mount point, cross over to the mounted filesystem root!
+        if (current->flags & FS_MOUNTPOINT && current->ptr) {
+            current = (vfs_node_t *)current->ptr;
+        }
     }
 
-    kfree(buffer); // Освобождаем динамический буфер после парсинга
+    kfree(buffer);
     return current;
 }
 
