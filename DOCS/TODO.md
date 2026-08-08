@@ -5,6 +5,7 @@
 ~~Better Scheduler + equantmemtest + Syscalls~~
 ~~RAMFS, VFS~~
 ~~SATA, MBR~~
+~~Power~~
 FAT32
 EXT2/3/4
 NVME, GPT

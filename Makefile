@@ -120,7 +120,7 @@ build/equantos.iso: build/kernel.elf build/iso/equantmemtest.elf limine.conf lim
 	@echo [SUCCESS] EquantOS ISO created at build/equantos.iso!
 
 run: build/equantos.iso
-	qemu-system-x86_64 -cdrom build/equantos.iso -serial stdio -m 2G -d cpu_reset,guest_errors -D log.txt
+	qemu-system-x86_64 -cdrom build/equantos.iso -hda disk.vhd -serial stdio
 
 clean:
 	@$(call RMDIR,build)
