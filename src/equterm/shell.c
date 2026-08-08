@@ -188,12 +188,22 @@ static void cmd_ver(int argc, char **argv) {
 
 static void cmd_ls(int argc, char **argv) {
     (void)argc; (void)argv;
-    vfs_node_t *dir = vfs_open("/", 0);
+    
+    char resolved[256];
+    resolve_path("", resolved, sizeof(resolved)); // Get current working directory path
+
+    vfs_node_t *dir = vfs_open(resolved, 0);
     if (!dir) {
-        term_print("Error: failed to open root directory\n");
+        term_print("ls: cannot open directory: ");
+        term_print(resolved);
+        term_print("\n");
         return;
     }
-    term_print("Listing VFS Root Directory (/):\n");
+    
+    term_print("Listing directory ");
+    term_print(resolved);
+    term_print(":\n");
+
     uint32_t index = 0;
     vfs_node_t *child;
     while ((child = vfs_readdir(dir, index++)) != NULL) {
