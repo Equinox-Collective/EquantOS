@@ -22,6 +22,7 @@
 #include "kernel/fs/mbr.h"
 #include "kernel/drivers/pci/pci.h"
 #include "kernel/core/mem/memory.h"
+#include "kernel/fs/fat32.h"
 
 // Limine base revision request (revision 3)
 __attribute__((used, section(".requests")))
@@ -129,6 +130,7 @@ void _start(void) {
     pci_init();
     ata_identify();
     mbr_init();
+    fat32_init();
     serial_puts(COM1, "[KERNEL] Hardware drivers and MBR scan completed.\n");
 
     // 8. Framebuffer & Terminal
