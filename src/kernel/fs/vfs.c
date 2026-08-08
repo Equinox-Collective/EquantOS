@@ -93,7 +93,11 @@ vfs_node_t *vfs_readdir(vfs_node_t *node, uint32_t index) {
 }
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
-    if (!node || !(node->flags & FS_DIRECTORY) || !node->ops || !node->ops->finddir) {
+    // If current node is a mount point, resolve through its mounted root pointer
+    if (node->flags & FS_MOUNTPOINT && node->ptr) {
+        node = (vfs_node_t *)node->ptr;
+    }
+    if (!(node->flags & FS_DIRECTORY) || !node->ops || !node->ops->finddir) {
         return NULL;
     }
     return node->ops->finddir(node, name);
