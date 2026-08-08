@@ -204,16 +204,21 @@ vfs_node_t *fat32_mount_partition(uint32_t partition_lba) {
 void fat32_init(void) {
     serial_puts(COM1, "[FAT32] Initializing FAT32 file system driver...\n");
     
-    // Check if we have partitions from MBR
     int p_count = mbr_get_partition_count();
     if (p_count > 0) {
         partition_info_t *part = mbr_get_partition(0);
         if (part && (part->type == 0x0B || part->type == 0x0C)) {
-            serial_puts(COM1, "[FAT32] Found FAT32 partition in MBR. Mounting...\n");
+            serial_puts(COM1, "[FAT32] Found FAT32 partition in MBR. Mounting at /disk...\n");
             vfs_node_t *fat_root = fat32_mount_partition(part->start_lba);
-            vfs_mount("/", fat_root); // Mount FAT32 as root VFS!
+            
+            // Create /disk directory in RAMFS root and mark it as a mount point
+            vfs_node_t *disk_dir = ramfs_create_directory(vfs_root, "disk");
+            disk_dir->flags |= FS_MOUNTPOINT;
+            disk_dir->ptr = (struct vfs_node *)fat_root;
+            
+            serial_puts(COM1, "[FAT32] FAT32 successfully mounted at /disk!\n");
         } else {
-            serial_puts(COM1, "[FAT32] No FAT32 partition found in MBR. Keeping RAMFS.\n");
+            serial_puts(COM1, "[FAT32] No FAT32 partition found in MBR.\n");
         }
     } else {
         serial_puts(COM1, "[FAT32] No MBR partitions detected.\n");
