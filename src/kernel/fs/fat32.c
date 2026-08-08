@@ -24,7 +24,7 @@ static fat32_volume_t current_vol;
 
 // Convert cluster number to absolute LBA sector
 static uint32_t fat32_cluster_to_lba(uint32_t cluster) {
-    return current_vol.first_data_sector + (cluster - 2) * current_vol.sectors_per_cluster;
+    return current_vol.partition_lba + current_vol.first_data_sector + (cluster - 2) * current_vol.sectors_per_cluster;
 }
 
 // Read next cluster from FAT table
