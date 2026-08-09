@@ -142,9 +142,65 @@ void term_print(const char *str) {
     }
 }
 
+// Command History & Line Editor buffers
+#define MAX_HISTORY 16
+static char history[MAX_HISTORY][CMD_BUF_SIZE];
+static int history_count = 0;
+static int history_index = 0;
+
+static int cursor_pos = 0; // Current position inside cmd_buf
+
+// Redraw current command line on screen
+static void term_redraw_input_line(void) {
+    // Move back to the start of input (after prompt "EquantOS> ")
+    // For simplicity, we clear and re-print prompt + cmd_buf
+    // A robust TTY handles this via backspaces or redraw math.
+}
+
 void term_poll_keyboard(void) {
     uint8_t scancode = keyboard_pop();
     if (scancode == 0) return;
+
+    // Handle Special Extended Keys
+    if (scancode == KEY_UP) {
+        if (history_count > 0 && history_index > 0) {
+            history_index--;
+            // Clear current line input visually and replace with history item
+            while (cmd_len > 0) {
+                term_putchar('\b');
+                cmd_len--;
+            }
+            strcpy(cmd_buf, history[history_index]);
+            cmd_len = strlen(cmd_buf);
+            cursor_pos = cmd_len;
+            term_print(cmd_buf);
+        }
+        return;
+    }
+
+    if (scancode == KEY_DOWN) {
+        if (history_count > 0 && history_index < history_count - 1) {
+            history_index++;
+            while (cmd_len > 0) {
+                term_putchar('\b');
+                cmd_len--;
+            }
+            strcpy(cmd_buf, history[history_index]);
+            cmd_len = strlen(cmd_buf);
+            cursor_pos = cmd_len;
+            term_print(cmd_buf);
+        } else if (history_index >= history_count - 1) {
+            history_index = history_count;
+            while (cmd_len > 0) {
+                term_putchar('\b');
+                cmd_len--;
+            }
+            cmd_buf[0] = '\0';
+            cmd_len = 0;
+            cursor_pos = 0;
+        }
+        return;
+    }
 
     char c = get_ascii_char(scancode);
     if (c == 0) return;
@@ -152,16 +208,42 @@ void term_poll_keyboard(void) {
     if (c == '\n') {
         term_putchar('\n');
         cmd_buf[cmd_len] = '\0';
+        
+        if (cmd_len > 0) {
+            // Save to history
+            if (history_count < MAX_HISTORY) {
+                strcpy(history[history_count++], cmd_buf);
+            } else {
+                for (int i = 0; i < MAX_HISTORY - 1; i++) {
+                    strcpy(history[i], history[i + 1]);
+                }
+                strcpy(history[MAX_HISTORY - 1], cmd_buf);
+            }
+            history_index = history_count;
+        }
+
         shell_execute(cmd_buf);
         cmd_len = 0;
+        cursor_pos = 0;
     } else if (c == '\b') {
-        if (cmd_len > 0) {
+        if (cmd_len > 0 && cursor_pos > 0) {
+            // Remove character at cursor_pos - 1
+            for (int i = cursor_pos - 1; i < cmd_len - 1; i++) {
+                cmd_buf[i] = cmd_buf[i + 1];
+            }
             cmd_len--;
+            cursor_pos--;
             term_putchar('\b');
         }
     } else {
         if (cmd_len < CMD_BUF_SIZE - 1) {
-            cmd_buf[cmd_len++] = c;
+            // Append or insert character
+            for (int i = cmd_len; i > cursor_pos; i--) {
+                cmd_buf[i] = cmd_buf[i - 1];
+            }
+            cmd_buf[cursor_pos] = c;
+            cmd_len++;
+            cursor_pos++;
             term_putchar(c);
         }
     }
