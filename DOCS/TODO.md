@@ -6,8 +6,8 @@
 ~~RAMFS, VFS~~
 ~~SATA, MBR~~
 ~~Power~~
-FAT32
-EXT2/3/4
+~~FAT32~~
+EXT2/3/4 <
 NVME, GPT
 Ring 3 (For SDK, Userland)
 Musl/mlibc, Busybox, LABI (POSIX syscalls)
@@ -19,3 +19,4 @@ Long Term:
 GPU (Through LinuxKPI)
 Own Package Manager
 GUI
+Sound

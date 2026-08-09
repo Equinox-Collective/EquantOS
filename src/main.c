@@ -140,25 +140,11 @@ void _start(void) {
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     term_init(fb->address, fb->width, fb->height, fb->pitch);
 
-    // 9. Load and spawn equantmemtest ELF module from VFS (Clean single load)
-    vfs_node_t *test_file = vfs_open("/equantmemtest.elf", 0);
-    if (test_file != NULL) {
-        serial_puts(COM1, "[KERNEL] Found equantmemtest.elf in VFS. Spawning...\n");
-        ramfs_file_data_t *fdata = (ramfs_file_data_t *)test_file->ptr;
-        if (fdata && elf_load(fdata->buffer, test_file->length)) {
-            serial_puts(COM1, "[KERNEL] equantmemtest loaded and spawned successfully from VFS!\n");
-        } else {
-            serial_puts(COM1, "[KERNEL PANIC] Failed to parse/load equantmemtest ELF from VFS!\n");
-        }
-    } else {
-        serial_puts(COM1, "[KERNEL] equantmemtest.elf not found in VFS.\n");
-    }
-
-    // 10. Keyboard & Interrupts
+    // 9. Keyboard & Interrupts
     keyboard_init();
     asm volatile ("sti");
 
-    // 11. Shell welcome & idle loop
+    // 10. Shell welcome & idle loop
     term_print("Welcome to EquantOS!\n\n");
     term_print("EquantOS> ");
 
