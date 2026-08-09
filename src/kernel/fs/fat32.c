@@ -163,6 +163,84 @@ static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
     return NULL;
 }
 
+
+// Case-insensitive 8.3 filename matcher
+static int fat32_name_match(const char *fat_name, const char *target) {
+    char upper_target[13];
+    int i = 0;
+    while (target[i] && i < 12) {
+        char c = target[i];
+        if (c >= 'a' && c <= 'z') c -= 32; // Convert to uppercase
+        upper_target[i] = c;
+        i++;
+    }
+    upper_target[i] = '\0';
+
+    return strcmp(fat_name, upper_target) == 0;
+}
+
+// VFS Find Directory Operation (Search file/folder by name)
+static vfs_node_t *fat32_finddir(vfs_node_t *node, const char *name) {
+    if (!(node->flags & FS_DIRECTORY)) return NULL;
+
+    uint32_t cluster = (uint32_t)(uintptr_t)node->ptr;
+    uint32_t cluster_size = current_vol.sectors_per_cluster * current_vol.bytes_per_sector;
+    uint32_t entries_per_cluster = cluster_size / sizeof(fat32_dir_entry_t);
+
+    uint8_t *cluster_buf = (uint8_t *)kmalloc(cluster_size);
+    if (!cluster_buf) return NULL;
+
+    while (cluster >= 2 && cluster < 0x0FFFFFF8) {
+        uint32_t lba = fat32_cluster_to_lba(cluster);
+        read_sectors_ata_pio((uintptr_t)cluster_buf, lba, current_vol.sectors_per_cluster);
+
+        fat32_dir_entry_t *entries = (fat32_dir_entry_t *)cluster_buf;
+        for (uint32_t i = 0; i < entries_per_cluster; i++) {
+            if (entries[i].name[0] == 0x00) {
+                kfree(cluster_buf);
+                return NULL; // End of directory
+            }
+            if (entries[i].name[0] == 0xE5 || (entries[i].attribute & FAT32_ATTR_LONG_NAME) == FAT32_ATTR_LONG_NAME) {
+                continue; // Deleted or LFN entry
+            }
+
+            char formatted_name[13];
+            fat32_format_filename(&entries[i], formatted_name);
+
+            if (fat32_name_match(formatted_name, name)) {
+                vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                strcpy(vnode->name, formatted_name);
+                vnode->length = entries[i].file_size;
+                vnode->inode = ((uint32_t)entries[i].first_cluster_high << 16) | entries[i].first_cluster_low;
+                vnode->ptr = (vfs_node_t *)(uintptr_t)vnode->inode;
+
+                if (entries[i].attribute & FAT32_ATTR_DIRECTORY) {
+                    vnode->flags = FS_DIRECTORY;
+                } else {
+                    vnode->flags = FS_FILE;
+                }
+
+                static vfs_file_operations_t fat32_fops = {
+                    .read = fat32_read,
+                    .write = NULL,
+                    .open = NULL,
+                    .close = NULL,
+                    .readdir = fat32_readdir,
+                    .finddir = fat32_finddir // <--- Wired up!
+                };
+                vnode->ops = &fat32_fops;
+
+                kfree(cluster_buf);
+                return vnode;
+            }
+        }
+        cluster = fat32_get_next_cluster(cluster);
+    }
+
+    kfree(cluster_buf);
+    return NULL;
+}
+
 vfs_node_t *fat32_mount_partition(uint32_t partition_lba) {
     uint8_t sector_buf[512];
     read_sectors_ata_pio((uintptr_t)sector_buf, partition_lba, 1);
@@ -195,7 +273,7 @@ vfs_node_t *fat32_mount_partition(uint32_t partition_lba) {
         .open = NULL,
         .close = NULL,
         .readdir = fat32_readdir,
-        .finddir = NULL
+        .finddir = fat32_finddir
     };
     root->ops = &fat32_root_fops;
 
