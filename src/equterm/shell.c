@@ -224,38 +224,39 @@ static void cmd_cat(int argc, char **argv) {
         term_print("Usage: cat <filename>\n");
         return;
     }
-    char path[128];
-    if (argv[1][0] != '/') {
-        path[0] = '/';
-        strcpy(path + 1, argv[1]);
-    } else {
-        strcpy(path, argv[1]);
-    }
+    
+    char resolved[256];
+    resolve_path(argv[1], resolved, sizeof(resolved));
 
-    vfs_node_t *file = vfs_open(path, 0);
+    vfs_node_t *file = vfs_open(resolved, 0);
     if (!file) {
-        term_print("File not found: ");
-        term_print(path);
+        term_print("cat: file not found: ");
+        term_print(resolved);
         term_print("\n");
         return;
     }
 
     if (file->flags & FS_DIRECTORY) {
-        term_print("Error: '");
-        term_print(path);
-        term_print("' is a directory\n");
+        term_print("cat: is a directory: ");
+        term_print(resolved);
+        term_print("\n");
         return;
     }
 
-    uint8_t buf[256];
-    uint64_t offset = 0;
-    int64_t bytes_read;
-    while ((bytes_read = vfs_read(file, offset, sizeof(buf) - 1, buf)) > 0) {
+    uint8_t *buf = (uint8_t *)kmalloc(file->length + 1);
+    if (!buf) {
+        term_print("cat: out of memory\n");
+        return;
+    }
+
+    int64_t bytes_read = vfs_read(file, 0, file->length, buf);
+    if (bytes_read > 0) {
         buf[bytes_read] = '\0';
         term_print((char *)buf);
-        offset += bytes_read;
+        term_print("\n");
     }
-    term_print("\n");
+
+    kfree(buf);
 }
 
 static void cmd_mem(int argc, char **argv) {
