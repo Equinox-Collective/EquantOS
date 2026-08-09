@@ -140,13 +140,21 @@ void _start(void) {
     }
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     term_init(fb->address, fb->width, fb->height, fb->pitch);
+    
+    // Load and initialize PSF2 console font from VFS/RAMFS
     vfs_node_t *font_file = vfs_open("/font.psf", 0);
     if (font_file != NULL) {
+        serial_puts(COM1, "[KERNEL] Found font.psf in VFS. Initializing PSF2...\n");
         ramfs_file_data_t *fdata = (ramfs_file_data_t *)font_file->ptr;
         if (fdata && psf2_init_default(fdata->buffer, font_file->length)) {
-            serial_puts(COM1, "[KERNEL] PSF2 Font loaded successfully from RAMFS!\n");
+            serial_puts(COM1, "[KERNEL] PSF2 Font loaded and applied successfully!\n");
+        } else {
+            serial_puts(COM1, "[KERNEL WARNING] Failed to parse PSF2 font data.\n");
         }
+    } else {
+        serial_puts(COM1, "[KERNEL WARNING] /font.psf not found in VFS, falling back to 8x8.\n");
     }
+
     // 9. Keyboard & Interrupts
     keyboard_init();
     asm volatile ("sti");

@@ -7,7 +7,8 @@
 ~~SATA, MBR~~
 ~~Power~~
 ~~FAT32~~
-EXT2/3/4 <
+~~Terminal Improvements~~
+EXT2 <
 NVME, GPT
 Ring 3 (For SDK, Userland)
 Musl/mlibc, Busybox, LABI (POSIX syscalls)

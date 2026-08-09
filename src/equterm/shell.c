@@ -75,7 +75,7 @@ static const shell_command_t commands[] = {
     { "diskinfo",   "Show ATA drive info and MBR partitions",cmd_diskinfo },
     { "hexdump",    "Dump raw file contents in Hex format",  cmd_hexdump },
     { "writefile",  "Create/write text file to RAMFS",       cmd_writefile },
-    { "pciscan",    "Resкан and print all PCI devices",      cmd_pciscan },
+    { "pciscan",    "Restore and print all PCI devices",      cmd_pciscan },
     { "sysinfo",    "Show detailed memory metrics struct",   cmd_sysinfo },
     { "panic_test", "Trigger Ring 0 #UD exception (panic)",  cmd_panic_test },
     { "reboot",   "Reboot the system hardware",              cmd_reboot },
