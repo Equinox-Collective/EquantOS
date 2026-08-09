@@ -1,9 +1,10 @@
 #include "term.h"
-#include "serial.h"
-#include "keyboard.h"
+#include "../kernel/drivers/serial/serial.h"
+#include "../kernel/drivers/keyboard/keyboard.h"
 #include "shell.h"
 #include "string.h"
-#include "../drivers/display/font8x8.h"
+#include "../kernel/drivers/display/font8x8.h"
+#include "../kernel/drivers/display/psf2.h"
 
 static uint32_t *term_fb_address = NULL;
 static uint64_t term_width = 0;
@@ -15,13 +16,28 @@ static size_t cursor_y = 0;
 
 static uint32_t term_fg_color = 0x00FFFFFF;
 
-#define GLYPH_W 8
-#define GLYPH_H 8
-#define LINE_H  12 // 8px glyph + 4px spacing
-
 #define CMD_BUF_SIZE 256
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_len = 0;
+
+// Dynamic glyph dimensions based on loaded PSF2 font or fallback to 8x8
+static int get_glyph_width(void) {
+    if (kernel_psf2_font.loaded) {
+        return (int)kernel_psf2_font.hdr->width;
+    }
+    return 8;
+}
+
+static int get_glyph_height(void) {
+    if (kernel_psf2_font.loaded) {
+        return (int)kernel_psf2_font.hdr->height;
+    }
+    return 8;
+}
+
+static int get_line_height(void) {
+    return get_glyph_height() + 4; // Glyph height + vertical spacing
+}
 
 static void term_clear_rect(size_t y0, size_t y1) {
     if (!term_fb_address) return;
@@ -53,42 +69,39 @@ void term_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch) {
     term_fg_color = 0x00FFFFFF;
 
     term_clear();
-    shell_init(); // prints the first prompt
+    shell_init(); 
 }
 
-// Shifts the whole framebuffer up by one text line instead of wiping
-// the entire screen every time the cursor reaches the bottom.
 static void term_scroll(void) {
     if (!term_fb_address) return;
 
-    size_t visible_rows = term_height - LINE_H;
+    int lh = get_line_height();
+    size_t visible_rows = term_height - lh;
     size_t row_bytes = term_width * sizeof(uint32_t);
 
     for (size_t y = 0; y < visible_rows; y++) {
         memcpy(&term_fb_address[y * term_pitch],
-               &term_fb_address[(y + LINE_H) * term_pitch],
+               &term_fb_address[(y + lh) * term_pitch],
                row_bytes);
     }
 
     term_clear_rect(visible_rows, term_height);
 }
 
-// Moves the cursor to the start of the next line, scrolling if the
-// screen is full. Used both for '\n' and for automatic line wrap.
 static void term_advance_line(void) {
     cursor_x = 0;
-    if (cursor_y + LINE_H + GLYPH_H >= term_height) {
+    int gh = get_glyph_height();
+    int lh = get_line_height();
+    if (cursor_y + lh + gh >= term_height) {
         term_scroll();
-        cursor_y = term_height - LINE_H;
+        cursor_y = term_height - lh;
     } else {
-        cursor_y += LINE_H;
+        cursor_y += lh;
     }
 }
 
 void term_putchar(char c) {
-    // Dual output: Serial port + Graphical Screen
     serial_putchar(COM1, c);
-
     if (!term_fb_address) return;
 
     if (c == '\n') {
@@ -96,14 +109,16 @@ void term_putchar(char c) {
         return;
     }
 
+    int gw = get_glyph_width();
+    int gh = get_glyph_height();
+
     if (c == '\b') {
-        if (cursor_x >= GLYPH_W) {
-            cursor_x -= GLYPH_W;
-            for (size_t y = 0; y < GLYPH_H; y++) {
-                for (size_t x = 0; x < GLYPH_W; x++) {
+        if (cursor_x >= (size_t)gw) {
+            cursor_x -= (size_t)gw;
+            for (size_t y = 0; y < (size_t)gh; y++) {
+                for (size_t x = 0; x < (size_t)gw; x++) {
                     size_t px = cursor_x + x;
                     size_t py = cursor_y + y;
-                    // Strict bounds check prevents out-of-bounds kernel memory corruption
                     if (px < term_width && py < term_height) {
                         term_fb_address[py * term_pitch + px] = 0x00000000;
                     }
@@ -113,27 +128,35 @@ void term_putchar(char c) {
         return;
     }
 
-    if (cursor_x + GLYPH_W >= term_width) {
+    if (cursor_x + gw >= term_width) {
         term_advance_line();
     }
 
-    // Render 8x8 bitmap glyph with strict bounds checking
-    if ((unsigned char)c < 128) {
-        const uint8_t *glyph = font8x8_basic[(unsigned char)c];
-        for (size_t y = 0; y < GLYPH_H; y++) {
-            uint8_t row = glyph[y];
-            for (size_t x = 0; x < GLYPH_W; x++) {
-                if (row & (1 << x)) {
-                    size_t px = cursor_x + x;
-                    size_t py = cursor_y + y;
-                    if (px < term_width && py < term_height) {
-                        term_fb_address[py * term_pitch + px] = term_fg_color;
+    // Render character using PSF2 font if loaded, otherwise fallback to 8x8 basic font
+    if (kernel_psf2_font.loaded) {
+        int drawn_width = psf2_draw_char(&kernel_psf2_font, term_fb_address, 
+                                         (int)term_width, (int)term_height, 
+                                         (int)cursor_x, (int)cursor_y, 
+                                         (uint32_t)(unsigned char)c, term_fg_color);
+        cursor_x += drawn_width;
+    } else {
+        if ((unsigned char)c < 128) {
+            const uint8_t *glyph = font8x8_basic[(unsigned char)c];
+            for (size_t y = 0; y < 8; y++) {
+                uint8_t row = glyph[y];
+                for (size_t x = 0; x < 8; x++) {
+                    if (row & (1 << x)) {
+                        size_t px = cursor_x + x;
+                        size_t py = cursor_y + y;
+                        if (px < term_width && py < term_height) {
+                            term_fb_address[py * term_pitch + px] = term_fg_color;
+                        }
                     }
                 }
             }
         }
+        cursor_x += gw;
     }
-    cursor_x += GLYPH_W;
 }
 
 void term_print(const char *str) {
@@ -147,25 +170,15 @@ void term_print(const char *str) {
 static char history[MAX_HISTORY][CMD_BUF_SIZE];
 static int history_count = 0;
 static int history_index = 0;
-
-static int cursor_pos = 0; // Current position inside cmd_buf
-
-// Redraw current command line on screen
-static void term_redraw_input_line(void) {
-    // Move back to the start of input (after prompt "EquantOS> ")
-    // For simplicity, we clear and re-print prompt + cmd_buf
-    // A robust TTY handles this via backspaces or redraw math.
-}
+static int cursor_pos = 0; 
 
 void term_poll_keyboard(void) {
     uint8_t scancode = keyboard_pop();
     if (scancode == 0) return;
 
-    // Handle Special Extended Keys
     if (scancode == KEY_UP) {
         if (history_count > 0 && history_index > 0) {
             history_index--;
-            // Clear current line input visually and replace with history item
             while (cmd_len > 0) {
                 term_putchar('\b');
                 cmd_len--;
@@ -210,7 +223,6 @@ void term_poll_keyboard(void) {
         cmd_buf[cmd_len] = '\0';
         
         if (cmd_len > 0) {
-            // Save to history
             if (history_count < MAX_HISTORY) {
                 strcpy(history[history_count++], cmd_buf);
             } else {
@@ -227,7 +239,6 @@ void term_poll_keyboard(void) {
         cursor_pos = 0;
     } else if (c == '\b') {
         if (cmd_len > 0 && cursor_pos > 0) {
-            // Remove character at cursor_pos - 1
             for (int i = cursor_pos - 1; i < cmd_len - 1; i++) {
                 cmd_buf[i] = cmd_buf[i + 1];
             }
@@ -237,7 +248,6 @@ void term_poll_keyboard(void) {
         }
     } else {
         if (cmd_len < CMD_BUF_SIZE - 1) {
-            // Append or insert character
             for (int i = cmd_len; i > cursor_pos; i--) {
                 cmd_buf[i] = cmd_buf[i - 1];
             }

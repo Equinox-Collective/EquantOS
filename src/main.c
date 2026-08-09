@@ -23,6 +23,7 @@
 #include "kernel/drivers/pci/pci.h"
 #include "kernel/core/mem/memory.h"
 #include "kernel/fs/fat32.h"
+#include "kernel/drivers/display/psf2.h"
 
 // Limine base revision request (revision 3)
 __attribute__((used, section(".requests")))
@@ -139,7 +140,13 @@ void _start(void) {
     }
     struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
     term_init(fb->address, fb->width, fb->height, fb->pitch);
-
+    vfs_node_t *font_file = vfs_open("/font.psf", 0);
+    if (font_file != NULL) {
+        ramfs_file_data_t *fdata = (ramfs_file_data_t *)font_file->ptr;
+        if (fdata && psf2_init_default(fdata->buffer, font_file->length)) {
+            serial_puts(COM1, "[KERNEL] PSF2 Font loaded successfully from RAMFS!\n");
+        }
+    }
     // 9. Keyboard & Interrupts
     keyboard_init();
     asm volatile ("sti");

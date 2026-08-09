@@ -83,6 +83,10 @@ build/iso/equantmemtest.elf: src/userland/equantmemtest.c
 	$(CC) -g -ffreestanding -fno-pie -fno-pic -nostdlib -c src/userland/equantmemtest.c -o build/obj/userland/equantmemtest.o
 	$(LD) -Ttext 0x400000 build/obj/userland/equantmemtest.o -o build/iso/equantmemtest.elf
 
+build/iso/font.psf: res/font.psf
+	@$(call MKDIR,build/iso)
+	@$(call CP,res/font.psf,build/iso/font.psf)
+
 # Download Limine binaries
 limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
 	@echo [BUILD] Fetching Limine bootloader binaries...
@@ -95,7 +99,7 @@ limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
 	@echo [BUILD] Limine binaries ready.
 
 # Build Hybrid ISO image (depends on kernel, test elf, and bootloader files)
-build/equantos.iso: build/kernel.elf build/iso/equantmemtest.elf limine.conf limine-bios-cd.bin limine-uefi-cd.bin
+build/equantos.iso: build/kernel.elf build/iso/equantmemtest.elf build/iso/font.psf limine.conf limine-bios-cd.bin limine-uefi-cd.bin
 	@echo [BUILD] Preparing ISO root structure...
 	@$(call MKDIR,build/iso/boot)
 	@$(call MKDIR,build/iso/EFI/BOOT)
