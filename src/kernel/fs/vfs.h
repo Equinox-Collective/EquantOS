@@ -18,6 +18,7 @@ typedef struct vfs_file_operations {
     void (*close)(struct vfs_node *node);
     struct vfs_node* (*readdir)(struct vfs_node *node, uint32_t index);
     struct vfs_node* (*finddir)(struct vfs_node *node, const char *name);
+    struct vfs_node* (*create)(struct vfs_node *dir, const char *name, uint32_t flags);
 } vfs_file_operations_t;
 
 typedef struct vfs_node {
@@ -38,6 +39,7 @@ typedef struct vfs_node {
 void vfs_init(void);
 vfs_node_t *vfs_mount(const char *path, vfs_node_t *local_root);
 vfs_node_t *vfs_open(const char *path, uint32_t flags);
+vfs_node_t *vfs_create(vfs_node_t *dir, const char *name, uint32_t flags);
 int64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 int64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 void vfs_close(vfs_node_t *node);

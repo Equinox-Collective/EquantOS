@@ -59,13 +59,19 @@ static vfs_node_t *ramfs_finddir(vfs_node_t *node, const char *name) {
     return NULL;
 }
 
+static vfs_node_t *ramfs_vfs_create(vfs_node_t *dir, const char *name, uint32_t flags) {
+    (void)flags;
+    return ramfs_create_file(dir, name, NULL, 0);
+}
+
 static vfs_file_operations_t ramfs_fops = {
     .read = ramfs_read,
     .write = ramfs_write,
     .open = NULL,
     .close = NULL,
     .readdir = ramfs_readdir,
-    .finddir = ramfs_finddir
+    .finddir = ramfs_finddir,
+    .create = ramfs_vfs_create
 };
 
 vfs_node_t *ramfs_create_root(void) {

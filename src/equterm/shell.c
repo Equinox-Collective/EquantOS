@@ -682,14 +682,29 @@ static void cmd_cp(int argc, char **argv) {
         return;
     }
 
-    // 6. Create file in destination directory (RAMFS)
-    vfs_node_t *new_file = ramfs_create_file(parent_dir, filename, buf, src_file->length);
-    if (new_file) {
+    // 6. Create file in destination directory using VFS abstraction
+    vfs_node_t *new_file = vfs_create(parent_dir, filename, 0);
+    if (!new_file) {
+        // If file already exists, open it
+        new_file = vfs_open(final_dst, 0);
+    }
+
+    if (!new_file) {
+        term_print("cp: failed to create destination file: ");
+        term_print(filename);
+        term_print("\n");
+        kfree(buf);
+        return;
+    }
+
+    // 7. Write buffer data to destination file
+    int64_t bytes_written = vfs_write(new_file, 0, src_file->length, buf);
+    if (bytes_written >= 0) {
         term_print("File copied successfully -> ");
         term_print(final_dst);
         term_print("\n");
     } else {
-        term_print("cp: failed to create destination file (is destination writable?)\n");
+        term_print("cp: failed to write to destination file\n");
     }
 
     kfree(buf);

@@ -78,6 +78,17 @@ vfs_node_t *vfs_open(const char *path, uint32_t flags) {
     return node;
 }
 
+vfs_node_t *vfs_create(vfs_node_t *dir, const char *name, uint32_t flags) {
+    if (!dir) return NULL;
+    if (dir->flags & FS_MOUNTPOINT && dir->ptr) {
+        dir = (vfs_node_t *)dir->ptr;
+    }
+    if (!(dir->flags & FS_DIRECTORY) || !dir->ops || !dir->ops->create) {
+        return NULL;
+    }
+    return dir->ops->create(dir, name, flags);
+}
+
 int64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     if (!node || !node->ops || !node->ops->read) return -1;
     return node->ops->read(node, offset, size, buffer);

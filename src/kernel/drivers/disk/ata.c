@@ -203,6 +203,10 @@ void read_sectors_ata_pio_drive(uint8_t drive, uintptr_t target_address, uint64_
     ata_irq_restore(f);
 }
 
+static inline void outsw(uint16_t port, const void *addr, uint32_t count) {
+    __asm__ volatile("rep outsw" : "+S"(addr), "+c"(count) : "d"(port) : "memory");
+}
+
 // Write sectors to ATA drive using PIO mode (supports Master 0 and Slave 1)
 void write_sectors_ata_pio_drive(uint8_t drive, uintptr_t src_address, uint64_t LBA, uint32_t sector_count) {
     if (sector_count == 0) return;
@@ -232,8 +236,4 @@ void write_sectors_ata_pio_drive(uint8_t drive, uintptr_t src_address, uint64_t 
     }
 
     ata_irq_restore(f);
-}
-
-void write_sectors_ata_pio(uintptr_t src_address, uint64_t LBA, uint32_t sector_count) {
-    write_sectors_ata_pio_drive(0, src_address, LBA, sector_count);
 }

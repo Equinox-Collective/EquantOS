@@ -11,5 +11,6 @@ void write_sectors_ata_pio(uintptr_t source_address, uint64_t LBA,
                            uint32_t sector_count);
 void ata_identify();
 void read_sectors_ata_pio_drive(uint8_t drive, uintptr_t target_address, uint64_t LBA, uint32_t sector_count);
+void write_sectors_ata_pio_drive(uint8_t drive, uintptr_t src_address, uint64_t LBA, uint32_t sector_count);
 
 #endif

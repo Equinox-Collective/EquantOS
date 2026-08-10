@@ -246,6 +246,15 @@ char *strrchr(const char *s, int c) {
     return last;
 }
 
+char *strchr(const char *s, int c) {
+    while (*s) {
+        if (*s == (char)c) return (char *)s;
+        s++;
+    }
+    if ((char)c == '\0') return (char *)s;
+    return NULL;
+}
+
 char *strsep(char **stringp, const char *delim) {
     char *start = *stringp;
     char *ptr;
