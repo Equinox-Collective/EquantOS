@@ -1,7 +1,7 @@
 // ext2.c - EXT2 Filesystem Driver Implementation
 #include "ext2.h"
 #include "mbr.h"
-#include "../drivers/ata/ata.h"
+#include "../drivers/disk/ata.h"
 #include "../core/mem/memory.h"
 #include "string.h"
 #include "stdio.h"

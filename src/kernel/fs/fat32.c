@@ -1,7 +1,7 @@
 // fat32.c - FAT32 File System Driver Implementation
 #include "fat32.h"
 #include "mbr.h"
-#include "../drivers/ata/ata.h"
+#include "../drivers/disk/ata.h"
 #include "ramfs.h"
 #include "../core/mem/memory.h"
 #include "string.h"

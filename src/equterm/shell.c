@@ -491,16 +491,42 @@ static void cmd_pwd(int argc, char **argv) {
     term_print("\n");
 }
 
+// Helper to strip last directory component for "cd .."
+static void path_go_up(char *path) {
+    int len = strlen(path);
+    if (len <= 1) {
+        strcpy(path, "/");
+        return;
+    }
+    if (path[len - 1] == '/') {
+        path[len - 1] = '\0';
+    }
+    for (int i = strlen(path) - 1; i >= 0; i--) {
+        if (path[i] == '/') {
+            if (i == 0) {
+                path[1] = '\0'; // Keep root "/"
+            } else {
+                path[i] = '\0';
+            }
+            break;
+        }
+    }
+}
+
 static void cmd_cd(int argc, char **argv) {
     if (argc < 2) {
         strcpy(current_dir, "/");
         return;
     }
 
+    if (strcmp(argv[1], "..") == 0) {
+        path_go_up(current_dir);
+        return;
+    }
+
     char resolved[256];
     resolve_path(argv[1], resolved, sizeof(resolved));
 
-    // Verify if directory exists via VFS
     vfs_node_t *node = vfs_open(resolved, 0);
     if (!node) {
         term_print("cd: no such file or directory: ");

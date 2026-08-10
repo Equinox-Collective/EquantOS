@@ -18,12 +18,13 @@
 #include "kernel/proc/syscall.h"
 #include "kernel/proc/loader.h"
 #include "kernel/proc/sched.h"
-#include "kernel/drivers/ata/ata.h"
+#include "kernel/drivers/disk/ata.h"
 #include "kernel/fs/mbr.h"
 #include "kernel/drivers/pci/pci.h"
 #include "kernel/core/mem/memory.h"
 #include "kernel/fs/fat32.h"
 #include "kernel/drivers/display/psf2.h"
+#include "kernel/fs/ext2.h"
 
 // Limine base revision request (revision 3)
 __attribute__((used, section(".requests")))
@@ -132,6 +133,14 @@ void _start(void) {
     ata_identify();
     mbr_init();
     fat32_init();
+
+    vfs_node_t *ext2_root = ext2_mount_partition(0); // Drive 1 partition 0 (or raw ext2 image)
+    if (ext2_root) {
+        vfs_node_t *ext2_dir = ramfs_create_directory(vfs_root, "ext2");
+        ext2_dir->flags |= FS_MOUNTPOINT;
+        ext2_dir->ptr = (struct vfs_node *)ext2_root;
+        serial_puts(COM1, "[EXT2] Second drive mounted successfully at /ext2!\n");
+    }
     serial_puts(COM1, "[KERNEL] Hardware drivers and MBR scan completed.\n");
 
     // 8. Framebuffer & Terminal
