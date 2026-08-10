@@ -134,7 +134,7 @@ void _start(void) {
     mbr_init();
     fat32_init();
 
-    vfs_node_t *ext2_root = ext2_mount_partition(0); // Drive 1 partition 0 (or raw ext2 image)
+    vfs_node_t *ext2_root = ext2_mount_partition(1, 0); // Drive 1, LBA 0 (raw ext2 image)
     if (ext2_root) {
         vfs_node_t *ext2_dir = ramfs_create_directory(vfs_root, "ext2");
         ext2_dir->flags |= FS_MOUNTPOINT;

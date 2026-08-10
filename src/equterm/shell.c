@@ -58,6 +58,7 @@ static void resolve_path(const char *input, char *output, size_t max_len);
 static void cmd_pwd(int argc, char **argv);
 static void cmd_cd(int argc, char **argv);
 static void cmd_run(int argc, char **argv);
+static void cmd_cp(int argc, char **argv);
 
 // The Ultimate Command Registry
 static const shell_command_t commands[] = {
@@ -83,6 +84,7 @@ static const shell_command_t commands[] = {
     { "pwd",    "Print current working directory",           cmd_pwd },
     { "cd",     "Change working directory",                  cmd_cd },
     { "run",    "Load and execute an ELF binary",            cmd_run },
+    { "cp",     "Copy source file to destination",           cmd_cp },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -593,4 +595,76 @@ static void cmd_run(int argc, char **argv) {
         term_print("run: ELF load failed\n");
         kfree(elf_buf);
     }
+}
+
+static void cmd_cp(int argc, char **argv) {
+    if (argc < 3) {
+        term_print("Usage: cp <source> <destination>\n");
+        return;
+    }
+
+    char src_path[256], dst_path[256];
+    resolve_path(argv[1], src_path, sizeof(src_path));
+    resolve_path(argv[2], dst_path, sizeof(dst_path));
+
+    // 1. Open source file
+    vfs_node_t *src_file = vfs_open(src_path, 0);
+    if (!src_file) {
+        term_print("cp: source file not found: ");
+        term_print(src_path);
+        term_print("\n");
+        return;
+    }
+
+    if (src_file->flags & FS_DIRECTORY) {
+        term_print("cp: cannot copy directories: ");
+        term_print(src_path);
+        term_print("\n");
+        return;
+    }
+
+    // 2. Allocate buffer and read source file contents
+    uint8_t *buf = (uint8_t *)kmalloc(src_file->length);
+    if (!buf) {
+        term_print("cp: out of memory for file buffer\n");
+        return;
+    }
+
+    int64_t bytes_read = vfs_read(src_file, 0, src_file->length, buf);
+    if (bytes_read <= 0) {
+        term_print("cp: failed to read source file data\n");
+        kfree(buf);
+        return;
+    }
+
+    // 3. Extract destination filename from path
+    char *filename = dst_path;
+    for (int i = strlen(dst_path) - 1; i >= 0; i--) {
+        if (dst_path[i] == '/') {
+            filename = &dst_path[i + 1];
+            break;
+        }
+    }
+
+    if (filename[0] == '\0') {
+        term_print("cp: invalid destination filename\n");
+        kfree(buf);
+        return;
+    }
+
+    // 4. Create destination file in RAMFS root (or target path)
+    vfs_node_t *root = vfs_open("/", 0);
+    vfs_node_t *new_file = ramfs_create_file(root, filename, buf, src_file->length);
+    
+    if (new_file) {
+        term_print("File copied successfully: ");
+        term_print(src_path);
+        term_print(" -> /");
+        term_print(filename);
+        term_print("\n");
+    } else {
+        term_print("cp: failed to create destination file\n");
+    }
+
+    kfree(buf);
 }

@@ -97,6 +97,6 @@ typedef struct {
 #define EXT2_FT_SYMLINK  7
 
 void ext2_init(void);
-vfs_node_t *ext2_mount_partition(uint32_t partition_lba);
+vfs_node_t *ext2_mount_partition(uint8_t drive, uint32_t partition_lba) ;
 
 #endif // EXT2_H
