@@ -21,3 +21,4 @@ GPU (Through LinuxKPI)
 Own Package Manager
 GUI
 Sound
+Eon (GRAPHICAL DSL LANGUAGE)
