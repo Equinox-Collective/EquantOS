@@ -202,3 +202,38 @@ void read_sectors_ata_pio_drive(uint8_t drive, uintptr_t target_address, uint64_
 
     ata_irq_restore(f);
 }
+
+// Write sectors to ATA drive using PIO mode (supports Master 0 and Slave 1)
+void write_sectors_ata_pio_drive(uint8_t drive, uintptr_t src_address, uint64_t LBA, uint32_t sector_count) {
+    if (sector_count == 0) return;
+    uint64_t f = ata_irq_save();
+
+    while (sector_count > 0) {
+        uint8_t chunk = (sector_count > 255) ? 255 : (uint8_t)sector_count;
+
+        while (inb(0x1F7) & 0x80); // Wait until BSY is clear
+
+        outb(0x1F6, 0xE0 | (drive << 4) | ((LBA >> 24) & 0x0F));
+        outb(0x1F2, chunk);
+        outb(0x1F3, (uint8_t)LBA);
+        outb(0x1F4, (uint8_t)(LBA >> 8));
+        outb(0x1F5, (uint8_t)(LBA >> 16));
+        outb(0x1F7, 0x30); // Send WRITE SECTORS command
+
+        uint16_t *src = (uint16_t *)src_address;
+        for (int j = 0; j < chunk; j++) {
+            while (!(inb(0x1F7) & 0x08)); // Wait for DRQ
+            outsw(0x1F0, src, 256);
+            src += 256;
+        }
+
+        sector_count -= chunk;
+        LBA += chunk;
+    }
+
+    ata_irq_restore(f);
+}
+
+void write_sectors_ata_pio(uintptr_t src_address, uint64_t LBA, uint32_t sector_count) {
+    write_sectors_ata_pio_drive(0, src_address, LBA, sector_count);
+}

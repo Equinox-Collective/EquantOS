@@ -617,53 +617,79 @@ static void cmd_cp(int argc, char **argv) {
     }
 
     if (src_file->flags & FS_DIRECTORY) {
-        term_print("cp: cannot copy directories: ");
-        term_print(src_path);
-        term_print("\n");
+        term_print("cp: cannot copy directories\n");
         return;
     }
 
-    // 2. Allocate buffer and read source file contents
+    // 2. Check if destination is an existing directory. If so, append source filename.
+    char final_dst[256];
+    vfs_node_t *dst_node = vfs_open(dst_path, 0);
+    if (dst_node && (dst_node->flags & FS_DIRECTORY)) {
+        strcpy(final_dst, dst_path);
+        if (final_dst[strlen(final_dst) - 1] != '/') {
+            strcat(final_dst, "/");
+        }
+        // Extract filename from src_path
+        const char *src_name = src_path;
+        for (int i = strlen(src_path) - 1; i >= 0; i--) {
+            if (src_path[i] == '/') {
+                src_name = &src_path[i + 1];
+                break;
+            }
+        }
+        strcat(final_dst, src_name);
+    } else {
+        strcpy(final_dst, dst_path);
+    }
+
+    // 3. Separate parent directory path and target filename
+    char parent_path[256];
+    strcpy(parent_path, final_dst);
+    char *filename = parent_path;
+    for (int i = strlen(parent_path) - 1; i >= 0; i--) {
+        if (parent_path[i] == '/') {
+            if (i == 0) {
+                parent_path[1] = '\0';
+            } else {
+                parent_path[i] = '\0';
+            }
+            filename = &parent_path[i + 1];
+            break;
+        }
+    }
+
+    // 4. Read source file into buffer
     uint8_t *buf = (uint8_t *)kmalloc(src_file->length);
     if (!buf) {
-        term_print("cp: out of memory for file buffer\n");
+        term_print("cp: out of memory\n");
         return;
     }
 
     int64_t bytes_read = vfs_read(src_file, 0, src_file->length, buf);
     if (bytes_read <= 0) {
-        term_print("cp: failed to read source file data\n");
+        term_print("cp: failed to read source file\n");
         kfree(buf);
         return;
     }
 
-    // 3. Extract destination filename from path
-    char *filename = dst_path;
-    for (int i = strlen(dst_path) - 1; i >= 0; i--) {
-        if (dst_path[i] == '/') {
-            filename = &dst_path[i + 1];
-            break;
-        }
-    }
-
-    if (filename[0] == '\0') {
-        term_print("cp: invalid destination filename\n");
+    // 5. Open parent destination directory
+    vfs_node_t *parent_dir = vfs_open(parent_path, 0);
+    if (!parent_dir || !(parent_dir->flags & FS_DIRECTORY)) {
+        term_print("cp: invalid destination directory: ");
+        term_print(parent_path);
+        term_print("\n");
         kfree(buf);
         return;
     }
 
-    // 4. Create destination file in RAMFS root (or target path)
-    vfs_node_t *root = vfs_open("/", 0);
-    vfs_node_t *new_file = ramfs_create_file(root, filename, buf, src_file->length);
-    
+    // 6. Create file in destination directory (RAMFS)
+    vfs_node_t *new_file = ramfs_create_file(parent_dir, filename, buf, src_file->length);
     if (new_file) {
-        term_print("File copied successfully: ");
-        term_print(src_path);
-        term_print(" -> /");
-        term_print(filename);
+        term_print("File copied successfully -> ");
+        term_print(final_dst);
         term_print("\n");
     } else {
-        term_print("cp: failed to create destination file\n");
+        term_print("cp: failed to create destination file (is destination writable?)\n");
     }
 
     kfree(buf);
