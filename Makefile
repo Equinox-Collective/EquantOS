@@ -26,12 +26,14 @@ ifeq ($(USE_POSIX),1)
     RMDIR = rm -rf "$1"
     RM    = rm -f "$1"
     CP    = cp "$1" "$2"
+    EXT2_MAKE = dd if=/dev/zero of=disk.img bs=1M count=32 && mkfs.ext2 -F disk.img
 else
     WINPATH = $(subst /,\,$(patsubst %/,%,$1))
     MKDIR   = if not exist "$(call WINPATH,$1)" mkdir "$(call WINPATH,$1)"
     RMDIR   = if exist "$(call WINPATH,$1)" rmdir /s /q "$(call WINPATH,$1)"
     RM      = if exist "$(call WINPATH,$1)" del /q /f "$(call WINPATH,$1)"
     CP      = copy /Y "$(call WINPATH,$1)" "$(call WINPATH,$2)" >nul
+    EXT2_MAKE = winmakeext2 --size:32MB --output:disk.img
 endif
 
 # Recursive wildcard file search
@@ -87,6 +89,12 @@ build/iso/font.psf: res/font.psf
 	@$(call MKDIR,build/iso)
 	@$(call CP,res/font.psf,build/iso/font.psf)
 
+# Generate EXT2 disk image using winmakeext2 (Windows) or mkfs.ext2 (Linux)
+disk.img:
+	@echo [BUILD] Generating EXT2 disk image...
+	$(EXT2_MAKE)
+	@echo [SUCCESS] disk.img generated successfully!
+
 # Download Limine binaries
 limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
 	@echo [BUILD] Fetching Limine bootloader binaries...
@@ -123,11 +131,12 @@ build/equantos.iso: build/kernel.elf build/iso/equantmemtest.elf build/iso/font.
 	@$(call RM,BOOTX64.EFI)
 	@echo [SUCCESS] EquantOS ISO created at build/equantos.iso!
 
-run: build/equantos.iso
-	qemu-system-x86_64 -cdrom build/equantos.iso -hda disk.vhd -serial stdio
+run: build/equantos.iso disk.img
+	qemu-system-x86_64 -cdrom build/equantos.iso -hda disk.vhd -hdb disk.img -serial stdio
 
 clean:
 	@$(call RMDIR,build)
+	@$(call RM,disk.img)
 
 clean-all: clean
 	@$(call RM,limine-bios-cd.bin)
