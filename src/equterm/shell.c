@@ -390,8 +390,32 @@ static void cmd_hexdump(int argc, char **argv) {
 }
 
 static void cmd_writefile(int argc, char **argv) {
-    if (argc < 3) {
-        term_print("Usage: writefile <filename> <text>\n");
+    if (argc < 2) {
+        term_print("Usage: writefile <filename> [text]\n");
+        return;
+    }
+
+    char resolved[256];
+    resolve_path(argv[1], resolved, sizeof(resolved));
+
+    // Separate parent directory and filename
+    char parent_path[256];
+    strcpy(parent_path, resolved);
+    char *filename = parent_path;
+    for (int i = strlen(parent_path) - 1; i >= 0; i--) {
+        if (parent_path[i] == '/') {
+            if (i == 0) parent_path[1] = '\0';
+            else parent_path[i] = '\0';
+            filename = &parent_path[i + 1];
+            break;
+        }
+    }
+
+    vfs_node_t *dir = vfs_open(parent_path, 0);
+    if (!dir || !(dir->flags & FS_DIRECTORY)) {
+        term_print("writefile: invalid directory: ");
+        term_print(parent_path);
+        term_print("\n");
         return;
     }
 
@@ -408,19 +432,24 @@ static void cmd_writefile(int argc, char **argv) {
         pos += arg_len;
     }
 
-    vfs_node_t *root = vfs_open("/", 0);
-    if (!root) {
-        term_print("Error opening root directory\n");
+    // Create file using VFS abstraction (routes to RAMFS, FAT32 or EXT2)
+    vfs_node_t *new_file = vfs_create(dir, filename, 0);
+    if (!new_file) {
+        new_file = vfs_open(resolved, 0); // Try opening if file already exists
+    }
+
+    if (!new_file) {
+        term_print("writefile: failed to create file (filesystem may be read-only or full)\n");
         return;
     }
 
-    vfs_node_t *new_file = ramfs_create_file(root, argv[1], text_buf, strlen(text_buf));
-    if (new_file) {
-        term_print("File created successfully: /");
-        term_print(argv[1]);
+    int64_t written = vfs_write(new_file, 0, strlen(text_buf), (uint8_t *)text_buf);
+    if (written >= 0) {
+        term_print("File written successfully: ");
+        term_print(resolved);
         term_print("\n");
     } else {
-        term_print("Failed to create file\n");
+        term_print("writefile: write failed (filesystem is read-only or doesn't support writing)\n");
     }
 }
 
@@ -658,20 +687,22 @@ static void cmd_cp(int argc, char **argv) {
         }
     }
 
-    // 4. Read source file into buffer
-    uint8_t *buf = (uint8_t *)kmalloc(src_file->length);
+    size_t alloc_len = src_file->length > 0 ? src_file->length : 1;
+    uint8_t *buf = (uint8_t *)kmalloc(alloc_len);
     if (!buf) {
         term_print("cp: out of memory\n");
         return;
     }
 
-    int64_t bytes_read = vfs_read(src_file, 0, src_file->length, buf);
-    if (bytes_read <= 0) {
-        term_print("cp: failed to read source file\n");
-        kfree(buf);
-        return;
+    int64_t bytes_read = 0;
+    if (src_file->length > 0) {
+        bytes_read = vfs_read(src_file, 0, src_file->length, buf);
+        if (bytes_read <= 0) {
+            term_print("cp: failed to read source file\n");
+            kfree(buf);
+            return;
+        }
     }
-
     // 5. Open parent destination directory
     vfs_node_t *parent_dir = vfs_open(parent_path, 0);
     if (!parent_dir || !(parent_dir->flags & FS_DIRECTORY)) {
