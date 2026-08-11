@@ -25,6 +25,8 @@
 #include "kernel/fs/fat32.h"
 #include "kernel/drivers/display/psf2.h"
 #include "kernel/fs/ext2.h"
+#include "kernel/fs/gpt.h"
+#include "kernel/fs/partition.h"
 
 // Limine base revision request (revision 3)
 __attribute__((used, section(".requests")))
@@ -132,6 +134,8 @@ void _start(void) {
     pci_init();
     ata_identify();
     mbr_init();
+    gpt_init(0);
+    disk_partition_scan(0); 
     fat32_init();
 
     vfs_node_t *ext2_root = ext2_mount_partition(1, 0); // Drive 1, LBA 0 (raw ext2 image)

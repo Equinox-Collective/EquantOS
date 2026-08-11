@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "vfs.h"
+#include "partition.h"
 
 #define GPT_SIGNATURE 0x5452415020494645ULL // "EFI PART"
 

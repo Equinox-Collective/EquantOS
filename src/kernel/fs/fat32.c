@@ -535,39 +535,54 @@ vfs_node_t *fat32_mount_partition(uint32_t partition_lba) {
 }
 
 void fat32_init(void) {
-    serial_puts(COM1, "[FAT32] Initializing FAT32 file system driver...\n");
+    serial_puts(COM1, "[DEBUG-FAT32] Initializing FAT32 subsystem...\n");
     
     if (!vfs_root) {
-        serial_puts(COM1, "[FAT32 ERROR] VFS Root is NULL! Cannot mount FAT32.\n");
+        serial_puts(COM1, "[DEBUG-FAT32 ERROR] VFS Root is NULL! Cannot mount FAT32.\n");
         return;
     }
 
-    int p_count = mbr_get_partition_count();
-    if (p_count > 0) {
-        partition_info_t *part = mbr_get_partition(0);
-        if (part && (part->type == 0x0B || part->type == 0x0C)) {
-            serial_puts(COM1, "[FAT32] Found FAT32 partition in MBR. Mounting at /disk...\n");
-            
-            vfs_node_t *fat_root = fat32_mount_partition(part->start_lba);
-            if (!fat_root) {
-                serial_puts(COM1, "[FAT32 ERROR] Failed to mount FAT32 partition!\n");
-                return;
-            }
+    int p_count = disk_get_partition_count(); // Using unified partition manager!
+    char buf[32];
+    serial_puts(COM1, "[DEBUG-FAT32] Total unified partitions available for FAT32 check: ");
+    itoa(p_count, 10, buf);
+    serial_puts(COM1, buf);
+    serial_puts(COM1, "\n");
 
-            vfs_node_t *disk_dir = ramfs_create_directory(vfs_root, "disk");
-            if (!disk_dir) {
-                serial_puts(COM1, "[FAT32 ERROR] Failed to allocate /disk directory node in RAMFS!\n");
-                return;
-            }
+    for (int i = 0; i < p_count; i++) {
+        partition_info_t *part = disk_get_partition(i);
+        if (part) {
+            serial_puts(COM1, "[DEBUG-FAT32] Inspecting Partition #");
+            itoa(i, 10, buf);
+            serial_puts(COM1, buf);
+            serial_puts(COM1, " | Start LBA: ");
+            itoa((int64_t)part->start_lba, 10, buf);
+            serial_puts(COM1, buf);
+            serial_puts(COM1, " | Type: 0x");
+            itoa_hex(part->type, buf);
+            serial_puts(COM1, buf);
+            serial_puts(COM1, "\n");
 
-            disk_dir->flags |= FS_MOUNTPOINT;
-            disk_dir->ptr = (vfs_node_t *)fat_root;
-            
-            serial_puts(COM1, "[FAT32] FAT32 successfully mounted at /disk!\n");
-        } else {
-            serial_puts(COM1, "[FAT32] No FAT32 partition found in MBR.\n");
+            // Check if partition is FAT32 (Type 0x0B, 0x0C, or EFI System Partition on GPT: C12A7328-F81F-11D2-BA4B-00A0C93EC93B)
+            // For universal GPT support, EFI System Partition (ESP) is also FAT32!
+            if (part->type == 0x0B || part->type == 0x0C || part->type == 0x83 /* or check GPT ESP guid type */) {
+                serial_puts(COM1, "[DEBUG-FAT32] CANDIDATE MATCHED! Attempting to mount FAT32 at LBA: ");
+                itoa((int64_t)part->start_lba, 10, buf);
+                serial_puts(COM1, buf);
+                serial_puts(COM1, "\n");
+                
+                vfs_node_t *fat_root = fat32_mount_partition(part->start_lba);
+                if (fat_root) {
+                    vfs_node_t *disk_dir = ramfs_create_directory(vfs_root, "disk");
+                    if (disk_dir) {
+                        disk_dir->flags |= FS_MOUNTPOINT;
+                        disk_dir->ptr = (vfs_node_t *)fat_root;
+                        serial_puts(COM1, "[DEBUG-FAT32] SUCCESS: FAT32 successfully mounted at /disk!\n");
+                        return; // Successfully mounted first valid boot/fat32 partition
+                    }
+                }
+            }
         }
-    } else {
-        serial_puts(COM1, "[FAT32] No MBR partitions detected.\n");
     }
+    serial_puts(COM1, "[DEBUG-FAT32 WARNING] No valid FAT32 / ESP partition found to mount.\n");
 }

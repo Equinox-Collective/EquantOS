@@ -3,6 +3,7 @@
 #define MBR_H
 
 #include <stdint.h>
+#include "partition.h"
 
 #define MBR_SIGNATURE 0xAA55
 
@@ -29,15 +30,6 @@ typedef struct {
     mbr_partition_t partitions[4];       // Array of 4 primary partition entries
     uint16_t        signature;           // Boot sector signature: must be 0xAA55
 } __attribute__((packed)) mbr_sector_t;
-
-// High-level abstracted partition info structure used by VFS/Drivers
-typedef struct {
-    uint32_t start_lba;
-    uint32_t sector_count;
-    uint8_t  type;
-    uint8_t  index;              // Partition slot index (0 to 3)
-} partition_info_t;
-
 
 void mbr_init(void);
 int mbr_get_partition_count(void);
