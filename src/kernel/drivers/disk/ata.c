@@ -172,7 +172,8 @@ void write_sectors_ata_pio(uintptr_t source_address, uint64_t LBA,
     ata_irq_restore(f);
 }
 
-// Extended ATA read supporting both Master (0) and Slave (1) on Primary channel
+
+// Extended ATA read supporting both Master (0) and Slave (1) on Primary channel with safety timeout
 void read_sectors_ata_pio_drive(uint8_t drive, uintptr_t target_address, uint64_t LBA, uint32_t sector_count) {
     if (sector_count == 0) return;
     uint64_t f = ata_irq_save();
@@ -180,7 +181,14 @@ void read_sectors_ata_pio_drive(uint8_t drive, uintptr_t target_address, uint64_
     while (sector_count > 0) {
         uint8_t chunk = (sector_count > 255) ? 255 : (uint8_t)sector_count;
 
-        while (inb(0x1F7) & 0x80); // Wait until BSY is clear
+        // Safety timeout to prevent infinite freezing if drive is missing or unresponsive
+        uint32_t timeout = 1000000;
+        while ((inb(0x1F7) & 0x80) && --timeout);
+        if (timeout == 0) {
+            // Drive not responding
+            ata_irq_restore(f);
+            return;
+        }
 
         // Select drive (bit 4 = 0 for Master, 1 for Slave) and set LBA bits 24-27
         outb(0x1F6, 0xE0 | (drive << 4) | ((LBA >> 24) & 0x0F));
@@ -191,7 +199,12 @@ void read_sectors_ata_pio_drive(uint8_t drive, uintptr_t target_address, uint64_
         outb(0x1F7, 0x20); // Send READ SECTORS command
 
         for (int j = 0; j < chunk; j++) {
-            while (!(inb(0x1F7) & 0x08)); // Wait for DRQ from drive
+            timeout = 1000000;
+            while (!(inb(0x1F7) & 0x08) && --timeout); // Wait for DRQ with timeout
+            if (timeout == 0) {
+                ata_irq_restore(f);
+                return;
+            }
             insw(ATA_PRIMARY_DATA, (void *)target_address, 256);
             target_address += 512;
         }

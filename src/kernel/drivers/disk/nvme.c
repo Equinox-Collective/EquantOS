@@ -138,15 +138,19 @@ static void nvme_submit_command(nvme_controller_t *ctrl, nvme_queue_pair_t *qp, 
 
 // Poll completion queue and wait for command ID match
 static int nvme_wait_completion(nvme_controller_t *ctrl, nvme_queue_pair_t *qp, uint16_t cid, uint8_t is_admin) {
-    uint32_t timeout = 5000000; // 5 seconds timeout loop
+    uint32_t timeout = 10000000; // 10 seconds timeout loop
 
     while (timeout--) {
-        nvme_cq_entry_t *cqe = &qp->cq[qp->cq_head];
-        uint8_t phase = (uint8_t)(cqe->status & 1);
+        // CRITICAL: Prevent compiler from optimizing/caching memory reads during polling
+        __asm__ volatile("" ::: "memory");
+
+        volatile nvme_cq_entry_t *cqe = &qp->cq[qp->cq_head];
+        uint16_t cqe_status = cqe->status;
+        uint8_t phase = (uint8_t)(cqe_status & 1);
 
         if (phase == qp->cq_phase) {
             if (cqe->cid == cid) {
-                uint16_t status = (uint16_t)((cqe->status >> 1) & 0x7FF);
+                uint16_t status = (uint16_t)((cqe_status >> 1) & 0x7FF);
 
                 qp->cq_head = (qp->cq_head + 1) % qp->cq_size;
                 if (qp->cq_head == 0) {
@@ -160,11 +164,17 @@ static int nvme_wait_completion(nvme_controller_t *ctrl, nvme_queue_pair_t *qp, 
                     nvme_write32(ctrl, 0x1000 + (2 * 4) + 4, qp->cq_head);
                 }
 
-                return (status == 0) ? NVME_SUCCESS : NVME_ERR_HARDWARE;
+                if (status != 0) {
+                    serial_puts(COM1, "[NVME-ERROR] Command completed with non-zero status error code!\n");
+                    return NVME_ERR_HARDWARE;
+                }
+
+                return NVME_SUCCESS;
             }
         }
     }
-    serial_puts(COM1, "[NVME-ERROR] Command completion timeout reached!\n");
+    
+    serial_puts(COM1, "[NVME-ERROR] Command completion timeout reached (Controller did not respond)!\n");
     return NVME_ERR_TIMEOUT;
 }
 
