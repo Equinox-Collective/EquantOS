@@ -8,9 +8,8 @@
 ~~Power~~
 ~~FAT32~~
 ~~Terminal Improvements~~
-EXT2 <
-NVME, GPT
-Ring 3 (For SDK, Userland)
+~~EXT2~~
+NVME, GPT <
 Musl/mlibc, Busybox, LABI (POSIX syscalls)
 Bash
 USB
