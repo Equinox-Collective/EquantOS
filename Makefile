@@ -131,8 +131,12 @@ build/equantos.iso: build/kernel.elf build/iso/equantmemtest.elf build/iso/font.
 	@$(call RM,BOOTX64.EFI)
 	@echo [SUCCESS] EquantOS ISO created at build/equantos.iso!
 
-run: build/equantos.iso disk.img
-	qemu-system-x86_64 -cdrom build/equantos.iso -drive file=nvme.img,if=none,id=nvme0 -device nvme,drive=nvme0,serial=deadbeef -serial stdio
+run: build/equantos.iso disk.vhd disk.img
+	qemu-system-x86_64 -cdrom build/equantos.iso \
+		-hda disk.vhd \
+		-drive file=disk.img,if=none,id=nvme0 \
+		-device nvme,drive=nvme0,serial=deadbeef \
+		-serial stdio
 
 clean:
 	@$(call RMDIR,build)

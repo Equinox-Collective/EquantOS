@@ -6,8 +6,8 @@
 #include "../../core/mem/pmm.h"
 #include "../../core/mem/vmm.h"
 #include "../../core/gen/io.h"
-#include "../../libs/string.h"
-#include "../../libs/stdio.h"
+#include "string.h"
+#include "stdio.h"
 
 static nvme_controller_t nvme_ctrl;
 
@@ -60,8 +60,24 @@ static int nvme_find_controller(uint8_t *out_bus, uint8_t *out_slot, uint8_t *ou
     return 0;
 }
 
+// Force page tables to mark DMA memory as uncacheable (PTE_PCD | PTE_PWT)
+static void nvme_make_uncacheable(uint64_t phys_addr, size_t size) {
+    uint64_t cr3_val;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
+    page_table_t *pml4 = (page_table_t *)VIRT(cr3_val & ~0xFFFULL);
+
+    size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (size_t i = 0; i < pages; i++) {
+        uint64_t page_phys = (phys_addr & ~0xFFFULL) + (i * PAGE_SIZE);
+        uint64_t page_virt = VIRT(page_phys);
+        // Map with Page-level Cache Disable (PCD) and Write-Through (PWT)
+        vmm_map(pml4, page_virt, page_phys, PTE_PRESENT | PTE_WRITABLE | PTE_PCD | PTE_PWT);
+    }
+}
+
 // Initialize Submission & Completion Queues with page-aligned physical memory
 static int nvme_init_queue_pair(nvme_queue_pair_t *qp, uint16_t sq_size, uint16_t cq_size) {
+    
     size_t sq_bytes = sq_size * sizeof(nvme_sq_entry_t);
     size_t cq_bytes = cq_size * sizeof(nvme_cq_entry_t);
 
@@ -91,6 +107,8 @@ static int nvme_init_queue_pair(nvme_queue_pair_t *qp, uint16_t sq_size, uint16_
     qp->sq_tail = 0;
     qp->cq_head = 0;
     qp->cq_phase = 1;
+    nvme_make_uncacheable(qp->sq_phys, sq_bytes);
+    nvme_make_uncacheable(qp->cq_phys, cq_bytes);
 
     serial_puts(COM1, "[NVME-DEBUG] Queue pair allocated successfully.\n");
     return NVME_SUCCESS;
@@ -98,10 +116,19 @@ static int nvme_init_queue_pair(nvme_queue_pair_t *qp, uint16_t sq_size, uint16_
 
 // Submit a command to a submission queue and ring the doorbell
 static void nvme_submit_command(nvme_controller_t *ctrl, nvme_queue_pair_t *qp, nvme_sq_entry_t *cmd, uint8_t is_admin) {
-    qp->sq[qp->sq_tail] = *cmd;
+    uint16_t tail = qp->sq_tail;
+    
+    // 1. Copy command into submission queue ring buffer
+    qp->sq[tail] = *cmd;
+
+    // 2. CRITICAL: Flush CPU cache line to physical RAM so the NVMe controller sees the command via DMA!
+    __asm__ volatile("clflush (%0)" : : "r"(&qp->sq[tail]) : "memory");
+    __asm__ volatile("mfence" ::: "memory");
+
+    // 3. Advance tail pointer
     qp->sq_tail = (qp->sq_tail + 1) % qp->sq_size;
 
-    // Ring Doorbell (Admin SQ doorbell offset is 0x1000, I/O SQ doorbell is 0x1000 + 2 * stride)
+    // 4. Ring Doorbell (Admin SQ doorbell offset is 0x1000)
     if (is_admin) {
         nvme_write32(ctrl, 0x1000, qp->sq_tail);
     } else {
@@ -148,6 +175,7 @@ static int nvme_identify_controller(nvme_controller_t *ctrl) {
     void *buf_virt = pmm_alloc_continuous(1); // 4KB DMA buffer
     if (!buf_virt) return NVME_ERR_NOMEM;
     uint64_t buf_phys = (uint64_t)buf_virt;
+    nvme_make_uncacheable(buf_phys, 4096); // Disable caching for DMA buffer
     memset((void *)VIRT(buf_phys), 0, 4096);
 
     nvme_sq_entry_t cmd;
@@ -199,15 +227,14 @@ int nvme_init(void) {
     serial_puts(COM1, "\n");
 
     // Map BAR0 using VMM with cache disabled flags (PCD | PWT)
-    nvme_bar0 = (volatile uint8_t *)pci_map_mmio(bar0_phys, 0x16384); // Map 16KB
-    if (!nvme_bar0) {
+    nvme_ctrl.bar0 = (volatile uint8_t *)pci_map_mmio(bar0_phys, 0x16384); // Map 16KB
+    if (!nvme_ctrl.bar0) {
         serial_puts(COM1, "[NVME-ERROR] Failed to map BAR0 MMIO via VMM!\n");
         return NVME_ERR_HARDWARE;
     }
     serial_puts(COM1, "[NVME-DEBUG] BAR0 successfully mapped to virtual memory.\n");
-
-    nvme_ctrl.bar0 = nvme_bar0;
-
+    nvme_write32(&nvme_ctrl, 0x0C, 0xFFFFFFFF);
+    serial_puts(COM1, "[NVME-DEBUG] All NVMe interrupts masked (Polling mode active).\n");
     // 1. Disable Controller (CC.EN = 0)
     uint32_t cc = nvme_read32(&nvme_ctrl, NVME_REG_CC);
     cc &= ~NVME_CC_ENABLE;
