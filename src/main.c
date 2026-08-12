@@ -9,6 +9,7 @@
 #include "kernel/misc/timer.h"
 #include "kernel/core/gen/gdt.h"
 #include "kernel/core/gen/idt.h"
+#include "kernel/core/gen/cpu.h"
 #include "kernel/proc/task.h"
 #include "kernel/drivers/keyboard/keyboard.h"
 #include "kernel/core/mem/vmm.h"
@@ -29,6 +30,7 @@
 #include "kernel/fs/partition.h"
 #include "kernel/drivers/disk/nvme.h"
 #include "kernel/drivers/disk/block.h"
+#include "string.h"
 
 // Limine base revision request (revision 3)
 __attribute__((used, section(".requests")))
@@ -58,24 +60,10 @@ static volatile struct limine_module_request module_request = {
     .response = NULL
 };
 
-static void init_sse(void) {
-    uint64_t cr0;
-    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~(1 << 2); // Clear CR0.EM
-    cr0 |= (1 << 1);  // Set CR0.MP
-    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
-
-    uint64_t cr4;
-    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1 << 9);  // Set CR4.OSFXSR
-    cr4 |= (1 << 10); // Set CR4.OSXMMEXCPT
-    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
-}
-
 void _start(void) {
     // 1. Initialize serial port & CPU descriptors
     serial_init(COM1);
-    init_sse();
+    enable_fpu_sse(); // Enable CR4.OSFXSR & OSXMMEXCPT for SSE safety
     init_gdt();
     init_idt();
     init_timer(100);
@@ -95,7 +83,7 @@ void _start(void) {
     vmm_init();
     serial_puts(COM1, "[KERNEL] PMM and VMM Initialized successfully.\n");
 
-    // 4. Initialize Kernel Heap (allocate a safe 1 MB continuous block)
+    // 4. Initialize Kernel Heap (allocate 1 MB continuous block)
     void *heap_phys = pmm_alloc_continuous(256); // 256 pages * 4KB = 1 MB
     if (heap_phys == NULL) {
         PANIC("Failed to allocate physical memory for kernel heap!");
@@ -117,11 +105,14 @@ void _start(void) {
     vfs_mount("/", ramfs_root);
     serial_puts(COM1, "[KERNEL] VFS and RAMFS mounted at root '/'.\n");
 
-    // Populate RAMFS with Limine boot modules
+    // FIX: Safely parse module filenames so /font.psf is created directly in root '/'
     if (module_request.response != NULL && module_request.response->module_count > 0) {
         for (uint64_t i = 0; i < module_request.response->module_count; i++) {
             struct limine_file *mod = module_request.response->modules[i];
-            const char *filename = (mod->path[0] == '/') ? mod->path + 1 : mod->path;
+            
+            const char *filename = strrchr(mod->path, '/');
+            filename = (filename != NULL) ? filename + 1 : mod->path;
+
             ramfs_create_file(ramfs_root, filename, mod->address, mod->size);
             
             serial_puts(COM1, "[KERNEL] RAMFS loaded module: /");
@@ -132,25 +123,40 @@ void _start(void) {
         serial_puts(COM1, "[KERNEL] No boot modules found by Limine to mount.\n");
     }
 
-    // 7. Initialize Hardware Drivers (PCI, ATA, NVMe, Partitions)
+    // 7. Initialize Hardware Drivers & Storage Subsystems
     pci_init();
-    ata_identify();
     
-    // Scan partitions on Drive 0 (Master) via unified manager
-    disk_partition_scan(0); 
-    fat32_init();
+    // Initialize NVMe Storage Controller
+    if (nvme_init() == NVME_SUCCESS) {
+        block_device_t nvme_disk = nvme_get_block_device();
 
-    // Initialize NVMe and mount EXT2 from NVMe block device!
-    nvme_init();
-    block_device_t nvme_disk = nvme_get_block_device();
-    vfs_node_t *ext2_root = ext2_mount_partition(nvme_disk, 0); 
-    if (ext2_root) {
-        vfs_node_t *ext2_dir = ramfs_create_directory(vfs_root, "ext2");
-        ext2_dir->flags |= FS_MOUNTPOINT;
-        ext2_dir->ptr = (struct vfs_node *)ext2_root;
-        serial_puts(COM1, "[EXT2] EXT2 successfully mounted from NVMe device at /ext2!\n");
+        // Scan GPT/MBR partition table on NVMe
+        disk_partition_scan_device(nvme_disk);
+
+        // Mount FAT32 / ESP partition
+        fat32_init();
+
+        // FIX: Dynamically scan for EXT2 partition (Type 0x83) instead of hardcoding LBA 0
+        int p_count = disk_get_partition_count();
+        for (int i = 0; i < p_count; i++) {
+            partition_info_t *part = disk_get_partition(i);
+            if (part && part->type == 0x83) {
+                vfs_node_t *ext2_root = ext2_mount_partition(nvme_disk, part->start_lba);
+                if (ext2_root) {
+                    vfs_node_t *ext2_dir = ramfs_create_directory(vfs_root, "ext2");
+                    if (ext2_dir) {
+                        ext2_dir->flags |= FS_MOUNTPOINT;
+                        ext2_dir->ptr = (struct vfs_node *)ext2_root;
+                        serial_puts(COM1, "[EXT2] EXT2 successfully mounted at /ext2!\n");
+                    }
+                    break;
+                }
+            }
+        }
+    } else {
+        serial_puts(COM1, "[KERNEL WARNING] NVMe controller not found or init failed.\n");
     }
-    
+
     serial_puts(COM1, "[KERNEL] Hardware drivers and partition scan completed.\n");
 
     // 8. Framebuffer & Terminal

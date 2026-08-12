@@ -6,7 +6,6 @@
 [extern current_task]
 [extern tasks]
 
-; Symmetric register saving macros
 %macro SAVE_REGS 0
     push rax
     push rbx
@@ -60,7 +59,6 @@ isr%1:
     jmp exception_common
 %endmacro
 
-; Generate first 32 CPU exceptions (0-31)
 ISR_NOERRCODE 0
 ISR_NOERRCODE 1
 ISR_NOERRCODE 2
@@ -97,7 +95,9 @@ ISR_NOERRCODE 31
 exception_common:
     SAVE_REGS
     mov rdi, rsp
+    sub rsp, 8          ; FIX: Align RSP to 16 bytes boundary for System V ABI
     call panic_handler
+    add rsp, 8
 .halt_loop:
     cli
     hlt
@@ -106,7 +106,9 @@ exception_common:
 [global keyboard_handler]
 keyboard_handler:
     SAVE_REGS
+    sub rsp, 8          ; FIX: Align RSP to 16-byte boundary
     call keyboard_callback
+    add rsp, 8
     mov al, 0x20
     out 0x20, al
     RESTORE_REGS
@@ -118,12 +120,14 @@ irq0_handler_asm:
     push qword 32     
     SAVE_REGS         
 
+    sub rsp, 8
     call timer_callback  
+    add rsp, 8
 
-    mov rdi, rsp      ; Pass current stack pointer as argument to schedule()
-    call schedule     ; schedule() returns the RSP of the next task in RAX
+    mov rdi, rsp      
+    call schedule     
     
-    mov rsp, rax      ; Switch stack pointer to the next task
+    mov rsp, rax      
 
     mov al, 0x20
     out 0x20, al
@@ -152,7 +156,9 @@ syscall_interrupt_asm:
     push rax
 
     mov rdi, rsp
+    sub rsp, 8          ; FIX: Align RSP for C function call
     call syscall_handler
+    add rsp, 8
 
     pop rax
     pop r9
@@ -189,8 +195,12 @@ linux_syscall_interrupt_asm:
     push r8
     push r9
     push rax
+
     mov rdi, rsp
+    sub rsp, 8
     call linux_syscall_handler
+    add rsp, 8
+
     pop rax
     pop r9
     pop r8

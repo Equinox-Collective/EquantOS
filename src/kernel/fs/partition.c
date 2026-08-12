@@ -2,6 +2,7 @@
 #include "partition.h"
 #include "gpt.h"
 #include "mbr.h"
+#include "../drivers/disk/nvme.h"
 #include "../drivers/serial/serial.h"
 #include "stdio.h"
 
@@ -9,19 +10,16 @@
 static partition_info_t unified_partitions[MAX_TOTAL_PARTITIONS];
 static int unified_partition_count = 0;
 
-void disk_partition_scan(uint8_t drive) {
+void disk_partition_scan_device(block_device_t dev) {
     char buf[32];
     serial_puts(COM1, "[DEBUG-PARTITION] ========================================\n");
-    serial_puts(COM1, "[DEBUG-PARTITION] BEGIN UNIFIED PARTITION SCAN FOR DRIVE ID: ");
-    itoa(drive, 10, buf);
-    serial_puts(COM1, buf);
-    serial_puts(COM1, "\n");
+    serial_puts(COM1, "[DEBUG-PARTITION] BEGIN UNIFIED PARTITION SCAN FOR DEVICE\n");
     
     unified_partition_count = 0;
 
-    // 1. Try GPT (GUID Partition Table) first
+    // 1. Try GPT (GUID Partition Table) first via Block Device Interface
     serial_puts(COM1, "[DEBUG-PARTITION] Step 1: Initializing GPT parser...\n");
-    gpt_init(drive);
+    gpt_init_device(dev);
     int gpt_count = gpt_get_partition_count();
     
     serial_puts(COM1, "[DEBUG-PARTITION] GPT parser reported partition count: ");
@@ -60,7 +58,7 @@ void disk_partition_scan(uint8_t drive) {
 
     // 2. Fallback to legacy MBR (Master Boot Record)
     serial_puts(COM1, "[DEBUG-PARTITION] STATUS: GPT yielded 0 partitions. Falling back to Legacy MBR scan...\n");
-    mbr_init(); // Scans MBR on drive 0 (can be adapted for drive argument)
+    mbr_init();
     int mbr_count = mbr_get_partition_count();
     
     serial_puts(COM1, "[DEBUG-PARTITION] MBR parser reported partition count: ");
@@ -96,6 +94,13 @@ void disk_partition_scan(uint8_t drive) {
     itoa(unified_partition_count, 10, buf);
     serial_puts(COM1, buf);
     serial_puts(COM1, "\n[DEBUG-PARTITION] ========================================\n");
+}
+
+void disk_partition_scan(uint8_t drive) {
+    (void)drive;
+    // Redirect legacy call to NVMe block device
+    block_device_t nvme_dev = nvme_get_block_device();
+    disk_partition_scan_device(nvme_dev);
 }
 
 int disk_get_partition_count(void) {

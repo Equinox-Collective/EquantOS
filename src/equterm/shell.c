@@ -18,7 +18,7 @@ extern uint64_t free_memory;
 extern uint64_t total_pages;
 extern size_t used_memory;
 
-#define SHELL_PROMPT_COLOR 0x0000FF00 // Neon Green
+#define SHELL_PROMPT_COLOR 0x0000FF00
 #define MAX_ARGS 8
 #define LINE_BUF_SIZE 256
 extern bool elf_load(void *elf_data, uint64_t size);
@@ -31,10 +31,8 @@ typedef struct {
     shell_handler_t handler;
 } shell_command_t;
 
-// Track current working directory in the shell
 static char current_dir[256] = "/";
 
-// Command prototypes
 static void cmd_help(int argc, char **argv);
 static void cmd_clear(int argc, char **argv);
 static void cmd_echo(int argc, char **argv);
@@ -60,7 +58,6 @@ static void cmd_cd(int argc, char **argv);
 static void cmd_run(int argc, char **argv);
 static void cmd_cp(int argc, char **argv);
 
-// The Ultimate Command Registry
 static const shell_command_t commands[] = {
     { "help",       "List all diagnostic & stress commands", cmd_help },
     { "clear",      "Clear the terminal screen",             cmd_clear },
@@ -75,7 +72,7 @@ static const shell_command_t commands[] = {
     { "heapdump",   "Dump internal kernel heap block map",   cmd_heapdump },
     { "diskinfo",   "Show ATA drive info and MBR partitions",cmd_diskinfo },
     { "hexdump",    "Dump raw file contents in Hex format",  cmd_hexdump },
-    { "writefile",  "Create/write text file to RAMFS",       cmd_writefile },
+    { "writefile",  "Create/write text file to RAMFS/FAT32", cmd_writefile },
     { "pciscan",    "Restore and print all PCI devices",      cmd_pciscan },
     { "sysinfo",    "Show detailed memory metrics struct",   cmd_sysinfo },
     { "panic_test", "Trigger Ring 0 #UD exception (panic)",  cmd_panic_test },
@@ -192,7 +189,7 @@ static void cmd_ls(int argc, char **argv) {
     (void)argc; (void)argv;
     
     char resolved[256];
-    resolve_path("", resolved, sizeof(resolved)); // Get current working directory path
+    resolve_path("", resolved, sizeof(resolved));
 
     vfs_node_t *dir = vfs_open(resolved, 0);
     if (!dir) {
@@ -275,7 +272,6 @@ static void cmd_mem(int argc, char **argv) {
     term_print("Kernel Heap : "); itoa((int64_t)(used_memory / 1024), 10, buf); term_print(buf); term_print(" KB allocated\n");
 }
 
-// TORTURE TEST: Heap allocation stress
 static void cmd_memstress(int argc, char **argv) {
     (void)argc; (void)argv;
     term_print("[STRESS] Starting kernel heap allocation torture test...\n");
@@ -284,9 +280,9 @@ static void cmd_memstress(int argc, char **argv) {
     int success_count = 0;
 
     for (int i = 0; i < 64; i++) {
-        ptrs[i] = kmalloc(512); // Allocate 512 bytes chunks
+        ptrs[i] = kmalloc(512);
         if (ptrs[i]) {
-            memset(ptrs[i], 0xAA, 512); // Write pattern
+            memset(ptrs[i], 0xAA, 512);
             success_count++;
         }
     }
@@ -398,20 +394,24 @@ static void cmd_writefile(int argc, char **argv) {
     char resolved[256];
     resolve_path(argv[1], resolved, sizeof(resolved));
 
-    // Separate parent directory and filename
+    // FIX: Safely separate parent directory and filename without producing empty strings
     char parent_path[256];
     strcpy(parent_path, resolved);
     char *filename = parent_path;
-    for (int i = strlen(parent_path) - 1; i >= 0; i--) {
-        if (parent_path[i] == '/') {
-            if (i == 0) parent_path[1] = '\0';
-            else parent_path[i] = '\0';
-            filename = &parent_path[i + 1];
-            break;
+
+    char *last_slash = strrchr(parent_path, '/');
+    if (last_slash) {
+        if (last_slash == parent_path) {
+            // Path is in root, e.g. "/hello.txt"
+            filename = last_slash + 1;
+            parent_path[1] = '\0'; // parent_path becomes "/"
+        } else {
+            *last_slash = '\0';
+            filename = last_slash + 1;
         }
     }
 
-    vfs_node_t *dir = vfs_open(parent_path, 0);
+    vfs_node_t *dir = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
     if (!dir || !(dir->flags & FS_DIRECTORY)) {
         term_print("writefile: invalid directory: ");
         term_print(parent_path);
@@ -419,7 +419,6 @@ static void cmd_writefile(int argc, char **argv) {
         return;
     }
 
-    // Reconstruct full text from argv[2] onwards, joining with spaces
     char text_buf[512] = {0};
     size_t pos = 0;
     for (int i = 2; i < argc; i++) {
@@ -432,10 +431,9 @@ static void cmd_writefile(int argc, char **argv) {
         pos += arg_len;
     }
 
-    // Create file using VFS abstraction (routes to RAMFS, FAT32 or EXT2)
     vfs_node_t *new_file = vfs_create(dir, filename, 0);
     if (!new_file) {
-        new_file = vfs_open(resolved, 0); // Try opening if file already exists
+        new_file = vfs_open(resolved, 0);
     }
 
     if (!new_file) {
@@ -449,7 +447,7 @@ static void cmd_writefile(int argc, char **argv) {
         term_print(resolved);
         term_print("\n");
     } else {
-        term_print("writefile: write failed (filesystem is read-only or doesn't support writing)\n");
+        term_print("writefile: write failed\n");
     }
 }
 
@@ -457,7 +455,7 @@ static void cmd_pciscan(int argc, char **argv) {
     (void)argc; (void)argv;
     term_print("[PCI] Re-scanning PCI bus topology...\n");
     pci_init();
-    term_print("[PCI] Scan complete. Check serial log for vendor/device entries.\n");
+    term_print("[PCI] Scan complete.\n");
 }
 
 static void cmd_sysinfo(int argc, char **argv) {
@@ -476,11 +474,9 @@ static void cmd_sysinfo(int argc, char **argv) {
     term_print(" bytes\n");
 }
 
-// CRASH TEST: Deliberate Ring 0 Invalid Opcode Exception (#UD)
 static void cmd_panic_test(int argc, char **argv) {
     (void)argc; (void)argv;
     term_print("CRITICAL: Triggering deliberate Ring 0 invalid opcode (ud2)...\n");
-    // Execute UD2 instruction which explicitly triggers #UD CPU exception vector 6
     __asm__ volatile("ud2");
 }
 
@@ -496,7 +492,6 @@ static void cmd_shutdown(int argc, char **argv) {
     system_power_off();
 }
 
-// Helper to resolve paths relative to current_dir
 static void resolve_path(const char *input, char *output, size_t max_len) {
     if (!input || input[0] == '\0') {
         strcpy(output, current_dir);
@@ -504,10 +499,8 @@ static void resolve_path(const char *input, char *output, size_t max_len) {
     }
 
     if (input[0] == '/') {
-        // Absolute path
         strncpy(output, input, max_len);
     } else {
-        // Relative path
         strcpy(output, current_dir);
         if (output[strlen(output) - 1] != '/') {
             strcat(output, "/");
@@ -522,7 +515,6 @@ static void cmd_pwd(int argc, char **argv) {
     term_print("\n");
 }
 
-// Helper to strip last directory component for "cd .."
 static void path_go_up(char *path) {
     int len = strlen(path);
     if (len <= 1) {
@@ -535,7 +527,7 @@ static void path_go_up(char *path) {
     for (int i = strlen(path) - 1; i >= 0; i--) {
         if (path[i] == '/') {
             if (i == 0) {
-                path[1] = '\0'; // Keep root "/"
+                path[1] = '\0';
             } else {
                 path[i] = '\0';
             }
@@ -600,7 +592,6 @@ static void cmd_run(int argc, char **argv) {
         return;
     }
 
-    // Read file contents into a temporary kernel heap buffer
     uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
     if (!elf_buf) {
         term_print("run: out of memory for loading file\n");
@@ -636,7 +627,6 @@ static void cmd_cp(int argc, char **argv) {
     resolve_path(argv[1], src_path, sizeof(src_path));
     resolve_path(argv[2], dst_path, sizeof(dst_path));
 
-    // 1. Open source file
     vfs_node_t *src_file = vfs_open(src_path, 0);
     if (!src_file) {
         term_print("cp: source file not found: ");
@@ -650,7 +640,6 @@ static void cmd_cp(int argc, char **argv) {
         return;
     }
 
-    // 2. Check if destination is an existing directory. If so, append source filename.
     char final_dst[256];
     vfs_node_t *dst_node = vfs_open(dst_path, 0);
     if (dst_node && (dst_node->flags & FS_DIRECTORY)) {
@@ -658,7 +647,6 @@ static void cmd_cp(int argc, char **argv) {
         if (final_dst[strlen(final_dst) - 1] != '/') {
             strcat(final_dst, "/");
         }
-        // Extract filename from src_path
         const char *src_name = src_path;
         for (int i = strlen(src_path) - 1; i >= 0; i--) {
             if (src_path[i] == '/') {
@@ -671,19 +659,17 @@ static void cmd_cp(int argc, char **argv) {
         strcpy(final_dst, dst_path);
     }
 
-    // 3. Separate parent directory path and target filename
     char parent_path[256];
     strcpy(parent_path, final_dst);
     char *filename = parent_path;
-    for (int i = strlen(parent_path) - 1; i >= 0; i--) {
-        if (parent_path[i] == '/') {
-            if (i == 0) {
-                parent_path[1] = '\0';
-            } else {
-                parent_path[i] = '\0';
-            }
-            filename = &parent_path[i + 1];
-            break;
+    char *last_slash = strrchr(parent_path, '/');
+    if (last_slash) {
+        if (last_slash == parent_path) {
+            filename = last_slash + 1;
+            parent_path[1] = '\0';
+        } else {
+            *last_slash = '\0';
+            filename = last_slash + 1;
         }
     }
 
@@ -703,32 +689,25 @@ static void cmd_cp(int argc, char **argv) {
             return;
         }
     }
-    // 5. Open parent destination directory
-    vfs_node_t *parent_dir = vfs_open(parent_path, 0);
+
+    vfs_node_t *parent_dir = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
     if (!parent_dir || !(parent_dir->flags & FS_DIRECTORY)) {
-        term_print("cp: invalid destination directory: ");
-        term_print(parent_path);
-        term_print("\n");
+        term_print("cp: invalid destination directory\n");
         kfree(buf);
         return;
     }
 
-    // 6. Create file in destination directory using VFS abstraction
     vfs_node_t *new_file = vfs_create(parent_dir, filename, 0);
     if (!new_file) {
-        // If file already exists, open it
         new_file = vfs_open(final_dst, 0);
     }
 
     if (!new_file) {
-        term_print("cp: failed to create destination file: ");
-        term_print(filename);
-        term_print("\n");
+        term_print("cp: failed to create destination file\n");
         kfree(buf);
         return;
     }
 
-    // 7. Write buffer data to destination file
     int64_t bytes_written = vfs_write(new_file, 0, src_file->length, buf);
     if (bytes_written >= 0) {
         term_print("File copied successfully -> ");

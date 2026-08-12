@@ -1,4 +1,4 @@
-// task.h - Updated with VFS File Descriptors Table
+// task.h - Updated with VFS File Descriptors Table & Aligned FPU Area
 #ifndef TASK_H
 #define TASK_H
 
@@ -35,7 +35,8 @@ typedef struct task {
     
     process_t *process;
 
-    uint8_t fpu_state[512];
+    // FIX: Strictly align FPU state buffer to 16 bytes for fxsave64/fxrstor64 safety
+    uint8_t fpu_state[512] __attribute__((aligned(16)));
 
     struct task *sched_next;
     struct task *sched_prev;
@@ -43,7 +44,7 @@ typedef struct task {
     struct task *prev;
 } task_t;
 
-#define task_fpu_area(t) (void*)(((uint64_t)(t)->fpu_state + 15) & ~(uint64_t)15)
+#define task_fpu_area(t) ((void*)((t)->fpu_state))
 
 extern task_t *current_task;
 

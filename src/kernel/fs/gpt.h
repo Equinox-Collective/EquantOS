@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include "vfs.h"
 #include "partition.h"
+#include "../drivers/disk/block.h"
 
 #define GPT_SIGNATURE 0x5452415020494645ULL // "EFI PART"
 
@@ -20,8 +21,9 @@ typedef struct {
 
 typedef struct {
     uint8_t  boot_code[446];
-    protective_mbr_record_t partition_record;
-    uint16_t signature;     // 0xAA55
+    protective_mbr_record_t partition_record; // Partition Entry #1 (16 bytes)
+    uint8_t  reserved_partitions[48];           // FIX: Padding for Partition Entries #2..#4 (48 bytes)
+    uint16_t signature;                         // Boot Signature 0xAA55 at offset 510
 } __attribute__((packed)) protective_mbr_t;
 
 typedef struct {
@@ -50,7 +52,7 @@ typedef struct {
     uint16_t partition_name[36]; // UTF-16LE
 } __attribute__((packed)) gpt_partition_entry_t;
 
-void gpt_init(uint8_t drive);
+void gpt_init_device(block_device_t dev);
 int gpt_get_partition_count(void);
 partition_info_t *gpt_get_partition(int index);
 

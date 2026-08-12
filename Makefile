@@ -3,9 +3,15 @@ CC = x86_64-elf-gcc
 LD = x86_64-elf-ld
 ASM = nasm
 
-CFLAGS = -Wall -Wextra -O2 -g -pipe -ffreestanding -fno-stack-protector -fno-pie -fno-pic -mno-red-zone -mcmodel=kernel
+# CRITICAL FIX: Added -mno-sse -mno-mmx -mno-sse2 to prevent GCC auto-vectorization crashes in Ring 0
+CFLAGS = -Wall -Wextra -O2 -g -pipe -ffreestanding -fno-stack-protector \
+         -fno-pie -fno-pic -mno-red-zone -mcmodel=kernel \
+         -mno-sse -mno-mmx -mno-sse2
+
 ASMFLAGS = -f elf64
-LDFLAGS = -nostdlib -static -T src/linker.ld
+
+# CRITICAL FIX: Added -z max-page-size=0x1000 for strict 4KB page alignment
+LDFLAGS = -nostdlib -static -z max-page-size=0x1000 -T src/linker.ld
 
 # ==============================================================================
 # Smart Environment & Shell Detection
@@ -90,10 +96,8 @@ build/iso/font.psf: res/font.psf
 	@$(call CP,res/font.psf,build/iso/font.psf)
 
 # Generate EXT2 disk image using winmakeext2 (Windows) or mkfs.ext2 (Linux)
-disk.img:
-	@echo [BUILD] Generating EXT2 disk image...
-	$(EXT2_MAKE)
-	@echo [SUCCESS] disk.img generated successfully!
+disks:
+	py create_disks.py
 
 # Download Limine binaries
 limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
@@ -131,11 +135,14 @@ build/equantos.iso: build/kernel.elf build/iso/equantmemtest.elf build/iso/font.
 	@$(call RM,BOOTX64.EFI)
 	@echo [SUCCESS] EquantOS ISO created at build/equantos.iso!
 
-run: build/equantos.iso disk.vhd disk.img
-	qemu-system-x86_64 -cdrom build/equantos.iso \
-		-hda disk.vhd \
-		-drive file=disk.img,if=none,id=nvme0 \
+# REAL NVMe EMULATION: Removed -hda disk.vhd to prevent ATA false-positives
+run: build/equantos.iso disks
+	qemu-system-x86_64 -boot d \
+		-cdrom build/equantos.iso \
+		-drive file=disk_gpt_ext2.img,format=raw,if=none,id=nvme0 \
 		-device nvme,drive=nvme0,serial=deadbeef \
+		-drive file=disk_mbr_fat32.img,format=raw,if=none,id=fat0 \
+		-device ide-hd,drive=fat0 \
 		-serial stdio
 
 clean:

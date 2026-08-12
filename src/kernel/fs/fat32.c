@@ -1,15 +1,18 @@
-// fat32.c - FAT32 File System Driver Implementation
+// fat32.c - Production-grade FAT32 File System Driver Implementation
 #include "fat32.h"
 #include "mbr.h"
-#include "../drivers/disk/ata.h"
+#include "gpt.h"
+#include "../drivers/disk/block.h"
+#include "../drivers/disk/nvme.h"
 #include "ramfs.h"
 #include "../core/mem/memory.h"
 #include "string.h"
 #include "../drivers/serial/serial.h"
 
-// Internal FAT32 volume context structure
 typedef struct {
+    block_device_t dev;
     uint32_t partition_lba;
+    uint32_t partition_sectors;
     uint32_t bytes_per_sector;
     uint32_t sectors_per_cluster;
     uint32_t reserved_sectors;
@@ -18,11 +21,11 @@ typedef struct {
     uint32_t root_cluster;
     uint32_t first_fat_sector;
     uint32_t first_data_sector;
+    uint32_t total_clusters;
 } fat32_volume_t;
 
 static fat32_volume_t current_vol;
 
-// Forward declarations
 static int64_t fat32_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index);
@@ -39,26 +42,30 @@ static vfs_file_operations_t fat32_fops = {
     .create = fat32_create
 };
 
-// Convert cluster number to absolute LBA sector
 static uint32_t fat32_cluster_to_lba(uint32_t cluster) {
     return current_vol.partition_lba + current_vol.first_data_sector + (cluster - 2) * current_vol.sectors_per_cluster;
 }
 
-// Read next cluster from FAT table
 static uint32_t fat32_get_next_cluster(uint32_t cluster) {
+    if (cluster < 2 || cluster >= current_vol.total_clusters + 2) {
+        return 0x0FFFFFF8; // Boundary safety check
+    }
+
     uint32_t fat_offset = cluster * 4;
     uint32_t fat_sector = current_vol.first_fat_sector + (fat_offset / current_vol.bytes_per_sector);
     uint32_t ent_offset = fat_offset % current_vol.bytes_per_sector;
 
     uint8_t sector_buf[512];
-    read_sectors_ata_pio((uintptr_t)sector_buf, current_vol.partition_lba + fat_sector, 1);
+    current_vol.dev.read(current_vol.partition_lba + fat_sector, 1, sector_buf);
 
-    uint32_t next_cluster = *(uint32_t *)&sector_buf[ent_offset];
-    return next_cluster;
+    return *(uint32_t *)&sector_buf[ent_offset] & 0x0FFFFFFF;
 }
 
-// Set next cluster entry in FAT table
 static void fat32_set_next_cluster(uint32_t cluster, uint32_t next_cluster) {
+    if (cluster < 2 || cluster >= current_vol.total_clusters + 2) {
+        return; // Boundary safety check
+    }
+
     uint32_t fat_offset = cluster * 4;
     uint32_t fat_sector = current_vol.first_fat_sector + (fat_offset / current_vol.bytes_per_sector);
     uint32_t ent_offset = fat_offset % current_vol.bytes_per_sector;
@@ -66,26 +73,24 @@ static void fat32_set_next_cluster(uint32_t cluster, uint32_t next_cluster) {
     uint8_t sector_buf[512];
     for (uint32_t f = 0; f < current_vol.num_fats; f++) {
         uint32_t current_fat_lba = current_vol.partition_lba + fat_sector + (f * current_vol.fat_size_sectors);
-        read_sectors_ata_pio((uintptr_t)sector_buf, current_fat_lba, 1);
+        current_vol.dev.read(current_fat_lba, 1, sector_buf);
         
         uint32_t *ent = (uint32_t *)&sector_buf[ent_offset];
         *ent = (*ent & 0xF0000000) | (next_cluster & 0x0FFFFFFF);
         
-        write_sectors_ata_pio((uintptr_t)sector_buf, current_fat_lba, 1);
+        current_vol.dev.write(current_fat_lba, 1, sector_buf);
     }
 }
 
-// Allocate a new free cluster
 static uint32_t fat32_alloc_cluster(void) {
-    uint32_t total_fat_entries = (current_vol.fat_size_sectors * current_vol.bytes_per_sector) / 4;
     uint8_t sector_buf[512];
 
-    for (uint32_t cluster = 2; cluster < total_fat_entries; cluster++) {
+    for (uint32_t cluster = 2; cluster < current_vol.total_clusters + 2; cluster++) {
         uint32_t fat_offset = cluster * 4;
         uint32_t fat_sector = current_vol.first_fat_sector + (fat_offset / current_vol.bytes_per_sector);
         uint32_t ent_offset = fat_offset % current_vol.bytes_per_sector;
 
-        read_sectors_ata_pio((uintptr_t)sector_buf, current_vol.partition_lba + fat_sector, 1);
+        current_vol.dev.read(current_vol.partition_lba + fat_sector, 1, sector_buf);
         uint32_t entry = (*(uint32_t *)&sector_buf[ent_offset]) & 0x0FFFFFFF;
 
         if (entry == 0x00000000) {
@@ -93,10 +98,9 @@ static uint32_t fat32_alloc_cluster(void) {
             return cluster;
         }
     }
-    return 0; // Disk full
+    return 0;
 }
 
-// Helper to convert 8.3 filename to standard string
 static void fat32_format_filename(fat32_dir_entry_t *entry, char *dest) {
     int k = 0;
     for (int i = 0; i < 8; i++) {
@@ -113,7 +117,6 @@ static void fat32_format_filename(fat32_dir_entry_t *entry, char *dest) {
     dest[k] = '\0';
 }
 
-// Case-insensitive 8.3 filename matcher
 static int fat32_name_match(const char *fat_name, const char *target) {
     char upper_target[13];
     int i = 0;
@@ -128,7 +131,6 @@ static int fat32_name_match(const char *fat_name, const char *target) {
     return strcmp(fat_name, upper_target) == 0;
 }
 
-// Helper to update directory entry size and cluster on disk
 static void fat32_update_dir_entry(uint32_t parent_cluster, const char *filename, uint32_t first_cluster, uint32_t file_size) {
     uint32_t cluster = parent_cluster;
     uint32_t cluster_size = current_vol.sectors_per_cluster * current_vol.bytes_per_sector;
@@ -138,7 +140,7 @@ static void fat32_update_dir_entry(uint32_t parent_cluster, const char *filename
 
     while (cluster >= 2 && cluster < 0x0FFFFFF8) {
         uint32_t lba = fat32_cluster_to_lba(cluster);
-        read_sectors_ata_pio((uintptr_t)cluster_buf, lba, current_vol.sectors_per_cluster);
+        current_vol.dev.read(lba, current_vol.sectors_per_cluster, cluster_buf);
 
         fat32_dir_entry_t *entries = (fat32_dir_entry_t *)cluster_buf;
         for (uint32_t i = 0; i < entries_per_cluster; i++) {
@@ -151,7 +153,7 @@ static void fat32_update_dir_entry(uint32_t parent_cluster, const char *filename
                 entries[i].first_cluster_high = (first_cluster >> 16) & 0xFFFF;
                 entries[i].first_cluster_low = first_cluster & 0xFFFF;
                 entries[i].file_size = file_size;
-                write_sectors_ata_pio((uintptr_t)cluster_buf, lba, current_vol.sectors_per_cluster);
+                current_vol.dev.write(lba, current_vol.sectors_per_cluster, cluster_buf);
                 kfree(cluster_buf);
                 return;
             }
@@ -161,18 +163,15 @@ static void fat32_update_dir_entry(uint32_t parent_cluster, const char *filename
     kfree(cluster_buf);
 }
 
-// VFS Read Operation for FAT32 files
 static int64_t fat32_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     if (!node || offset >= node->length) return 0;
 
     uint32_t cluster = (uint32_t)(uintptr_t)node->ptr;
     uint32_t cluster_size = current_vol.sectors_per_cluster * current_vol.bytes_per_sector;
 
-    uint64_t bytes_skipped = 0;
     while (offset >= cluster_size && cluster < 0x0FFFFFF8) {
         cluster = fat32_get_next_cluster(cluster) & 0x0FFFFFFF;
         offset -= cluster_size;
-        bytes_skipped += cluster_size;
     }
 
     uint64_t bytes_to_read = size;
@@ -186,7 +185,7 @@ static int64_t fat32_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint
 
     while (bytes_read < bytes_to_read && cluster >= 2 && cluster < 0x0FFFFFF8) {
         uint32_t lba = fat32_cluster_to_lba(cluster);
-        read_sectors_ata_pio((uintptr_t)cluster_buf, lba, current_vol.sectors_per_cluster);
+        current_vol.dev.read(lba, current_vol.sectors_per_cluster, cluster_buf);
 
         uint64_t chunk_offset = (bytes_read == 0) ? offset : 0;
         uint64_t chunk_size = cluster_size - chunk_offset;
@@ -204,7 +203,6 @@ static int64_t fat32_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint
     return bytes_read;
 }
 
-// VFS Write Operation for FAT32 files
 static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     if (!node) return -1;
 
@@ -244,7 +242,7 @@ static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uin
 
     while (bytes_written < size) {
         uint32_t lba = fat32_cluster_to_lba(current_cluster);
-        read_sectors_ata_pio((uintptr_t)cluster_buf, lba, current_vol.sectors_per_cluster);
+        current_vol.dev.read(lba, current_vol.sectors_per_cluster, cluster_buf);
 
         uint64_t chunk_off = (offset + bytes_written) % cluster_size;
         uint64_t chunk_size = cluster_size - chunk_off;
@@ -253,7 +251,7 @@ static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uin
         }
 
         memcpy(cluster_buf + chunk_off, buffer + bytes_written, chunk_size);
-        write_sectors_ata_pio((uintptr_t)cluster_buf, lba, current_vol.sectors_per_cluster);
+        current_vol.dev.write(lba, current_vol.sectors_per_cluster, cluster_buf);
 
         bytes_written += chunk_size;
 
@@ -284,7 +282,6 @@ static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uin
     return bytes_written;
 }
 
-// VFS Readdir Operation
 static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
     if (!(node->flags & FS_DIRECTORY)) return NULL;
 
@@ -298,7 +295,7 @@ static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
 
     while (cluster >= 2 && cluster < 0x0FFFFFF8) {
         uint32_t lba = fat32_cluster_to_lba(cluster);
-        read_sectors_ata_pio((uintptr_t)cluster_buf, lba, current_vol.sectors_per_cluster);
+        current_vol.dev.read(lba, current_vol.sectors_per_cluster, cluster_buf);
 
         fat32_dir_entry_t *entries = (fat32_dir_entry_t *)cluster_buf;
         for (uint32_t i = 0; i < entries_per_cluster; i++) {
@@ -338,7 +335,6 @@ static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
     return NULL;
 }
 
-// VFS Find Directory Operation
 static vfs_node_t *fat32_finddir(vfs_node_t *node, const char *name) {
     if (!(node->flags & FS_DIRECTORY)) return NULL;
 
@@ -351,7 +347,7 @@ static vfs_node_t *fat32_finddir(vfs_node_t *node, const char *name) {
 
     while (cluster >= 2 && cluster < 0x0FFFFFF8) {
         uint32_t lba = fat32_cluster_to_lba(cluster);
-        read_sectors_ata_pio((uintptr_t)cluster_buf, lba, current_vol.sectors_per_cluster);
+        current_vol.dev.read(lba, current_vol.sectors_per_cluster, cluster_buf);
 
         fat32_dir_entry_t *entries = (fat32_dir_entry_t *)cluster_buf;
         for (uint32_t i = 0; i < entries_per_cluster; i++) {
@@ -393,7 +389,6 @@ static vfs_node_t *fat32_finddir(vfs_node_t *node, const char *name) {
     return NULL;
 }
 
-// VFS Create Operation
 static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flags) {
     (void)flags;
     uint32_t parent_cluster = (uint32_t)(uintptr_t)dir->ptr;
@@ -432,7 +427,7 @@ static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flag
 
     while (curr_cluster >= 2 && curr_cluster < 0x0FFFFFF8) {
         uint32_t lba = fat32_cluster_to_lba(curr_cluster);
-        read_sectors_ata_pio((uintptr_t)cluster_buf, lba, current_vol.sectors_per_cluster);
+        current_vol.dev.read(lba, current_vol.sectors_per_cluster, cluster_buf);
         fat32_dir_entry_t *entries = (fat32_dir_entry_t *)cluster_buf;
 
         for (uint32_t i = 0; i < entries_per_cluster; i++) {
@@ -457,7 +452,7 @@ static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flag
 
             memset(cluster_buf, 0, cluster_size);
             lba = fat32_cluster_to_lba(new_dir_cluster);
-            write_sectors_ata_pio((uintptr_t)cluster_buf, lba, current_vol.sectors_per_cluster);
+            current_vol.dev.write(lba, current_vol.sectors_per_cluster, cluster_buf);
             target_entry = &((fat32_dir_entry_t *)cluster_buf)[0];
             target_lba = lba;
             break;
@@ -478,7 +473,7 @@ static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flag
     target_entry->first_cluster_low = 0;
     target_entry->file_size = 0;
 
-    write_sectors_ata_pio((uintptr_t)cluster_buf, target_lba, current_vol.sectors_per_cluster);
+    current_vol.dev.write(target_lba, current_vol.sectors_per_cluster, cluster_buf);
     kfree(cluster_buf);
 
     vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
@@ -493,13 +488,42 @@ static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flag
     return vnode;
 }
 
-vfs_node_t *fat32_mount_partition(uint32_t partition_lba) {
+vfs_node_t *fat32_mount_partition(block_device_t dev, uint32_t partition_lba, uint32_t partition_sectors) {
     uint8_t sector_buf[512];
-    read_sectors_ata_pio((uintptr_t)sector_buf, partition_lba, 1);
+    if (dev.read(partition_lba, 1, sector_buf) != 0) return NULL;
 
     fat32_bpb_t *bpb = (fat32_bpb_t *)sector_buf;
 
+    // FIX: Strict BPB Validation logic to prevent division-by-zero (#DE) or corrupt mounts
+    if (bpb->bytes_per_sector != 512 && bpb->bytes_per_sector != 1024 &&
+        bpb->bytes_per_sector != 2048 && bpb->bytes_per_sector != 4096) {
+        serial_puts(COM1, "[FAT32 ERROR] Invalid bytes_per_sector in BPB!\n");
+        return NULL;
+    }
+
+    if (bpb->sectors_per_cluster == 0 || (bpb->sectors_per_cluster & (bpb->sectors_per_cluster - 1)) != 0) {
+        serial_puts(COM1, "[FAT32 ERROR] Invalid sectors_per_cluster in BPB!\n");
+        return NULL;
+    }
+
+    if (bpb->reserved_sectors == 0 || bpb->num_fats == 0 || bpb->table_size_32 == 0) {
+        serial_puts(COM1, "[FAT32 ERROR] Invalid FAT32 structural counts in BPB!\n");
+        return NULL;
+    }
+
+    if (bpb->boot_signature != 0x28 && bpb->boot_signature != 0x29) {
+        serial_puts(COM1, "[FAT32 ERROR] Invalid Extended BPB boot signature!\n");
+        return NULL;
+    }
+
+    if (memcmp(bpb->file_system_type, "FAT32   ", 8) != 0) {
+        serial_puts(COM1, "[FAT32 ERROR] File system type string is not FAT32!\n");
+        return NULL;
+    }
+
+    current_vol.dev = dev;
     current_vol.partition_lba = partition_lba;
+    current_vol.partition_sectors = partition_sectors;
     current_vol.bytes_per_sector = bpb->bytes_per_sector;
     current_vol.sectors_per_cluster = bpb->sectors_per_cluster;
     current_vol.reserved_sectors = bpb->reserved_sectors;
@@ -510,19 +534,8 @@ vfs_node_t *fat32_mount_partition(uint32_t partition_lba) {
     current_vol.first_fat_sector = current_vol.reserved_sectors;
     current_vol.first_data_sector = current_vol.reserved_sectors + (current_vol.num_fats * current_vol.fat_size_sectors);
 
-    serial_puts(COM1, "[FAT32] Volume mounted successfully!\n");
-
-    // Check FAT[1] dirty / clean shutdown bit (bit 31)
-    uint32_t fat1_entry = fat32_get_next_cluster(1);
-    if (!(fat1_entry & 0x80000000)) {
-        serial_puts(COM1, "[FAT32 WARNING] Volume was NOT cleanly unmounted (DIRTY/IN-USE by another OS)!\n");
-    } else {
-        serial_puts(COM1, "[FAT32] Volume clean status check PASSED.\n");
-    }
-
-    // Mark FAT32 active / dirty on mount (clear bit 31 of FAT[1])
-    uint32_t dirty_fat1 = fat1_entry & ~0x80000000;
-    fat32_set_next_cluster(1, dirty_fat1);
+    uint32_t total_data_sectors = partition_sectors - current_vol.first_data_sector;
+    current_vol.total_clusters = total_data_sectors / current_vol.sectors_per_cluster;
 
     vfs_node_t *root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strcpy(root->name, "/");
@@ -535,54 +548,33 @@ vfs_node_t *fat32_mount_partition(uint32_t partition_lba) {
 }
 
 void fat32_init(void) {
-    serial_puts(COM1, "[DEBUG-FAT32] Initializing FAT32 subsystem...\n");
-    
-    if (!vfs_root) {
-        serial_puts(COM1, "[DEBUG-FAT32 ERROR] VFS Root is NULL! Cannot mount FAT32.\n");
+    if (!vfs_root) return;
+
+    serial_puts(COM1, "[FAT32] Initializing NVMe Hardware Controller...\n");
+    if (nvme_init() != NVME_SUCCESS) {
+        serial_puts(COM1, "[FAT32 WARNING] NVMe initialization failed or drive not found.\n");
         return;
     }
 
-    int p_count = disk_get_partition_count(); // Using unified partition manager!
-    char buf[32];
-    serial_puts(COM1, "[DEBUG-FAT32] Total unified partitions available for FAT32 check: ");
-    itoa(p_count, 10, buf);
-    serial_puts(COM1, buf);
-    serial_puts(COM1, "\n");
+    block_device_t nvme_dev = nvme_get_block_device();
 
+    serial_puts(COM1, "[FAT32] Scanning GPT partitions on NVMe...\n");
+    gpt_init_device(nvme_dev);
+
+    int p_count = gpt_get_partition_count();
     for (int i = 0; i < p_count; i++) {
-        partition_info_t *part = disk_get_partition(i);
-        if (part) {
-            serial_puts(COM1, "[DEBUG-FAT32] Inspecting Partition #");
-            itoa(i, 10, buf);
-            serial_puts(COM1, buf);
-            serial_puts(COM1, " | Start LBA: ");
-            itoa((int64_t)part->start_lba, 10, buf);
-            serial_puts(COM1, buf);
-            serial_puts(COM1, " | Type: 0x");
-            itoa_hex(part->type, buf);
-            serial_puts(COM1, buf);
-            serial_puts(COM1, "\n");
-
-            // Check if partition is FAT32 (Type 0x0B, 0x0C, or EFI System Partition on GPT: C12A7328-F81F-11D2-BA4B-00A0C93EC93B)
-            // For universal GPT support, EFI System Partition (ESP) is also FAT32!
-            if (part->type == 0x0B || part->type == 0x0C || part->type == 0x83 /* or check GPT ESP guid type */) {
-                serial_puts(COM1, "[DEBUG-FAT32] CANDIDATE MATCHED! Attempting to mount FAT32 at LBA: ");
-                itoa((int64_t)part->start_lba, 10, buf);
-                serial_puts(COM1, buf);
-                serial_puts(COM1, "\n");
-                
-                vfs_node_t *fat_root = fat32_mount_partition(part->start_lba);
-                if (fat_root) {
-                    vfs_node_t *disk_dir = ramfs_create_directory(vfs_root, "disk");
-                    if (disk_dir) {
-                        disk_dir->flags |= FS_MOUNTPOINT;
-                        disk_dir->ptr = (vfs_node_t *)fat_root;
-                        serial_puts(COM1, "[DEBUG-FAT32] SUCCESS: FAT32 successfully mounted at /disk!\n");
-                        return; // Successfully mounted first valid boot/fat32 partition
-                    }
+        partition_info_t *part = gpt_get_partition(i);
+        if (part && (part->type == 0x0B || part->type == 0x0C)) {
+            vfs_node_t *fat_root = fat32_mount_partition(nvme_dev, part->start_lba, part->sector_count);
+            if (fat_root) {
+                vfs_node_t *disk_dir = ramfs_create_directory(vfs_root, "disk");
+                if (disk_dir) {
+                    disk_dir->flags |= FS_MOUNTPOINT;
+                    disk_dir->ptr = (vfs_node_t *)fat_root;
+                    serial_puts(COM1, "[FAT32 SUCCESS] Mounted FAT32 partition to /disk\n");
+                    return;
                 }
             }
         }
     }
-    serial_puts(COM1, "[DEBUG-FAT32 WARNING] No valid FAT32 / ESP partition found to mount.\n");
 }
