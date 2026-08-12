@@ -8,6 +8,24 @@
 #include "../../core/gen/io.h"
 #include "string.h"
 #include "stdio.h"
+#include "block.h"
+
+// Block device wrappers for NVMe
+static int nvme_bdev_read(uint64_t lba, uint32_t count, void *buffer) {
+    return nvme_read_sectors(lba, count, buffer) == NVME_SUCCESS ? 0 : -1;
+}
+
+static int nvme_bdev_write(uint64_t lba, uint32_t count, void *buffer) {
+    return nvme_write_sectors(lba, count, buffer) == NVME_SUCCESS ? 0 : -1;
+}
+
+block_device_t nvme_get_block_device(void) {
+    block_device_t dev;
+    dev.read = nvme_bdev_read;
+    dev.write = nvme_bdev_write;
+    dev.sector_size = 512;
+    return dev;
+}
 
 static nvme_controller_t nvme_ctrl;
 
@@ -206,6 +224,117 @@ static int nvme_identify_controller(nvme_controller_t *ctrl) {
     return err;
 }
 
+// Create I/O Completion Queue via Admin Command
+static int nvme_create_io_cq(nvme_controller_t *ctrl) {
+    serial_puts(COM1, "[NVME-PROD] Creating I/O Completion Queue...\n");
+
+    if (nvme_init_queue_pair(&ctrl->io_queue, NVME_IO_QUEUE_SIZE, NVME_IO_QUEUE_SIZE) != NVME_SUCCESS) {
+        return NVME_ERR_NOMEM;
+    }
+
+    nvme_sq_entry_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+
+    cmd.cdw0 = NVME_ADMIN_CREATE_CQ | (ctrl->command_id++ << 16);
+    cmd.prp1 = ctrl->io_queue.cq_phys;
+    // cdw10: Queue Identifier (1), Queue Size (entries - 1)
+    cmd.cdw10 = (1 | ((NVME_IO_QUEUE_SIZE - 1) << 16));
+    // cdw11: PC=1 (Physically Contiguous), IV=0 (No interrupt vector)
+    cmd.cdw11 = 1; 
+
+    nvme_submit_command(ctrl, &ctrl->admin_queue, &cmd, 1);
+    return nvme_wait_completion(ctrl, &ctrl->admin_queue, (uint16_t)(cmd.cdw0 >> 16), 1);
+}
+
+// Create I/O Submission Queue via Admin Command
+static int nvme_create_io_sq(nvme_controller_t *ctrl) {
+    serial_puts(COM1, "[NVME-PROD] Creating I/O Submission Queue...\n");
+
+    nvme_sq_entry_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+
+    cmd.cdw0 = NVME_ADMIN_CREATE_SQ | (ctrl->command_id++ << 16);
+    cmd.prp1 = ctrl->io_queue.sq_phys;
+    // cdw10: Queue Identifier (1), Queue Size (entries - 1)
+    cmd.cdw10 = (1 | ((NVME_IO_QUEUE_SIZE - 1) << 16));
+    // cdw11: PC=1 (Physically Contiguous), CQID=1 (Associated CQ ID 1)
+    cmd.cdw11 = (1 | (1 << 16));
+
+    nvme_submit_command(ctrl, &ctrl->admin_queue, &cmd, 1);
+    return nvme_wait_completion(ctrl, &ctrl->admin_queue, (uint16_t)(cmd.cdw0 >> 16), 1);
+}
+
+// Read sectors from NVMe Namespace 1
+int nvme_read_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
+    if (sector_count == 0) return NVME_SUCCESS;
+
+    // Use a temporary uncacheable DMA buffer for data transfer if buffer isn't page-aligned/physical
+    size_t transfer_bytes = sector_count * 512;
+    void *dma_virt = pmm_alloc_continuous((transfer_bytes + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (!dma_virt) return NVME_ERR_NOMEM;
+    uint64_t dma_phys = (uint64_t)dma_virt;
+    nvme_make_uncacheable(dma_phys, transfer_bytes);
+
+    nvme_sq_entry_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+
+    uint16_t cid = nvme_ctrl.command_id++;
+    cmd.cdw0 = NVME_NVM_CMD_READ | (cid << 16);
+    cmd.nsid = 1; // Namespace ID 1
+    cmd.prp1 = dma_phys;
+    // cdw10 & cdw11: Starting LBA (64-bit)
+    cmd.cdw10 = (uint32_t)lba;
+    cmd.cdw11 = (uint32_t)(lba >> 32);
+    // cdw12: Number of logical blocks (0-based, so sector_count - 1)
+    cmd.cdw12 = (sector_count - 1) & 0xFFFF;
+
+    // Submit to I/O Queue (is_admin = 0)
+    nvme_submit_command(&nvme_ctrl, &nvme_ctrl.io_queue, &cmd, 0);
+    int err = nvme_wait_completion(&nvme_ctrl, &nvme_ctrl.io_queue, cid, 0);
+
+    if (err == NVME_SUCCESS) {
+        memcpy(buffer, (void *)VIRT(dma_phys), transfer_bytes);
+    } else {
+        serial_puts(COM1, "[NVME-ERROR] NVM Read command failed!\n");
+    }
+
+    return err;
+}
+
+// Write sectors to NVMe Namespace 1
+int nvme_write_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
+    if (sector_count == 0) return NVME_SUCCESS;
+
+    size_t transfer_bytes = sector_count * 512;
+    void *dma_virt = pmm_alloc_continuous((transfer_bytes + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (!dma_virt) return NVME_ERR_NOMEM;
+    uint64_t dma_phys = (uint64_t)dma_virt;
+    nvme_make_uncacheable(dma_phys, transfer_bytes);
+
+    // Copy source buffer into DMA safe physical memory
+    memcpy((void *)VIRT(dma_phys), buffer, transfer_bytes);
+
+    nvme_sq_entry_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+
+    uint16_t cid = nvme_ctrl.command_id++;
+    cmd.cdw0 = NVME_NVM_CMD_WRITE | (cid << 16);
+    cmd.nsid = 1; // Namespace ID 1
+    cmd.prp1 = dma_phys;
+    cmd.cdw10 = (uint32_t)lba;
+    cmd.cdw11 = (uint32_t)(lba >> 32);
+    cmd.cdw12 = (sector_count - 1) & 0xFFFF;
+
+    nvme_submit_command(&nvme_ctrl, &nvme_ctrl.io_queue, &cmd, 0);
+    int err = nvme_wait_completion(&nvme_ctrl, &nvme_ctrl.io_queue, cid, 0);
+
+    if (err != NVME_SUCCESS) {
+        serial_puts(COM1, "[NVME-ERROR] NVM Write command failed!\n");
+    }
+
+    return err;
+}
+
 // Full NVMe Controller Initialization Routine
 int nvme_init(void) {
     char buf[32];
@@ -294,5 +423,16 @@ int nvme_init(void) {
 
     serial_puts(COM1, "[NVME-DEBUG] NVMe Driver initialization sequence fully completed.\n");
     serial_puts(COM1, "[NVME-DEBUG] ========================================\n");
+
+    // 5. Create I/O Completion and Submission Queues
+    if (nvme_create_io_cq(&nvme_ctrl) != NVME_SUCCESS) {
+        serial_puts(COM1, "[NVME-ERROR] Failed to create I/O Completion Queue.\n");
+        return NVME_ERR_HARDWARE;
+    }
+    if (nvme_create_io_sq(&nvme_ctrl) != NVME_SUCCESS) {
+        serial_puts(COM1, "[NVME-ERROR] Failed to create I/O Submission Queue.\n");
+        return NVME_ERR_HARDWARE;
+    }
+    serial_puts(COM1, "[NVME-DEBUG] I/O Queues created and paired successfully.\n");
     return NVME_SUCCESS;
 }

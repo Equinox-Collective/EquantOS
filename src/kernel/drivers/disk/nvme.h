@@ -49,6 +49,9 @@
 #define NVME_IDENTIFY_NAMESPACE  0x00
 #define NVME_IDENTIFY_CONTROLLER 0x01
 
+#define NVME_NVM_CMD_READ    0x02
+#define NVME_NVM_CMD_WRITE   0x01
+
 // Submission Queue Entry (64 bytes)
 typedef struct {
     uint32_t cdw0;
@@ -99,5 +102,7 @@ typedef struct {
 
 // Public Driver API
 int nvme_init(void);
+int nvme_read_sectors(uint64_t lba, uint32_t sector_count, void *buffer);
+int nvme_write_sectors(uint64_t lba, uint32_t sector_count, void *buffer);
 
 #endif // NVME_H

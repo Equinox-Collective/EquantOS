@@ -28,6 +28,7 @@
 #include "kernel/fs/gpt.h"
 #include "kernel/fs/partition.h"
 #include "kernel/drivers/disk/nvme.h"
+#include "kernel/drivers/disk/block.h"
 
 // Limine base revision request (revision 3)
 __attribute__((used, section(".requests")))
@@ -60,14 +61,14 @@ static volatile struct limine_module_request module_request = {
 static void init_sse(void) {
     uint64_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 &= ~(1 << 2); // Clear CR0.EM (Emulation bit)
-    cr0 |= (1 << 1);  // Set CR0.MP (Monitor Coprocessor bit)
+    cr0 &= ~(1 << 2); // Clear CR0.EM
+    cr0 |= (1 << 1);  // Set CR0.MP
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
 
     uint64_t cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1 << 9);  // Set CR4.OSFXSR (Enable FXSAVE/FXRSTOR for SSE)
-    cr4 |= (1 << 10); // Set CR4.OSXMMEXCPT (Enable unmasked SIMD exceptions)
+    cr4 |= (1 << 9);  // Set CR4.OSFXSR
+    cr4 |= (1 << 10); // Set CR4.OSXMMEXCPT
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
 }
 
@@ -131,22 +132,26 @@ void _start(void) {
         serial_puts(COM1, "[KERNEL] No boot modules found by Limine to mount.\n");
     }
 
-    // 7. Initialize Hardware Drivers (PCI, ATA, MBR Partition Scanning)
+    // 7. Initialize Hardware Drivers (PCI, ATA, NVMe, Partitions)
     pci_init();
     ata_identify();
-    nvme_init();
-    mbr_init();
-    gpt_init(0);
+    
+    // Scan partitions on Drive 0 (Master) via unified manager
     disk_partition_scan(0); 
     fat32_init();
-    vfs_node_t *ext2_root = ext2_mount_partition(1, 0); // Drive 1, LBA 0 (raw ext2 image)
+
+    // Initialize NVMe and mount EXT2 from NVMe block device!
+    nvme_init();
+    block_device_t nvme_disk = nvme_get_block_device();
+    vfs_node_t *ext2_root = ext2_mount_partition(nvme_disk, 0); 
     if (ext2_root) {
         vfs_node_t *ext2_dir = ramfs_create_directory(vfs_root, "ext2");
         ext2_dir->flags |= FS_MOUNTPOINT;
         ext2_dir->ptr = (struct vfs_node *)ext2_root;
-        serial_puts(COM1, "[EXT2] Second drive mounted successfully at /ext2!\n");
+        serial_puts(COM1, "[EXT2] EXT2 successfully mounted from NVMe device at /ext2!\n");
     }
-    serial_puts(COM1, "[KERNEL] Hardware drivers and MBR scan completed.\n");
+    
+    serial_puts(COM1, "[KERNEL] Hardware drivers and partition scan completed.\n");
 
     // 8. Framebuffer & Terminal
     if (framebuffer_request.response == NULL || framebuffer_request.response->framebuffer_count < 1) {

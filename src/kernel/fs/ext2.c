@@ -1,14 +1,15 @@
-// ext2.c - EXT2 Filesystem Driver Implementation
+// ext2.c - EXT2 Filesystem Driver Implementation with Block Device Abstraction
 #include "ext2.h"
 #include "mbr.h"
-#include "../drivers/disk/ata.h"
+#include "partition.h"
+#include "../drivers/disk/block.h"
 #include "../core/mem/memory.h"
 #include "string.h"
 #include "stdio.h"
 #include "../drivers/serial/serial.h"
 
 typedef struct {
-    uint8_t drive;
+    block_device_t dev;
     uint32_t partition_lba;
     uint32_t block_size;
     uint32_t sectors_per_block;
@@ -43,16 +44,16 @@ static void ext2_write_superblock(void) {
     uint8_t sector_buf[1024];
     memset(sector_buf, 0, 1024);
     memcpy(sector_buf, &ext2_vol.sb, sizeof(ext2_superblock_t));
-    write_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)sector_buf, ext2_vol.partition_lba + 2, 2);
+    ext2_vol.dev.write(ext2_vol.partition_lba + 2, 2, sector_buf);
 }
 
 static void ext2_write_bgd(void) {
     uint32_t bgd_lba = ext2_block_to_lba((ext2_vol.block_size == 1024) ? 2 : 1);
     uint8_t *sector_buf = (uint8_t *)kmalloc(ext2_vol.block_size);
     if (!sector_buf) return;
-    read_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)sector_buf, bgd_lba, ext2_vol.sectors_per_block);
+    ext2_vol.dev.read(bgd_lba, ext2_vol.sectors_per_block, sector_buf);
     memcpy(sector_buf, &ext2_vol.bg0, sizeof(ext2_bgd_t));
-    write_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)sector_buf, bgd_lba, ext2_vol.sectors_per_block);
+    ext2_vol.dev.write(bgd_lba, ext2_vol.sectors_per_block, sector_buf);
     kfree(sector_buf);
 }
 
@@ -60,8 +61,7 @@ static void ext2_read_inode(uint32_t inode_num, ext2_inode_t *out_inode) {
     if (inode_num == 0) return;
 
     uint32_t inodes_per_group = ext2_vol.sb.s_inodes_per_group;
-    uint32_t block_group = (inode_num - 1) / inodes_per_group;
-    uint32_t local_index = (inode_num - 1) % inodes_per_group; // <--- FIXED: Local index inside group!
+    uint32_t local_index = (inode_num - 1) % inodes_per_group;
 
     uint32_t inode_table_block = ext2_vol.bg0.bg_inode_table;
     uint32_t inode_size = ext2_vol.sb.s_inode_size ? ext2_vol.sb.s_inode_size : 128;
@@ -74,7 +74,7 @@ static void ext2_read_inode(uint32_t inode_num, ext2_inode_t *out_inode) {
     uint8_t *block_buf = (uint8_t *)kmalloc(ext2_vol.block_size);
     if (!block_buf) return;
     
-    read_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)block_buf, ext2_block_to_lba(target_block), ext2_vol.sectors_per_block);
+    ext2_vol.dev.read(ext2_block_to_lba(target_block), ext2_vol.sectors_per_block, block_buf);
     memcpy(out_inode, block_buf + byte_offset, sizeof(ext2_inode_t));
 
     kfree(block_buf);
@@ -84,8 +84,7 @@ static void ext2_write_inode(uint32_t inode_num, ext2_inode_t *inode) {
     if (inode_num == 0) return;
 
     uint32_t inodes_per_group = ext2_vol.sb.s_inodes_per_group;
-    uint32_t block_group = (inode_num - 1) / inodes_per_group;
-    uint32_t local_index = (inode_num - 1) % inodes_per_group; // <--- FIXED: Local index inside group!
+    uint32_t local_index = (inode_num - 1) % inodes_per_group;
 
     uint32_t inode_table_block = ext2_vol.bg0.bg_inode_table;
     uint32_t inode_size = ext2_vol.sb.s_inode_size ? ext2_vol.sb.s_inode_size : 128;
@@ -98,9 +97,9 @@ static void ext2_write_inode(uint32_t inode_num, ext2_inode_t *inode) {
     uint8_t *block_buf = (uint8_t *)kmalloc(ext2_vol.block_size);
     if (!block_buf) return;
 
-    read_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)block_buf, ext2_block_to_lba(target_block), ext2_vol.sectors_per_block);
+    ext2_vol.dev.read(ext2_block_to_lba(target_block), ext2_vol.sectors_per_block, block_buf);
     memcpy(block_buf + byte_offset, inode, sizeof(ext2_inode_t));
-    write_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)block_buf, ext2_block_to_lba(target_block), ext2_vol.sectors_per_block);
+    ext2_vol.dev.write(ext2_block_to_lba(target_block), ext2_vol.sectors_per_block, block_buf);
 
     kfree(block_buf);
 }
@@ -110,7 +109,7 @@ static uint32_t ext2_alloc_block(void) {
     if (!bitmap) return 0;
 
     uint32_t bitmap_block = ext2_vol.bg0.bg_block_bitmap;
-    read_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)bitmap, ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block);
+    ext2_vol.dev.read(ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block, bitmap);
 
     uint32_t total_blocks = ext2_vol.sb.s_blocks_per_group;
     uint32_t allocated_block = 0;
@@ -126,8 +125,7 @@ static uint32_t ext2_alloc_block(void) {
     }
 
     if (allocated_block != 0) {
-        write_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)bitmap, ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block);
-
+        ext2_vol.dev.write(ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block, bitmap);
         ext2_vol.bg0.bg_free_blocks_count--;
         ext2_vol.sb.s_free_blocks_count--;
         ext2_write_bgd();
@@ -143,7 +141,7 @@ static uint32_t ext2_alloc_inode(void) {
     if (!bitmap) return 0;
 
     uint32_t bitmap_block = ext2_vol.bg0.bg_inode_bitmap;
-    read_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)bitmap, ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block);
+    ext2_vol.dev.read(ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block, bitmap);
 
     uint32_t total_inodes = ext2_vol.sb.s_inodes_per_group;
     uint32_t allocated_inode = 0;
@@ -153,14 +151,13 @@ static uint32_t ext2_alloc_inode(void) {
         uint8_t bit_idx = i % 8;
         if (!(bitmap[byte_idx] & (1 << bit_idx))) {
             bitmap[byte_idx] |= (1 << bit_idx);
-            allocated_inode = i + 1; // Inodes are 1-indexed
+            allocated_inode = i + 1;
             break;
         }
     }
 
     if (allocated_inode != 0) {
-        write_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)bitmap, ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block);
-
+        ext2_vol.dev.write(ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block, bitmap);
         ext2_vol.bg0.bg_free_inodes_count--;
         ext2_vol.sb.s_free_inodes_count--;
         ext2_write_bgd();
@@ -192,7 +189,7 @@ static int64_t ext2_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8
         uint32_t block_idx = file_off / bs;
         uint32_t block_in_ino = inode.i_block[block_idx];
 
-        read_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)blk_buf, ext2_block_to_lba(block_in_ino), ext2_vol.sectors_per_block);
+        ext2_vol.dev.read(ext2_block_to_lba(block_in_ino), ext2_vol.sectors_per_block, blk_buf);
 
         uint64_t chunk_off = file_off % bs;
         uint64_t chunk_size = bs - chunk_off;
@@ -221,24 +218,20 @@ static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint
         uint32_t block_idx = file_off / bs;
         
         if (block_idx >= 12) {
-            serial_puts(COM1, "[EXT2 ERROR] Indirect blocks write not supported yet!\n");
-            break; // Currently supports 12 direct blocks (~48KB)
+            break;
         }
 
         uint32_t block_num = inode.i_block[block_idx];
         if (block_num == 0) {
             block_num = ext2_alloc_block();
-            if (block_num == 0) {
-                serial_puts(COM1, "[EXT2 ERROR] No space left on device (Out of blocks)!\n");
-                break;
-            }
+            if (block_num == 0) break;
             inode.i_block[block_idx] = block_num;
         }
 
         uint8_t *blk_buf = (uint8_t *)kmalloc(bs);
         if (!blk_buf) break;
 
-        read_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)blk_buf, ext2_block_to_lba(block_num), ext2_vol.sectors_per_block);
+        ext2_vol.dev.read(ext2_block_to_lba(block_num), ext2_vol.sectors_per_block, blk_buf);
 
         uint64_t chunk_off = file_off % bs;
         uint64_t chunk_size = bs - chunk_off;
@@ -247,8 +240,7 @@ static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint
         }
 
         memcpy(blk_buf + chunk_off, buffer + bytes_written, chunk_size);
-
-        write_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)blk_buf, ext2_block_to_lba(block_num), ext2_vol.sectors_per_block);
+        ext2_vol.dev.write(ext2_block_to_lba(block_num), ext2_vol.sectors_per_block, blk_buf);
 
         bytes_written += chunk_size;
         kfree(blk_buf);
@@ -265,17 +257,6 @@ static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint
 }
 
 static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, const char *name, uint8_t file_type) {
-    char dbg_buf[32];
-    serial_puts(COM1, "[EXT2 DEBUG] ext2_add_dir_entry: adding '");
-    serial_puts(COM1, name);
-    serial_puts(COM1, "' (ino #");
-    itoa(new_inode_num, 10, dbg_buf);
-    serial_puts(COM1, dbg_buf);
-    serial_puts(COM1, ") to dir ino #");
-    itoa(dir_inode_num, 10, dbg_buf);
-    serial_puts(COM1, dbg_buf);
-    serial_puts(COM1, "\n");
-
     ext2_inode_t dir_inode;
     ext2_read_inode(dir_inode_num, &dir_inode);
 
@@ -292,10 +273,7 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
         
         if (dir_block == 0) {
             dir_block = ext2_alloc_block();
-            if (dir_block == 0) {
-                serial_puts(COM1, "[EXT2 ERROR] ext2_add_dir_entry: failed to allocate new block!\n");
-                break;
-            }
+            if (dir_block == 0) break;
             dir_inode.i_block[b] = dir_block;
             dir_inode.i_size += bs;
             dir_inode.i_blocks += ext2_vol.sectors_per_block;
@@ -305,16 +283,8 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
             ext2_dir_entry_t *first_entry = (ext2_dir_entry_t *)blk_buf;
             first_entry->inode = 0;
             first_entry->rec_len = bs;
-
-            serial_puts(COM1, "[EXT2 DEBUG] Allocated new block index ");
-            itoa(b, 10, dbg_buf);
-            serial_puts(COM1, dbg_buf);
-            serial_puts(COM1, " (Block #");
-            itoa(dir_block, 10, dbg_buf);
-            serial_puts(COM1, dbg_buf);
-            serial_puts(COM1, ")\n");
         } else {
-            read_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)blk_buf, ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block);
+            ext2_vol.dev.read(ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block, blk_buf);
         }
 
         uint32_t offset = 0;
@@ -340,10 +310,6 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
                 memcpy(new_entry->name, name, name_len);
 
                 added = 1;
-                serial_puts(COM1, "[EXT2 DEBUG] Entry successfully fitted into block index ");
-                itoa(b, 10, dbg_buf);
-                serial_puts(COM1, dbg_buf);
-                serial_puts(COM1, "\n");
                 break;
             }
 
@@ -351,7 +317,7 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
         }
 
         if (added) {
-            write_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)blk_buf, ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block);
+            ext2_vol.dev.write(ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block, blk_buf);
             break;
         }
     }
@@ -362,22 +328,10 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
 
 static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index) {
     uint32_t inode_num = (uint32_t)(uintptr_t)node->ptr;
-    char dbg_buf[32];
-    serial_puts(COM1, "[EXT2 DEBUG] ext2_readdir: reading dir inode #");
-    itoa(inode_num, 10, dbg_buf);
-    serial_puts(COM1, dbg_buf);
-    serial_puts(COM1, " at index #");
-    itoa(index, 10, dbg_buf);
-    serial_puts(COM1, dbg_buf);
-    serial_puts(COM1, "\n");
-
     ext2_inode_t inode;
     ext2_read_inode(inode_num, &inode);
 
-    if (!(inode.i_mode & EXT2_S_IFDIR)) {
-        serial_puts(COM1, "[EXT2 ERROR] ext2_readdir: target is not a directory!\n");
-        return NULL;
-    }
+    if (!(inode.i_mode & EXT2_S_IFDIR)) return NULL;
 
     uint32_t bs = ext2_vol.block_size;
     uint8_t *blk_buf = (uint8_t *)kmalloc(bs);
@@ -388,7 +342,7 @@ static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index) {
         uint32_t dir_block = inode.i_block[b];
         if (dir_block == 0) break;
 
-        read_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)blk_buf, ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block);
+        ext2_vol.dev.read(ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block, blk_buf);
 
         uint32_t offset = 0;
         while (offset < bs) {
@@ -417,10 +371,6 @@ static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index) {
                         vnode->length = child_ino.i_size;
                         vnode->ops = &ext2_fops;
 
-                        serial_puts(COM1, "[EXT2 DEBUG] ext2_readdir found entry: ");
-                        serial_puts(COM1, vnode->name);
-                        serial_puts(COM1, "\n");
-
                         kfree(blk_buf);
                         return vnode;
                     }
@@ -438,20 +388,9 @@ static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index) {
 static vfs_node_t *ext2_create(vfs_node_t *dir, const char *name, uint32_t flags) {
     (void)flags;
     uint32_t dir_inode_num = (uint32_t)(uintptr_t)dir->ptr;
-    char dbg_buf[32];
-
-    serial_puts(COM1, "[EXT2 DEBUG] ext2_create: creating '");
-    serial_puts(COM1, name);
-    serial_puts(COM1, "' inside dir inode #");
-    itoa(dir_inode_num, 10, dbg_buf);
-    serial_puts(COM1, dbg_buf);
-    serial_puts(COM1, "\n");
 
     uint32_t new_inode_num = ext2_alloc_inode();
-    if (new_inode_num == 0) {
-        serial_puts(COM1, "[EXT2 ERROR] ext2_create: failed to allocate inode!\n");
-        return NULL;
-    }
+    if (new_inode_num == 0) return NULL;
 
     ext2_inode_t new_inode;
     memset(&new_inode, 0, sizeof(ext2_inode_t));
@@ -462,7 +401,6 @@ static vfs_node_t *ext2_create(vfs_node_t *dir, const char *name, uint32_t flags
     ext2_write_inode(new_inode_num, &new_inode);
 
     if (!ext2_add_dir_entry(dir_inode_num, new_inode_num, name, EXT2_FT_REG_FILE)) {
-        serial_puts(COM1, "[EXT2 ERROR] ext2_create: failed to add directory entry!\n");
         return NULL;
     }
 
@@ -474,7 +412,6 @@ static vfs_node_t *ext2_create(vfs_node_t *dir, const char *name, uint32_t flags
     vnode->ptr = (vfs_node_t *)(uintptr_t)new_inode_num;
     vnode->ops = &ext2_fops;
 
-    serial_puts(COM1, "[EXT2 DEBUG] ext2_create: success!\n");
     return vnode;
 }
 
@@ -489,12 +426,11 @@ static vfs_node_t *ext2_finddir(vfs_node_t *node, const char *name) {
     uint8_t *blk_buf = (uint8_t *)kmalloc(bs);
     if (!blk_buf) return NULL;
 
-    // Iterate through all direct blocks of the directory
     for (int b = 0; b < 12; b++) {
         uint32_t dir_block = inode.i_block[b];
         if (dir_block == 0) break;
 
-        read_sectors_ata_pio_drive(ext2_vol.drive, (uintptr_t)blk_buf, ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block);
+        ext2_vol.dev.read(ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block, blk_buf);
 
         uint32_t offset = 0;
         while (offset < bs) {
@@ -532,12 +468,12 @@ static vfs_node_t *ext2_finddir(vfs_node_t *node, const char *name) {
     return NULL;
 }
 
-vfs_node_t *ext2_mount_partition(uint8_t drive, uint32_t partition_lba) {
-    ext2_vol.drive = drive;
+vfs_node_t *ext2_mount_partition(block_device_t dev, uint32_t partition_lba) {
+    ext2_vol.dev = dev;
     ext2_vol.partition_lba = partition_lba;
 
     uint8_t sector_buf[1024];
-    read_sectors_ata_pio_drive(drive, (uintptr_t)sector_buf, partition_lba + 2, 2);
+    ext2_vol.dev.read(partition_lba + 2, 2, sector_buf);
     memcpy(&ext2_vol.sb, sector_buf, sizeof(ext2_superblock_t));
 
     if (ext2_vol.sb.s_magic != EXT2_SUPER_MAGIC) {
@@ -548,35 +484,15 @@ vfs_node_t *ext2_mount_partition(uint8_t drive, uint32_t partition_lba) {
     ext2_vol.block_size = 1024 << ext2_vol.sb.s_log_block_size;
     ext2_vol.sectors_per_block = ext2_vol.block_size / 512;
 
-    serial_puts(COM1, "[EXT2] Valid superblock found on Drive ");
-    char buf[16];
-    itoa(drive, 10, buf);
-    serial_puts(COM1, buf);
-    serial_puts(COM1, "! Block size: ");
-    itoa(ext2_vol.block_size, 10, buf);
-    serial_puts(COM1, buf);
-    serial_puts(COM1, " bytes\n");
-
-    // Check filesystem clean / dirty state
-    if (ext2_vol.sb.s_state != EXT2_VALID_FS) {
-        serial_puts(COM1, "[EXT2 WARNING] Volume was NOT cleanly unmounted (DIRTY/IN-USE by another OS)!\n");
-    } else {
-        serial_puts(COM1, "[EXT2] Volume clean status check PASSED.\n");
-    }
-
-    // Mark filesystem active / dirty on mount
-    ext2_vol.sb.s_state = EXT2_ERROR_FS;
-    ext2_write_superblock();
-
     uint32_t bgd_lba = ext2_block_to_lba((ext2_vol.block_size == 1024) ? 2 : 1);
-    read_sectors_ata_pio_drive(drive, (uintptr_t)sector_buf, bgd_lba, ext2_vol.sectors_per_block);
+    ext2_vol.dev.read(bgd_lba, ext2_vol.sectors_per_block, sector_buf);
     memcpy(&ext2_vol.bg0, sector_buf, sizeof(ext2_bgd_t));
 
     vfs_node_t *root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strcpy(root->name, "/");
     root->flags = FS_DIRECTORY;
     root->length = 0;
-    root->ptr = (vfs_node_t *)2; // Root inode is #2
+    root->ptr = (vfs_node_t *)2;
     root->ops = &ext2_fops;
 
     return root;
