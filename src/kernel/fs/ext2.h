@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "vfs.h"
+#include "../drivers/disk/block.h"
 
 #define EXT2_SUPER_MAGIC 0xEF53
 
@@ -105,6 +106,6 @@ typedef struct {
 #define EXT2_S_IFDIR 0x4000
 
 void ext2_init(void);
-vfs_node_t *ext2_mount_partition(uint8_t drive, uint32_t partition_lba);
+vfs_node_t *ext2_mount_partition(block_device_t dev, uint32_t partition_lba);
 
 #endif // EXT2_H

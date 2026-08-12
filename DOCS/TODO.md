@@ -9,11 +9,11 @@
 ~~FAT32~~
 ~~Terminal Improvements~~
 ~~EXT2~~
-NVME, GPT <
+~~NVME, GPT~~
 + Run on your real OS <
 Musl/mlibc, Busybox, LABI (POSIX syscalls)
 Bash
-USB
+USB <
 Installer
 
 Long Term:

@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-
+#include "block.h"
 // Error codes
 #define NVME_SUCCESS        0
 #define NVME_ERR_NOMEM      -1
@@ -104,5 +104,6 @@ typedef struct {
 int nvme_init(void);
 int nvme_read_sectors(uint64_t lba, uint32_t sector_count, void *buffer);
 int nvme_write_sectors(uint64_t lba, uint32_t sector_count, void *buffer);
+block_device_t nvme_get_block_device(void);
 
 #endif // NVME_H
