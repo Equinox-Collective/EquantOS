@@ -95,7 +95,7 @@ ISR_NOERRCODE 31
 exception_common:
     SAVE_REGS
     mov rdi, rsp
-    sub rsp, 8          ; FIX: Align RSP to 16 bytes boundary for System V ABI
+    sub rsp, 8          ; Align RSP to 16 bytes boundary for System V ABI
     call panic_handler
     add rsp, 8
 .halt_loop:
@@ -103,10 +103,20 @@ exception_common:
     hlt
     jmp .halt_loop
 
+; FIX: Handler for spurious hardware IRQs (sends EOI and ignores without panicking)
+[global irq_ignore_handler]
+irq_ignore_handler:
+    push rax
+    mov al, 0x20
+    out 0x20, al        ; Send EOI to Master PIC
+    out 0xA0, al        ; Send EOI to Slave PIC
+    pop rax
+    iretq
+
 [global keyboard_handler]
 keyboard_handler:
     SAVE_REGS
-    sub rsp, 8          ; FIX: Align RSP to 16-byte boundary
+    sub rsp, 8          ; Align RSP to 16-byte boundary
     call keyboard_callback
     add rsp, 8
     mov al, 0x20
@@ -156,7 +166,7 @@ syscall_interrupt_asm:
     push rax
 
     mov rdi, rsp
-    sub rsp, 8          ; FIX: Align RSP for C function call
+    sub rsp, 8          ; Align RSP for C function call
     call syscall_handler
     add rsp, 8
 
