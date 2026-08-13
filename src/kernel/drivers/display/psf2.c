@@ -5,8 +5,6 @@ extern void term_print(const char *str);
 
 psf2_font_t kernel_psf2_font;
 
-/* ---- Minimal UTF-8 decoder ------------------------------------------ */
-/* Returns codepoint and advances *src; on bad input returns 0xFFFD. */
 static uint32_t utf8_next(const char **src) {
     const uint8_t *s = (const uint8_t *)*src;
     uint32_t c = *s++;
@@ -30,25 +28,16 @@ static uint32_t utf8_next(const char **src) {
     return cp;
 }
 
-/* ---- Parse Unicode table -------------------------------------------- */
-
 static void psf2_build_unicode_table(psf2_font_t *f, const uint8_t *table_start,
                                      const uint8_t *table_end) {
     memset(f->codepoint_to_glyph, 0, sizeof(f->codepoint_to_glyph));
 
-    /*
-     * Format per glyph entry (terminator = 0xFF):
-     *   <unicodes>  (UTF-8 sequences, multiple allowed)
-     *   0xFE        (optional sequence separator, ignored here)
-     *   0xFF        (end of this glyph)
-     */
     const uint8_t *p = table_start;
     uint32_t glyph = 0;
     while (p < table_end && glyph < f->hdr->numglyph) {
         if (*p == 0xFF) { glyph++; p++; continue; }
         if (*p == 0xFE) { p++; continue; }
 
-        /* Decode one UTF-8 codepoint. */
         const char *cur = (const char *)p;
         uint32_t cp = utf8_next(&cur);
         p = (const uint8_t *)cur;
@@ -95,23 +84,20 @@ bool psf2_init_default(const void *data, uint32_t size) {
     return ok;
 }
 
-/* ---- Glyph lookup --------------------------------------------------- */
-
 static uint32_t glyph_index(const psf2_font_t *f, uint32_t cp) {
     if (f->has_unicode) {
         if (cp >= 0x10000) return 0;
         uint16_t g = f->codepoint_to_glyph[cp];
         if (g != 0 || cp == 0) return g;
-        /* fall through: try literal index for ASCII */
     }
     if (cp < f->hdr->numglyph) return cp;
     return 0;
 }
 
 int psf2_draw_char(const psf2_font_t *f,
-                   uint32_t *fb, int fb_w, int fb_h,
+                   uint32_t *fb, int fb_pitch_pixels, int fb_h,
                    int x, int y, uint32_t cp, uint32_t color) {
-    if (!f->loaded) return 0;
+    if (!f || !f->loaded) return 0;
     uint32_t gi  = glyph_index(f, cp);
     const uint8_t *glyph = f->bitmaps + gi * f->hdr->bytesperglyph;
     uint32_t bpr = (f->hdr->width + 7) / 8;
@@ -121,10 +107,11 @@ int psf2_draw_char(const psf2_font_t *f,
         if (py < 0 || py >= fb_h) { glyph += bpr; continue; }
         for (uint32_t col = 0; col < f->hdr->width; ++col) {
             int px = x + (int)col;
-            if (px < 0 || px >= fb_w) continue;
+            if (px < 0 || px >= fb_pitch_pixels) continue;
             uint8_t byte = glyph[col / 8];
             if (byte & (0x80 >> (col & 7)))
-                fb[py * fb_w + px] = color;
+                // FIX: Use hardware pitch_pixels for scanline offset calculation
+                fb[py * fb_pitch_pixels + px] = color;
         }
         glyph += bpr;
     }
@@ -132,15 +119,15 @@ int psf2_draw_char(const psf2_font_t *f,
 }
 
 int psf2_draw_string(const psf2_font_t *f,
-                     uint32_t *fb, int fb_w, int fb_h,
+                     uint32_t *fb, int fb_pitch_pixels, int fb_h,
                      int x, int y, const char *utf8, uint32_t color) {
-    if (!f->loaded) return 0;
+    if (!f || !f->loaded) return 0;
     int x0 = x;
     while (*utf8) {
         const char *cur = utf8;
         uint32_t cp = utf8_next(&cur);
         utf8 = cur;
-        x += psf2_draw_char(f, fb, fb_w, fb_h, x, y, cp, color);
+        x += psf2_draw_char(f, fb, fb_pitch_pixels, fb_h, x, y, cp, color);
     }
     return x - x0;
 }

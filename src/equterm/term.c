@@ -49,9 +49,9 @@ static int get_line_height(void) {
 
 static void term_clear_rect(size_t y0, size_t y1) {
     if (!term_fb_address) return;
-    size_t row_bytes = term_width * sizeof(uint32_t);
     for (size_t y = y0; y < y1 && y < term_height; y++) {
-        memset(&term_fb_address[y * term_pitch], 0, row_bytes);
+        // FIX: Use pitch (in 32-bit words) for row offset
+        memset(&term_fb_address[y * term_pitch], 0, term_width * sizeof(uint32_t));
     }
 }
 
@@ -106,12 +106,12 @@ static void term_scroll(void) {
 
     int lh = get_line_height();
     size_t visible_rows = term_height - lh;
-    size_t row_bytes = term_width * sizeof(uint32_t);
 
     for (size_t y = 0; y < visible_rows; y++) {
+        // FIX: Copy each row using actual hardware pitch
         memcpy(&term_fb_address[y * term_pitch],
                &term_fb_address[(y + lh) * term_pitch],
-               row_bytes);
+               term_width * sizeof(uint32_t));
     }
 
     term_clear_rect(visible_rows, term_height);

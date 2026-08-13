@@ -66,9 +66,16 @@ uint8_t keyboard_pop(void) {
 }
 
 void keyboard_callback(void) {
+    // Check if output buffer full bit (bit 0) is set in status register 0x64
+    if (!(inb(0x64) & 0x01)) return;
+
     uint8_t scancode = inb(0x60);
 
-    // Handle extended scancode prefix (0xE0)
+    // Ignore PS/2 Controller ACKs and Resend commands (0xFA, 0xFE, 0xFF)
+    if (scancode == 0xFA || scancode == 0xFE || scancode == 0xFF) {
+        return;
+    }
+
     if (scancode == 0xE0) {
         extended = true;
         return;
@@ -80,22 +87,20 @@ void keyboard_callback(void) {
     if (extended) {
         extended = false;
         if (!is_release) {
-            // Map extended keys to special virtual scancodes (> 128)
             switch (code) {
-                case 0x4B: keyboard_push(KEY_LEFT);  break; // Left Arrow
-                case 0x4D: keyboard_push(KEY_RIGHT); break; // Right Arrow
-                case 0x48: keyboard_push(KEY_UP);    break; // Up Arrow
-                case 0x50: keyboard_push(KEY_DOWN);  break; // Down Arrow
-                case 0x47: keyboard_push(KEY_HOME);  break; // Home
-                case 0x4F: keyboard_push(KEY_END);   break; // End
-                case 0x53: keyboard_push(KEY_DELETE);break; // Delete
+                case 0x4B: keyboard_push(KEY_LEFT);  break;
+                case 0x4D: keyboard_push(KEY_RIGHT); break;
+                case 0x48: keyboard_push(KEY_UP);    break;
+                case 0x50: keyboard_push(KEY_DOWN);  break;
+                case 0x47: keyboard_push(KEY_HOME);  break;
+                case 0x4F: keyboard_push(KEY_END);   break;
+                case 0x53: keyboard_push(KEY_DELETE);break;
                 default: break;
             }
         }
         return;
     }
 
-    // Update modifier keys state
     if (code == 0x1D) {
         ctrl_pressed = !is_release;
     } else if (code == 0x38) {
@@ -104,7 +109,6 @@ void keyboard_callback(void) {
         shift_pressed = !is_release;
     }
 
-    // Push standard scancode into circular buffer
     if (!is_release) {
         keyboard_push(scancode);
     }
