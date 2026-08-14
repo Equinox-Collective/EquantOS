@@ -32,14 +32,12 @@ ifeq ($(USE_POSIX),1)
     RMDIR = rm -rf "$1"
     RM    = rm -f "$1"
     CP    = cp "$1" "$2"
-    EXT2_MAKE = dd if=/dev/zero of=disk.img bs=1M count=32 && mkfs.ext2 -F disk.img
 else
     WINPATH = $(subst /,\,$(patsubst %/,%,$1))
     MKDIR   = if not exist "$(call WINPATH,$1)" mkdir "$(call WINPATH,$1)"
     RMDIR   = if exist "$(call WINPATH,$1)" rmdir /s /q "$(call WINPATH,$1)"
     RM      = if exist "$(call WINPATH,$1)" del /q /f "$(call WINPATH,$1)"
     CP      = copy /Y "$(call WINPATH,$1)" "$(call WINPATH,$2)" >nul
-    EXT2_MAKE = winmakeext2 --size:32MB --output:disk.img
 endif
 
 # Recursive wildcard file search
@@ -49,8 +47,8 @@ rwildcard = $(foreach d,$(wildcard $(1:=/*)),$(call rwildcard,$d,$2) $(filter $(
 INC_DIRS = $(sort $(dir $(call rwildcard,src,*)))
 CFLAGS += $(addprefix -I, $(INC_DIRS))
 
-# Source files search (excluding userland sources from kernel linking)
-C_SOURCES   = $(filter-out src/userland/%, $(call rwildcard,src,*.c))
+# Source files search (Only kernel code inside src/)
+C_SOURCES   = $(call rwildcard,src,*.c)
 ASM_SOURCES = $(call rwildcard,src,*.asm)
 S_SOURCES   = $(call rwildcard,src,*.s)
 
@@ -84,20 +82,20 @@ build/kernel.elf: $(ALL_OBJECTS) src/linker.ld
 	@$(call MKDIR,build)
 	$(LD) $(LDFLAGS) $(ALL_OBJECTS) -o $@
 
-# Build userland test program equantmemtest.elf and place it directly into build/iso/
-build/iso/equantmemtest.elf: src/userland/equantmemtest.c
-	@$(call MKDIR,build/obj/userland)
+# Build userland programs from userspace/ directory
+build/iso/equantmemtest.elf: userspace/equantmemtest.c
+	@$(call MKDIR,build/obj/userspace)
 	@$(call MKDIR,build/iso)
-	$(CC) -g -ffreestanding -fno-pie -fno-pic -nostdlib -c src/userland/equantmemtest.c -o build/obj/userland/equantmemtest.o
-	$(LD) -Ttext 0x400000 build/obj/userland/equantmemtest.o -o build/iso/equantmemtest.elf
+	$(CC) -g -ffreestanding -fno-pie -fno-pic -nostdlib -c userspace/equantmemtest.c -o build/obj/userspace/equantmemtest.o
+	$(LD) -Ttext 0x400000 build/obj/userspace/equantmemtest.o -o build/iso/equantmemtest.elf
 
 build/iso/font.psf: res/font.psf
 	@$(call MKDIR,build/iso)
 	@$(call CP,res/font.psf,build/iso/font.psf)
 
-# Generate EXT2 disk image using winmakeext2 (Windows) or mkfs.ext2 (Linux)
+# Create 64MB disks ONCE if they don't exist
 disks:
-	py create_disks.py
+	python create_disks.py
 
 # Download Limine binaries
 limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
@@ -110,7 +108,7 @@ limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
 	@$(call RMDIR,_limine_bin)
 	@echo [BUILD] Limine binaries ready.
 
-# Build Hybrid ISO image (depends on kernel, test elf, and bootloader files)
+# Build Hybrid ISO image
 build/equantos.iso: build/kernel.elf build/iso/equantmemtest.elf build/iso/font.psf limine.conf limine-bios-cd.bin limine-uefi-cd.bin
 	@echo [BUILD] Preparing ISO root structure...
 	@$(call MKDIR,build/iso/boot)
@@ -135,7 +133,6 @@ build/equantos.iso: build/kernel.elf build/iso/equantmemtest.elf build/iso/font.
 	@$(call RM,BOOTX64.EFI)
 	@echo [SUCCESS] EquantOS ISO created at build/equantos.iso!
 
-# REAL NVMe EMULATION: Removed -hda disk.vhd to prevent ATA false-positives
 run: build/equantos.iso disks
 	qemu-system-x86_64 -boot d \
 		-cdrom build/equantos.iso \
@@ -147,12 +144,15 @@ run: build/equantos.iso disks
 
 clean:
 	@$(call RMDIR,build)
-	@$(call RM,disk.img)
 
-clean-all: clean
+clean-disks:
+	@$(call RM,disk_gpt_ext2.img)
+	@$(call RM,disk_mbr_fat32.img)
+
+clean-all: clean clean-disks
 	@$(call RM,limine-bios-cd.bin)
 	@$(call RM,limine-bios.sys)
 	@$(call RM,limine-uefi-cd.bin)
 	@$(call RM,BOOTX64.EFI)
 
-.PHONY: all run clean clean-all
+.PHONY: all run clean clean-disks clean-all disks

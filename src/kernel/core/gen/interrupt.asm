@@ -5,6 +5,8 @@
 [extern schedule]
 [extern current_task]
 [extern tasks]
+[extern syscall_handler]
+[extern linux_syscall_handler]
 
 %macro SAVE_REGS 0
     push rax
@@ -103,7 +105,7 @@ exception_common:
     hlt
     jmp .halt_loop
 
-; FIX: Handler for spurious hardware IRQs (sends EOI and ignores without panicking)
+; Обработчик спонтанных IRQ
 [global irq_ignore_handler]
 irq_ignore_handler:
     push rax
@@ -146,7 +148,6 @@ irq0_handler_asm:
     add rsp, 16       
     iretq
 
-[extern syscall_handler]
 [global syscall_interrupt_asm]
 syscall_interrupt_asm:
     push r15
@@ -187,7 +188,6 @@ syscall_interrupt_asm:
     pop r15
     iretq
 
-[extern linux_syscall_handler]
 [global linux_syscall_interrupt_asm]
 linux_syscall_interrupt_asm:
     push r15
@@ -227,6 +227,60 @@ linux_syscall_interrupt_asm:
     pop r14
     pop r15
     iretq
+
+; Аппаратный вход для инструкции 'syscall'
+[global syscall_entry_asm]
+syscall_entry_asm:
+    mov [rel user_rsp_temp], rsp
+
+    ; Переключаемся на стек ядра
+    mov rsp, [rel current_task]
+    mov rsp, [rsp + 24] ; kstack_at_bottom
+
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov rdi, rsp
+    sub rsp, 8
+    call syscall_handler
+    add rsp, 8
+
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+
+    mov rsp, [rel user_rsp_temp]
+
+    db 0x48             ; REX.W prefix for 64-bit sysretq
+    sysret
+
+section .bss
+user_rsp_temp: resq 1
 
 section .data
 [global isr_stub_table]
