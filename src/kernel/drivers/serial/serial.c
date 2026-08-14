@@ -1,6 +1,8 @@
 #include "serial.h"
 #include "../../core/gen/io.h"
 
+extern void term_putchar_raw(char c);
+
 // Serial port register offsets relative to base address
 #define SERIAL_DATA         0
 #define SERIAL_INT_ENABLE   1
@@ -82,7 +84,9 @@ void serial_putchar(uint16_t port, char c) {
 void serial_puts(uint16_t port, const char *str) {
     serial_acquire_lock();
     while (*str) {
-        serial_putchar(port, *str++);
+        char c = *str++;
+        serial_putchar(port, c);
+        term_putchar_raw(c); // Зеркалируем весь serial-лог прямо на экран монитора!
     }
     serial_release_lock();
 }

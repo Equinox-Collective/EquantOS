@@ -50,7 +50,6 @@ static int get_line_height(void) {
 static void term_clear_rect(size_t y0, size_t y1) {
     if (!term_fb_address) return;
     for (size_t y = y0; y < y1 && y < term_height; y++) {
-        // FIX: Use pitch (in 32-bit words) for row offset
         memset(&term_fb_address[y * term_pitch], 0, term_width * sizeof(uint32_t));
     }
 }
@@ -62,7 +61,6 @@ static void term_draw_cursor(bool visible) {
     int gh = get_glyph_height();
     uint32_t color = visible ? term_fg_color : 0x00000000;
 
-    // Draw solid underline block at the bottom of the character cell
     for (int y = gh - 3; y < gh; y++) {
         for (int x = 0; x < gw; x++) {
             size_t px = cursor_x + x;
@@ -108,7 +106,6 @@ static void term_scroll(void) {
     size_t visible_rows = term_height - lh;
 
     for (size_t y = 0; y < visible_rows; y++) {
-        // FIX: Copy each row using actual hardware pitch
         memcpy(&term_fb_address[y * term_pitch],
                &term_fb_address[(y + lh) * term_pitch],
                term_width * sizeof(uint32_t));
@@ -118,7 +115,7 @@ static void term_scroll(void) {
 }
 
 static void term_advance_line(void) {
-    term_draw_cursor(false); // Clear old cursor
+    term_draw_cursor(false);
     cursor_x = 0;
     int gh = get_glyph_height();
     int lh = get_line_height();
@@ -131,30 +128,27 @@ static void term_advance_line(void) {
     term_draw_cursor(true);
 }
 
-// Parse ANSI escape color codes like \033[31m (Red), \033[32m (Green), \033[0m (Reset)
 static void parse_ansi_color(const char *code) {
     if (strcmp(code, "0") == 0 || strcmp(code, "37") == 0) {
-        term_fg_color = default_fg_color; // Reset to default white
+        term_fg_color = default_fg_color;
     } else if (strcmp(code, "31") == 0) {
-        term_fg_color = 0x00FF5555; // Light Red
+        term_fg_color = 0x00FF5555;
     } else if (strcmp(code, "32") == 0) {
-        term_fg_color = 0x0055FF55; // Light Green
+        term_fg_color = 0x0055FF55;
     } else if (strcmp(code, "33") == 0) {
-        term_fg_color = 0x00FFFF55; // Light Yellow
+        term_fg_color = 0x00FFFF55;
     } else if (strcmp(code, "34") == 0) {
-        term_fg_color = 0x005555FF; // Light Blue
+        term_fg_color = 0x005555FF;
     } else if (strcmp(code, "36") == 0) {
-        term_fg_color = 0x0055FFFF; // Cyan
+        term_fg_color = 0x0055FFFF;
     }
 }
 
-void term_putchar(char c) {
-    serial_putchar(COM1, c);
+void term_putchar_raw(char c) {
     if (!term_fb_address) return;
 
-    // Handle ANSI escape sequences state machine
     if (in_escape) {
-        if (c == 'm') { // End of color sequence
+        if (c == 'm') {
             esc_buf[esc_len] = '\0';
             parse_ansi_color(esc_buf);
             in_escape = false;
@@ -165,7 +159,7 @@ void term_putchar(char c) {
         return;
     }
 
-    if (c == 27) { // ESC character (ASCII 27 / \033)
+    if (c == 27) {
         in_escape = true;
         esc_len = 0;
         return;
@@ -179,7 +173,7 @@ void term_putchar(char c) {
     int gw = get_glyph_width();
     int gh = get_glyph_height();
 
-    term_draw_cursor(false); // Hide cursor before drawing
+    term_draw_cursor(false);
 
     if (c == '\b') {
         if (cursor_x >= (size_t)gw) {
@@ -227,7 +221,12 @@ void term_putchar(char c) {
         cursor_x += gw;
     }
 
-    term_draw_cursor(true); // Redraw cursor at new position
+    term_draw_cursor(true);
+}
+
+void term_putchar(char c) {
+    serial_putchar(COM1, c);
+    term_putchar_raw(c);
 }
 
 void term_print(const char *str) {
@@ -246,7 +245,6 @@ void term_poll_keyboard(void) {
     uint8_t scancode = keyboard_pop();
     if (scancode == 0) return;
 
-    // Handle Ctrl + L shortcut to clear screen
     if (keyboard_ctrl_pressed()) {
         char c = get_ascii_char(scancode);
         if (c == 'l' || c == 'L') {
@@ -329,24 +327,20 @@ void term_poll_keyboard(void) {
         cursor_pos = 0;
         term_draw_cursor(true);
     } else if (c == '\b') {
-        // Handle Ctrl + Backspace (delete previous word)
         if (keyboard_ctrl_pressed()) {
             term_draw_cursor(false);
             while (cmd_len > 0 && cursor_pos > 0 && cmd_buf[cursor_pos - 1] == ' ') {
-                // Skip trailing spaces
                 for (int i = cursor_pos - 1; i < cmd_len - 1; i++) cmd_buf[i] = cmd_buf[i + 1];
                 cmd_len--; cursor_pos--;
                 term_putchar('\b');
             }
             while (cmd_len > 0 && cursor_pos > 0 && cmd_buf[cursor_pos - 1] != ' ') {
-                // Delete word characters
                 for (int i = cursor_pos - 1; i < cmd_len - 1; i++) cmd_buf[i] = cmd_buf[i + 1];
                 cmd_len--; cursor_pos--;
                 term_putchar('\b');
             }
             term_draw_cursor(true);
         } else {
-            // Regular Backspace
             if (cmd_len > 0 && cursor_pos > 0) {
                 term_draw_cursor(false);
                 for (int i = cursor_pos - 1; i < cmd_len - 1; i++) {

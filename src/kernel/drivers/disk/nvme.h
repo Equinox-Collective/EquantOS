@@ -1,3 +1,4 @@
+// nvme.h - NVMe Controller Definitions
 #ifndef NVME_H
 #define NVME_H
 
@@ -83,7 +84,8 @@ typedef struct {
     uint32_t num_namespaces;
     uint16_t command_id;
     uint32_t db_stride;
-    bool initialized; // FIX: Added initialization state tracking for idempotency
+    uint32_t sector_size; // FIX: Physical sector size (512 or 4096)
+    bool initialized;
 } nvme_controller_t;
 
 int nvme_init(void);

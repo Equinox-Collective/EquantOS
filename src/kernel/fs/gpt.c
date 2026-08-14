@@ -11,17 +11,11 @@
 static partition_info_t gpt_partitions[MAX_GPT_PARTITIONS];
 static int gpt_partition_count = 0;
 
-// EFI System Partition GUID: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
-static const uint8_t esp_guid[16] = {
-    0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
-    0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B
-};
-
 void gpt_init_device(block_device_t dev) {
     uint8_t sector_buf[512];
     gpt_partition_count = 0;
     
-    // 1. Read LBA 0 (Protective MBR) via Block Device Interface
+    // 1. Read LBA 0 (Protective MBR)
     if (dev.read(0, 1, sector_buf) != 0) return;
     protective_mbr_t *pmbr = (protective_mbr_t *)sector_buf;
 
@@ -66,14 +60,7 @@ void gpt_init_device(block_device_t dev) {
         if (is_empty) continue;
 
         gpt_partitions[gpt_partition_count].index = gpt_partition_count;
-        
-        // FIX: Check if Partition Type GUID is EFI System Partition (ESP) -> FAT32 type 0x0C
-        if (memcmp(entry->partition_type_guid, esp_guid, 16) == 0) {
-            gpt_partitions[gpt_partition_count].type = 0x0C; // FAT32 / ESP
-        } else {
-            gpt_partitions[gpt_partition_count].type = 0x83; // Data
-        }
-
+        gpt_partitions[gpt_partition_count].type = 0x0C; // General partition candidate
         gpt_partitions[gpt_partition_count].start_lba = (uint32_t)entry->starting_lba;
         gpt_partitions[gpt_partition_count].sector_count = (uint32_t)(entry->ending_lba - entry->starting_lba + 1);
 

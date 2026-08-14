@@ -63,7 +63,7 @@ static volatile struct limine_module_request module_request = {
 void _start(void) {
     // 1. Initialize serial port & CPU descriptors
     serial_init(COM1);
-    enable_fpu_sse(); // Enable CR4.OSFXSR & OSXMMEXCPT for SSE safety
+    enable_fpu_sse();
     init_gdt();
     init_idt();
     init_timer(100);
@@ -73,119 +73,100 @@ void _start(void) {
         PANIC("Limine HHDM response is NULL!");
     }
     hhdm_offset = hhdm_request.response->offset;
-
     if (hhdm_offset == 0) {
         PANIC("HHDM offset is zero!");
     }
 
-    // 3. Initialize Memory Management (PMM & VMM)
+    // 3. ИНИЦИАЛИЗИРУЕМ ЭКРАН СРАЗУ (ДО ВСЕХ ДРАЙВЕРОВ И ПАМЯТИ)
+    if (framebuffer_request.response != NULL && framebuffer_request.response->framebuffer_count > 0) {
+        struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
+        term_init(fb->address, fb->width, fb->height, fb->pitch);
+        term_print("[KERNEL] Early Framebuffer & Terminal initialized successfully.\n");
+    }
+
+    // 4. Initialize Memory Management (PMM & VMM)
     pmm_init();
     vmm_init();
     serial_puts(COM1, "[KERNEL] PMM and VMM Initialized successfully.\n");
 
-    // 4. Initialize Kernel Heap (allocate 1 MB continuous block)
-    void *heap_phys = pmm_alloc_continuous(256); // 256 pages * 4KB = 1 MB
+    // 5. Initialize Kernel Heap
+    void *heap_phys = pmm_alloc_continuous(256);
     if (heap_phys == NULL) {
         PANIC("Failed to allocate physical memory for kernel heap!");
     }
-    
     uint64_t heap_virt = VIRT(heap_phys);
     init_heap(heap_virt, 256 * 4096);
     serial_puts(COM1, "[KERNEL] Kernel Heap Initialized (1 MB).\n");
 
-    // 5. Initialize Tasking, Scheduler & System Calls
+    // 6. Tasking, Scheduler & System Calls
     task_init();
     sched_init(current_task);
     init_syscalls();
     serial_puts(COM1, "[KERNEL] Tasking, Scheduler & System Calls Initialized.\n");
 
-    // 6. Initialize VFS and RAMFS
+    // 7. Initialize VFS and RAMFS
     vfs_init();
     vfs_node_t *ramfs_root = ramfs_create_root();
     vfs_mount("/", ramfs_root);
     serial_puts(COM1, "[KERNEL] VFS and RAMFS mounted at root '/'.\n");
 
-    // FIX: Safely parse module filenames so /font.psf is created directly in root '/'
     if (module_request.response != NULL && module_request.response->module_count > 0) {
         for (uint64_t i = 0; i < module_request.response->module_count; i++) {
             struct limine_file *mod = module_request.response->modules[i];
-            
             const char *filename = strrchr(mod->path, '/');
             filename = (filename != NULL) ? filename + 1 : mod->path;
-
             ramfs_create_file(ramfs_root, filename, mod->address, mod->size);
             
             serial_puts(COM1, "[KERNEL] RAMFS loaded module: /");
             serial_puts(COM1, filename);
             serial_puts(COM1, "\n");
         }
-    } else {
-        serial_puts(COM1, "[KERNEL] No boot modules found by Limine to mount.\n");
     }
 
-    // 7. Initialize Hardware Drivers & Storage Subsystems
+    // 8. Теперь сканирование PCI и NVMe БУДЕТ ВЫВОДИТЬСЯ ПРЯМО НА МОНИТОР!
     pci_init();
     
-    // Initialize NVMe Storage Controller
     if (nvme_init() == NVME_SUCCESS) {
         block_device_t nvme_disk = nvme_get_block_device();
-
-        // Scan GPT/MBR partition table on NVMe
         disk_partition_scan_device(nvme_disk);
 
-        // Mount FAT32 / ESP partition
-        fat32_init();
-
-        // FIX: Dynamically scan for EXT2 partition (Type 0x83) instead of hardcoding LBA 0
         int p_count = disk_get_partition_count();
         for (int i = 0; i < p_count; i++) {
             partition_info_t *part = disk_get_partition(i);
-            if (part && part->type == 0x83) {
-                vfs_node_t *ext2_root = ext2_mount_partition(nvme_disk, part->start_lba);
-                if (ext2_root) {
-                    vfs_node_t *ext2_dir = ramfs_create_directory(vfs_root, "ext2");
-                    if (ext2_dir) {
-                        ext2_dir->flags |= FS_MOUNTPOINT;
-                        ext2_dir->ptr = (struct vfs_node *)ext2_root;
-                        serial_puts(COM1, "[EXT2] EXT2 successfully mounted at /ext2!\n");
-                    }
-                    break;
+            if (!part) continue;
+
+            vfs_node_t *fat_root = fat32_mount_partition(nvme_disk, part->start_lba, part->sector_count);
+            if (fat_root) {
+                vfs_node_t *disk_dir = ramfs_create_directory(vfs_root, "disk");
+                if (disk_dir) {
+                    disk_dir->flags |= FS_MOUNTPOINT;
+                    disk_dir->ptr = (struct vfs_node *)fat_root;
+                    serial_puts(COM1, "[FAT32 SUCCESS] Mounted FAT32 partition to /disk\n");
                 }
+                continue;
+            }
+
+            vfs_node_t *ext2_root = ext2_mount_partition(nvme_disk, part->start_lba);
+            if (ext2_root) {
+                vfs_node_t *ext2_dir = ramfs_create_directory(vfs_root, "ext2");
+                if (ext2_dir) {
+                    ext2_dir->flags |= FS_MOUNTPOINT;
+                    ext2_dir->ptr = (struct vfs_node *)ext2_root;
+                    serial_puts(COM1, "[EXT2 SUCCESS] Mounted EXT2 partition to /ext2\n");
+                }
+                continue;
             }
         }
     } else {
         serial_puts(COM1, "[KERNEL WARNING] NVMe controller not found or init failed.\n");
     }
 
-    serial_puts(COM1, "[KERNEL] Hardware drivers and partition scan completed.\n");
-
-    // 8. Framebuffer & Terminal
-    if (framebuffer_request.response == NULL || framebuffer_request.response->framebuffer_count < 1) {
-        PANIC("No graphic framebuffers provided by Limine!");
-    }
-    struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
-    term_init(fb->address, fb->width, fb->height, fb->pitch);
-    
-    // // Load and initialize PSF2 console font from VFS/RAMFS
-    // vfs_node_t *font_file = vfs_open("/font.psf", 0);
-    // if (font_file != NULL) {
-    //     serial_puts(COM1, "[KERNEL] Found font.psf in VFS. Initializing PSF2...\n");
-    //     ramfs_file_data_t *fdata = (ramfs_file_data_t *)font_file->ptr;
-    //     if (fdata && psf2_init_default(fdata->buffer, font_file->length)) {
-    //         serial_puts(COM1, "[KERNEL] PSF2 Font loaded and applied successfully!\n");
-    //     } else {
-    //         serial_puts(COM1, "[KERNEL WARNING] Failed to parse PSF2 font data.\n");
-    //     }
-    // } else {
-    //     serial_puts(COM1, "[KERNEL WARNING] /font.psf not found in VFS, falling back to 8x8.\n");
-    // }
-
     // 9. Keyboard & Interrupts
     keyboard_init();
     asm volatile ("sti");
 
-    // 10. Shell welcome & idle loop
-    term_print("Welcome to EquantOS!\n\n");
+    // 10. Shell welcome
+    term_print("\nWelcome to EquantOS!\n\n");
     term_print("EquantOS> ");
 
     for (;;) {

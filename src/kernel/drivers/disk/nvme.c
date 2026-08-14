@@ -24,7 +24,7 @@ block_device_t nvme_get_block_device(void) {
     block_device_t dev;
     dev.read = nvme_bdev_read;
     dev.write = nvme_bdev_write;
-    dev.sector_size = 512;
+    dev.sector_size = nvme_ctrl.sector_size ? nvme_ctrl.sector_size : 512;
     return dev;
 }
 
@@ -42,6 +42,25 @@ static inline uint64_t nvme_read64(nvme_controller_t *ctrl, uint32_t offset) {
 
 static inline void nvme_write64(nvme_controller_t *ctrl, uint32_t offset, uint64_t value) {
     *((volatile uint64_t *)(ctrl->bar0 + offset)) = value;
+}
+
+static uint64_t nvme_get_bar0(uint8_t bus, uint8_t slot, uint8_t func) {
+    uint32_t bar0_low = pci_read_dword(bus, slot, func, 0x10);
+    
+    if (bar0_low & 1) { // Check if IO Space
+        serial_puts(COM1, "[NVME ERROR] BAR0 is I/O space, expected MMIO!\n");
+        return 0;
+    }
+
+    uint8_t type = (bar0_low >> 1) & 0x03;
+    uint64_t bar0_phys = bar0_low & ~0xFULL;
+
+    if (type == 0x02) { // 64-bit BAR
+        uint32_t bar0_high = pci_read_dword(bus, slot, func, 0x14);
+        bar0_phys |= ((uint64_t)bar0_high << 32);
+    }
+
+    return bar0_phys;
 }
 
 static int nvme_find_controller(uint8_t *out_bus, uint8_t *out_slot, uint8_t *out_func) {
@@ -134,9 +153,12 @@ static int nvme_wait_completion(nvme_controller_t *ctrl, nvme_queue_pair_t *qp, 
     uint32_t timeout = 10000000;
 
     while (timeout--) {
-        __asm__ volatile("" ::: "memory");
-
         volatile nvme_cq_entry_t *cqe = &qp->cq[qp->cq_head];
+
+        // FIX FOR REAL HARDWARE: Invalidate L1 CPU cache line for CQE to fetch DMA updates from RAM
+        __asm__ volatile("clflush (%0)" : : "r"((void *)cqe) : "memory");
+        __asm__ volatile("mfence" ::: "memory");
+
         uint16_t cqe_status = cqe->status;
         uint8_t phase = (uint8_t)(cqe_status & 1);
 
@@ -207,6 +229,43 @@ static int nvme_identify_controller(nvme_controller_t *ctrl) {
     return nvme_wait_completion(ctrl, &ctrl->admin_queue, (uint16_t)(cmd.cdw0 >> 16), 0);
 }
 
+static int nvme_identify_namespace(nvme_controller_t *ctrl) {
+    void *buf_virt = pmm_alloc_continuous(1);
+    if (!buf_virt) return NVME_ERR_NOMEM;
+    uint64_t buf_phys = (uint64_t)buf_virt;
+    memset((void *)VIRT(buf_phys), 0, 4096);
+
+    nvme_sq_entry_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+
+    cmd.cdw0 = NVME_ADMIN_IDENTIFY | (ctrl->command_id++ << 16);
+    cmd.nsid = 1; // Primary Namespace
+    cmd.prp1 = buf_phys;
+    cmd.cdw10 = 0x00; // Identify Namespace struct
+
+    nvme_submit_command(ctrl, &ctrl->admin_queue, &cmd, 0);
+    int status = nvme_wait_completion(ctrl, &ctrl->admin_queue, (uint16_t)(cmd.cdw0 >> 16), 0);
+
+    if (status == NVME_SUCCESS) {
+        uint8_t *ns_data = (uint8_t *)VIRT(buf_phys);
+        uint8_t flbas = ns_data[26];
+        uint8_t lba_format_idx = flbas & 0x0F;
+        
+        uint32_t lba_format = *(uint32_t *)&ns_data[128 + (lba_format_idx * 4)];
+        uint8_t lbads = (lba_format >> 16) & 0xFF;
+
+        if (lbads >= 9) {
+            ctrl->sector_size = (1U << lbads);
+        } else {
+            ctrl->sector_size = 512;
+        }
+    } else {
+        ctrl->sector_size = 512;
+    }
+
+    return status;
+}
+
 static int nvme_create_io_cq(nvme_controller_t *ctrl) {
     if (nvme_init_queue_pair(&ctrl->io_queue, NVME_IO_QUEUE_SIZE, NVME_IO_QUEUE_SIZE) != NVME_SUCCESS) {
         return NVME_ERR_NOMEM;
@@ -241,7 +300,9 @@ int nvme_read_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
     if (!nvme_ctrl.bar0) return NVME_ERR_HARDWARE;
     if (sector_count == 0) return NVME_SUCCESS;
 
-    size_t transfer_bytes = sector_count * 512;
+    uint32_t sec_size = nvme_ctrl.sector_size ? nvme_ctrl.sector_size : 512;
+    size_t transfer_bytes = (size_t)sector_count * sec_size;
+
     void *dma_virt = pmm_alloc_continuous((transfer_bytes + PAGE_SIZE - 1) / PAGE_SIZE);
     if (!dma_virt) return NVME_ERR_NOMEM;
     uint64_t dma_phys = (uint64_t)dma_virt;
@@ -275,7 +336,9 @@ int nvme_write_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
     if (!nvme_ctrl.bar0) return NVME_ERR_HARDWARE;
     if (sector_count == 0) return NVME_SUCCESS;
 
-    size_t transfer_bytes = sector_count * 512;
+    uint32_t sec_size = nvme_ctrl.sector_size ? nvme_ctrl.sector_size : 512;
+    size_t transfer_bytes = (size_t)sector_count * sec_size;
+
     void *dma_virt = pmm_alloc_continuous((transfer_bytes + PAGE_SIZE - 1) / PAGE_SIZE);
     if (!dma_virt) return NVME_ERR_NOMEM;
     uint64_t dma_phys = (uint64_t)dma_virt;
@@ -302,7 +365,6 @@ int nvme_write_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
 }
 
 int nvme_init(void) {
-    // FIX: Idempotency check to prevent memory leaks and redundant controller resets
     if (nvme_ctrl.initialized) {
         return NVME_SUCCESS;
     }
@@ -316,11 +378,11 @@ int nvme_init(void) {
     pci_cmd |= (1 << 1) | (1 << 2);
     pci_write_word(bus, slot, func, 0x04, (uint16_t)pci_cmd);
 
-    uint32_t bar0_low = pci_read_dword(bus, slot, func, 0x10);
-    uint32_t bar0_high = pci_read_dword(bus, slot, func, 0x14);
-    uint64_t bar0_phys = ((uint64_t)bar0_high << 32) | (bar0_low & ~0xF);
+    uint64_t bar0_phys = nvme_get_bar0(bus, slot, func);
+    if (!bar0_phys) {
+        return NVME_ERR_HARDWARE;
+    }
 
-    // FIX: Correct MMIO mapping size (0x4000 = 16KB / 4 pages instead of 0x16384)
     nvme_ctrl.bar0 = (volatile uint8_t *)pci_map_mmio(bar0_phys, 0x4000);
     if (!nvme_ctrl.bar0) {
         return NVME_ERR_HARDWARE;
@@ -360,6 +422,8 @@ int nvme_init(void) {
     if (nvme_identify_controller(&nvme_ctrl) != NVME_SUCCESS) {
         return NVME_ERR_HARDWARE;
     }
+
+    nvme_identify_namespace(&nvme_ctrl);
 
     if (nvme_create_io_cq(&nvme_ctrl) != NVME_SUCCESS) return NVME_ERR_HARDWARE;
     if (nvme_create_io_sq(&nvme_ctrl) != NVME_SUCCESS) return NVME_ERR_HARDWARE;

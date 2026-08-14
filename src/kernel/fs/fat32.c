@@ -48,7 +48,7 @@ static uint32_t fat32_cluster_to_lba(uint32_t cluster) {
 
 static uint32_t fat32_get_next_cluster(uint32_t cluster) {
     if (cluster < 2 || cluster >= current_vol.total_clusters + 2) {
-        return 0x0FFFFFF8; // Boundary safety check
+        return 0x0FFFFFF8;
     }
 
     uint32_t fat_offset = cluster * 4;
@@ -63,7 +63,7 @@ static uint32_t fat32_get_next_cluster(uint32_t cluster) {
 
 static void fat32_set_next_cluster(uint32_t cluster, uint32_t next_cluster) {
     if (cluster < 2 || cluster >= current_vol.total_clusters + 2) {
-        return; // Boundary safety check
+        return;
     }
 
     uint32_t fat_offset = cluster * 4;
@@ -494,30 +494,36 @@ vfs_node_t *fat32_mount_partition(block_device_t dev, uint32_t partition_lba, ui
 
     fat32_bpb_t *bpb = (fat32_bpb_t *)sector_buf;
 
-    // FIX: Strict BPB Validation logic to prevent division-by-zero (#DE) or corrupt mounts
+    // Strict BPB Structural Safeguards
     if (bpb->bytes_per_sector != 512 && bpb->bytes_per_sector != 1024 &&
         bpb->bytes_per_sector != 2048 && bpb->bytes_per_sector != 4096) {
-        serial_puts(COM1, "[FAT32 ERROR] Invalid bytes_per_sector in BPB!\n");
         return NULL;
     }
 
     if (bpb->sectors_per_cluster == 0 || (bpb->sectors_per_cluster & (bpb->sectors_per_cluster - 1)) != 0) {
-        serial_puts(COM1, "[FAT32 ERROR] Invalid sectors_per_cluster in BPB!\n");
         return NULL;
     }
 
-    if (bpb->reserved_sectors == 0 || bpb->num_fats == 0 || bpb->table_size_32 == 0) {
-        serial_puts(COM1, "[FAT32 ERROR] Invalid FAT32 structural counts in BPB!\n");
+    if (bpb->reserved_sectors == 0 || bpb->num_fats == 0) {
         return NULL;
     }
 
-    if (bpb->boot_signature != 0x28 && bpb->boot_signature != 0x29) {
-        serial_puts(COM1, "[FAT32 ERROR] Invalid Extended BPB boot signature!\n");
-        return NULL;
+    // Determine total sector count
+    uint32_t total_sectors = bpb->total_sectors_16 != 0 ? bpb->total_sectors_16 : bpb->total_sectors_32;
+    if (total_sectors == 0) {
+        total_sectors = partition_sectors;
     }
 
-    if (memcmp(bpb->file_system_type, "FAT32   ", 8) != 0) {
-        serial_puts(COM1, "[FAT32 ERROR] File system type string is not FAT32!\n");
+    uint32_t fat_size = bpb->fat_size_16 != 0 ? bpb->fat_size_16 : bpb->table_size_32;
+    if (fat_size == 0) return NULL;
+
+    uint32_t root_dir_sectors = ((bpb->root_entry_count * 32) + (bpb->bytes_per_sector - 1)) / bpb->bytes_per_sector;
+    uint32_t data_sectors = total_sectors - (bpb->reserved_sectors + (bpb->num_fats * fat_size) + root_dir_sectors);
+    uint32_t total_clusters = data_sectors / bpb->sectors_per_cluster;
+
+    // Microsoft Specification: Volume is FAT32 IF AND ONLY IF total_clusters >= 65525
+    if (total_clusters < 65525) {
+        serial_puts(COM1, "[FAT32 INFO] Partition is not FAT32 (Cluster count < 65525).\n");
         return NULL;
     }
 
@@ -528,14 +534,12 @@ vfs_node_t *fat32_mount_partition(block_device_t dev, uint32_t partition_lba, ui
     current_vol.sectors_per_cluster = bpb->sectors_per_cluster;
     current_vol.reserved_sectors = bpb->reserved_sectors;
     current_vol.num_fats = bpb->num_fats;
-    current_vol.fat_size_sectors = bpb->table_size_32;
+    current_vol.fat_size_sectors = fat_size;
     current_vol.root_cluster = bpb->root_cluster;
 
     current_vol.first_fat_sector = current_vol.reserved_sectors;
     current_vol.first_data_sector = current_vol.reserved_sectors + (current_vol.num_fats * current_vol.fat_size_sectors);
-
-    uint32_t total_data_sectors = partition_sectors - current_vol.first_data_sector;
-    current_vol.total_clusters = total_data_sectors / current_vol.sectors_per_cluster;
+    current_vol.total_clusters = total_clusters;
 
     vfs_node_t *root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strcpy(root->name, "/");
@@ -561,10 +565,11 @@ void fat32_init(void) {
     serial_puts(COM1, "[FAT32] Scanning GPT partitions on NVMe...\n");
     gpt_init_device(nvme_dev);
 
+    // FIX: Iterate through ALL GPT partitions and mount the one with valid FAT32 BPB
     int p_count = gpt_get_partition_count();
     for (int i = 0; i < p_count; i++) {
         partition_info_t *part = gpt_get_partition(i);
-        if (part && (part->type == 0x0B || part->type == 0x0C)) {
+        if (part) {
             vfs_node_t *fat_root = fat32_mount_partition(nvme_dev, part->start_lba, part->sector_count);
             if (fat_root) {
                 vfs_node_t *disk_dir = ramfs_create_directory(vfs_root, "disk");
