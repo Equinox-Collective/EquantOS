@@ -10,15 +10,14 @@
 ~~Terminal Improvements~~
 ~~EXT2~~
 ~~NVME, GPT~~
-+ Run on your real OS <
-Musl/mlibc, Busybox, LABI (POSIX syscalls)
+~~+ Run on your real OS~~
+Musl/mlibc, Busybox, LABI (POSIX syscalls) <
 Bash
-USB <
+USB
 Installer
 
 Long Term:
 GPU (Through LinuxKPI)
 Own Package Manager
-GUI
 Sound
-Eon (GRAPHICAL DSL LANGUAGE)
+GUI (Qt, WebView (NEVER), GTK, X11/Wayland, Your own) | OR | Eon (GRAPHICAL DSL LANGUAGE)
