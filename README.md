@@ -22,8 +22,9 @@ systems.
 ## Project status
 
 The kernel currently identifies itself as **EquantOS 0.0.1 Alpha**. The main
-development target is QEMU on x86_64, using the bundled `disk.vhd` as the test
-drive.
+development target is QEMU on x86_64. The default VM uses the bundled
+`disk.vhd` as its primary ATA drive and a generated raw ext2 image as its
+secondary ATA drive.
 
 ### Implemented features
 
@@ -35,23 +36,31 @@ drive.
   heap, and per-process address spaces
 - **Processes:** ELF64 loader, Ring 3 tasks, a preemptive round-robin scheduler,
   FPU/SSE context switching, and an `int 0x80` syscall interface
-- **Filesystems:** VFS, writable in-memory RAMFS, and experimental read-only
-  FAT32 with directory traversal and case-insensitive 8.3 filenames
-- **Storage and devices:** ATA PIO, MBR partition discovery, PCI enumeration,
-  PS/2 keyboard input, framebuffer output, and COM1 serial logging
+- **Filesystems:** VFS, writable in-memory RAMFS, and experimental FAT32 and
+  ext2 drivers with file reading, creation, and writing
+- **Storage and devices:** ATA PIO reads and writes on the primary
+  master/slave drives, MBR partition discovery, PCI enumeration, PS/2 keyboard
+  input, framebuffer output, and COM1 serial logging
 - **Diagnostics:** panic reporting, memory and heap tests, disk inspection,
   system metrics, and an interactive shell
 
-The bundled `equantmemtest.elf` is packaged as a Limine boot module. At boot,
-the kernel copies it into RAMFS, loads it as a Ring 3 process, and uses it to
-exercise user-memory allocation, syscalls, and scheduler behavior.
+The build also produces an `equantmemtest.elf` Ring 3 test binary and places it
+in the ISO staging tree. The current `limine.conf` imports only `font.psf` as a
+boot module, so the test program is not copied to RAMFS or started
+automatically.
 
 ### Current limitations
 
-- ATA access targets the primary master drive and uses programmed I/O.
-- FAT32 is read-only, supports short 8.3 names rather than long filenames, and
-  is mounted only when the first detected MBR partition has type `0x0B` or
-  `0x0C`.
+- ATA access uses 28-bit programmed I/O on the primary channel. The current
+  setup uses its master and slave devices; there is no AHCI or NVMe support.
+- FAT32 is mounted at `/disk` only when the first MBR partition on the primary
+  master has type `0x0B` or `0x0C`. It supports short, case-insensitive 8.3
+  names only; names created by the kernel are uppercased and truncated to that
+  format.
+- The raw ext2 filesystem on the primary slave is mounted at `/ext2`. Its
+  write path currently handles regular files through the 12 direct inode
+  blocks only; indirect-block writes, deletion, renaming, and clean unmounting
+  are not implemented.
 - The ELF loader and syscall ABI are minimal; there is no general-purpose
   userspace, libc, POSIX layer, networking, USB stack, or installer yet.
 - The shell and drivers are intended for development and diagnostics, not
@@ -69,10 +78,13 @@ Make sure these tools are available in `PATH`:
 | `xorriso` | Hybrid bootable ISO generation |
 | Git | Downloading Limine binaries when they are missing |
 | `qemu-system-x86_64` | Running EquantOS with `make run` |
+| `mkfs.ext2` or `winmakeext2` | Creating the ext2 test disk for `make run` |
 
 A dedicated `x86_64-elf` cross-toolchain is required; the host compiler is not
-a drop-in replacement. Linux, WSL, MSYS2, and native Windows can be used as
-long as the required tools are installed and discoverable.
+a drop-in replacement. On POSIX environments the Makefile uses `dd` and
+`mkfs.ext2`; on native Windows it expects `winmakeext2`. Linux, WSL, MSYS2, and
+native Windows can be used as long as the matching tools are installed and
+discoverable.
 
 ## Build and run
 
@@ -98,11 +110,14 @@ make run
 The `run` target is equivalent to:
 
 ```sh
-qemu-system-x86_64 -cdrom build/equantos.iso -hda disk.vhd -serial stdio
+qemu-system-x86_64 -cdrom build/equantos.iso -hda disk.vhd -hdb disk.img -serial stdio
 ```
 
-This attaches the repository's `disk.vhd` as the primary ATA drive and sends
-COM1 output to the current terminal.
+`make run` creates a 32 MiB raw `disk.img` when it does not exist, formats it
+as ext2, and then starts QEMU. The repository's `disk.vhd` is attached as the
+primary master and exposed through FAT32 at `/disk`; `disk.img` is attached as
+the primary slave and mounted at `/ext2`. COM1 output is sent to the current
+terminal.
 
 Available maintenance targets:
 
@@ -128,7 +143,8 @@ After boot, enter `help` at the `EquantOS>` prompt to print the command list.
 | `cd [path]` | Change directory; without a path, return to `/` |
 | `cat <file>` | Print a file, resolving relative paths from the current directory |
 | `hexdump <file>` | Print file contents in hexadecimal |
-| `writefile <name> <text>` | Create a text file in the RAMFS root |
+| `writefile <path> [text]` | Create or write a file through VFS |
+| `cp <source> <destination>` | Copy a regular file between mounted filesystems |
 | `run <elf>` | Load an ELF64 executable from VFS as a new process |
 | `mem` | Show physical-memory and kernel-heap usage |
 | `memstress` | Run the kernel-heap allocation stress test |
@@ -140,14 +156,21 @@ After boot, enter `help` at the `EquantOS>` prompt to print the command list.
 | `shutdown` | Power off the machine |
 | `panic_test` | Deliberately trigger an invalid-opcode kernel panic |
 
-If the supported FAT32 partition is present, it is mounted read-only at
-`/disk`. For example:
+The default QEMU setup exposes writable FAT32 and ext2 mounts, so files can be
+inspected and copied between them:
 
 ```text
 cd /disk
 ls
 cat README.TXT
+writefile NOTES.TXT hello from EquantOS
+cp NOTES.TXT /ext2/notes.txt
+cd /ext2
+cat notes.txt
 ```
+
+These write paths are experimental. Keep a backup of any disk image that
+contains data you care about.
 
 > [!CAUTION]
 > `panic_test` intentionally crashes the kernel and exists only for testing the
@@ -183,10 +206,10 @@ At a high level, the kernel:
 3. Starts tasking, the scheduler, and the syscall dispatcher.
 4. Mounts RAMFS at `/` and imports Limine boot modules into it.
 5. Probes PCI and ATA, scans MBR partitions, and attempts to mount FAT32 at
-   `/disk`.
-6. Initializes the framebuffer terminal.
-7. Loads `equantmemtest.elf`, enables PS/2 keyboard interrupts, and enters the
-   interactive shell.
+   `/disk` from the primary master.
+6. Attempts to mount the raw ext2 image from the primary slave at `/ext2`.
+7. Initializes the framebuffer terminal and loads `/font.psf` from RAMFS.
+8. Enables PS/2 keyboard interrupts and enters the interactive shell.
 
 ## Project layout
 
@@ -199,14 +222,15 @@ At a high level, the kernel:
 |   |-- kernel/
 |   |   |-- core/              # CPU setup, interrupts, panic, PMM/VMM/heap
 |   |   |-- drivers/           # ATA, keyboard, PCI, serial, and display assets
-|   |   |-- fs/                # VFS, RAMFS, MBR, and FAT32
+|   |   |-- fs/                # VFS, RAMFS, MBR, FAT32, and ext2
 |   |   |-- misc/              # PIT timer and power control
 |   |   `-- proc/              # Tasks, scheduler, ELF loader, and syscalls
 |   |-- libs/                  # Freestanding string and stdio routines
 |   `-- userland/              # Bundled Ring 3 test program
 |-- DOCS/TODO.md               # Development roadmap
 |-- limine.conf                # Limine boot configuration
-|-- disk.vhd                   # Development disk image used by make run
+|-- disk.vhd                   # FAT32 development disk used by make run
+|-- disk.img                   # Generated ext2 test disk (ignored by Git)
 `-- Makefile                   # Build, run, and cleanup targets
 ```
 
@@ -215,7 +239,7 @@ At a high level, the kernel:
 The main planned areas are:
 
 - GPT and NVMe support
-- ext2/ext3/ext4 filesystems
+- a more complete and robust ext2 implementation, followed by ext3/ext4
 - a broader Ring 3 userspace and SDK
 - a POSIX-compatible libc/syscall layer, BusyBox, and a full shell
 - USB support and an installer
