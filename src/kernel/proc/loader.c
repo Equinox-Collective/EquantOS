@@ -91,7 +91,34 @@ bool elf_load(void *elf_data, uint64_t size) {
                 (uint64_t)stack_phys + (j * PAGE_SIZE), 
                 PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
-    printf("DEBUG [6/7]: User stack mapped at %x\n", user_stack_top);
+
+    // Инициализируем стек пользователя по спецификации System V AMD64 ABI для Musl CRT (_start)
+    uint8_t *k_stack_top = (uint8_t *)VIRT((uint64_t)stack_phys + (stack_pages * PAGE_SIZE));
+    
+    // Помещаем имя бинарника в самую верхушку стека
+    const char *prog_name = "/hello.elf";
+    size_t prog_len = strlen(prog_name) + 1;
+    
+    uint8_t *k_str_ptr = k_stack_top - prog_len;
+    memcpy(k_str_ptr, prog_name, prog_len);
+    uint64_t user_str_vaddr = user_stack_top - prog_len;
+
+    // Выравниваем указатель стека по 16 байт
+    uint64_t *k_sp = (uint64_t *)((uintptr_t)k_str_ptr & ~0xFULL);
+
+    // Формируем структуру аргументов на стеке:
+    // [AT_NULL] -> [envp = NULL] -> [argv[1] = NULL] -> [argv[0] = "/hello.elf"] -> [argc = 1]
+    *--k_sp = 0; // AUXV AT_NULL (2 qwords)
+    *--k_sp = 0;
+    *--k_sp = 0; // envp[0] = NULL
+    *--k_sp = 0; // argv[1] = NULL
+    *--k_sp = user_str_vaddr; // argv[0]
+    *--k_sp = 1; // argc = 1
+
+    // Вычисляем виртуальный адрес RSP для процесса
+    uint64_t initial_user_rsp = user_stack_top - (uint64_t)(k_stack_top - (uint8_t *)k_sp);
+
+    printf("DEBUG [6/7]: System V ABI stack initialized. User RSP: %x\n", initial_user_rsp);
 
     // 4. Create process and task structures
     process_t *proc = (process_t *)kmalloc(sizeof(process_t));
@@ -122,7 +149,7 @@ bool elf_load(void *elf_data, uint64_t size) {
     uint64_t *stack = (uint64_t *)task->kstack_at_bottom;
 
     *--stack = 0x1B;                  // SS (User Data + RPL 3)
-    *--stack = user_stack_top;        // RSP
+    *--stack = initial_user_rsp;      // <-- Передаем выровненный RSP с argc и argv!
     *--stack = 0x202;                 // RFLAGS
     *--stack = 0x23;                  // CS (User Code + RPL 3)
     *--stack = ehdr->e_entry;         // RIP

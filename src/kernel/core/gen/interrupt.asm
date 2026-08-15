@@ -233,9 +233,9 @@ linux_syscall_interrupt_asm:
 syscall_entry_asm:
     mov [rel user_rsp_temp], rsp
 
-    ; Переключаемся на стек ядра
+    ; Загружаем стек ядра из current_task (смещение +8)
     mov rsp, [rel current_task]
-    mov rsp, [rsp + 24] ; kstack_at_bottom
+    mov rsp, [rsp + 8] ; kstack_at_bottom лежит по смещению 8
 
     push rax
     push rbx
@@ -254,7 +254,7 @@ syscall_entry_asm:
     push r15
 
     mov rdi, rsp
-    sub rsp, 8
+    sub rsp, 8          ; Выравнивание RSP для System V ABI
     call syscall_handler
     add rsp, 8
 
@@ -276,7 +276,7 @@ syscall_entry_asm:
 
     mov rsp, [rel user_rsp_temp]
 
-    db 0x48             ; REX.W prefix for 64-bit sysretq
+    db 0x48             ; REX.W префикс для 64-битного sysretq
     sysret
 
 section .bss

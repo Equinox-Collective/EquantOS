@@ -1,4 +1,4 @@
-// task.h - Updated with VFS File Descriptors Table & Aligned FPU Area
+// src/kernel/proc/task.h
 #ifndef TASK_H
 #define TASK_H
 
@@ -7,7 +7,7 @@
 
 #define MAX_OPEN_FILES 16
 
-struct vfs_node; // Forward declaration
+struct vfs_node;
 
 typedef enum {
     TASK_STATE_RUNNABLE,
@@ -20,23 +20,23 @@ typedef struct process {
     uint64_t pid;
     uint64_t cr3;
     uint64_t brk;
-    struct vfs_node *files[MAX_OPEN_FILES]; // Process File Descriptor Table
+    struct vfs_node *files[MAX_OPEN_FILES];
 } process_t;
 
 typedef struct task {
-    uint64_t rsp;
-    uint64_t id;
+    uint64_t rsp;               // offset 0
+    uint64_t kstack_at_bottom;  // offset 8 (гарантированное смещение для ASM)
+    uint64_t id;                // offset 16
     task_state_t state;
     bool running;
     
-    uint64_t kstack_at_bottom;
     uint64_t sleep_until;
     uint64_t fs_base;
     
     process_t *process;
 
-    // FIX: Strictly align FPU state buffer to 16 bytes for fxsave64/fxrstor64 safety
-    uint8_t fpu_state[512] __attribute__((aligned(16)));
+    // 528 байт для динамического выравнивания по 16 байт
+    uint8_t fpu_state[528];
 
     struct task *sched_next;
     struct task *sched_prev;
@@ -44,7 +44,8 @@ typedef struct task {
     struct task *prev;
 } task_t;
 
-#define task_fpu_area(t) ((void*)((t)->fpu_state))
+// Динамическое выравнивание FPU адреса по 16 байт
+#define task_fpu_area(t) ((void*)(((uintptr_t)((t)->fpu_state) + 15) & ~15ULL))
 
 extern task_t *current_task;
 
