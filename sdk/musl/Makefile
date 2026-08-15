@@ -164,8 +164,7 @@ lib/libc.so: $(LOBJS) $(LDSO_OBJS)
 	-Wl,-e,_dlstart -o $@ $(LOBJS) $(LDSO_OBJS) $(LIBCC)
 
 lib/libc.a: $(AOBJS)
-	rm -f $@
-	$(AR) rc $@ $(AOBJS)
+	python pack_libc.py
 	$(RANLIB) $@
 
 $(EMPTY_LIBS):
