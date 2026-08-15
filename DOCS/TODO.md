@@ -11,8 +11,8 @@
 ~~EXT2~~
 ~~NVME, GPT~~
 ~~+ Run on your real OS~~
-Musl/mlibc, Busybox, LABI (POSIX syscalls) <
-Bash
+~~Musl/mlibc, LABI (POSIX syscalls)~~
+Busybox / Bash <
 USB
 Installer
 
