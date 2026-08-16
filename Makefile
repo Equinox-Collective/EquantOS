@@ -101,6 +101,18 @@ build/iso/hello.elf: userspace/hello.c
 		sdk/sysroot/lib/crtn.o \
 		-Ttext-segment 0x400000 -o build/iso/hello.elf
 
+build/iso/musltest.elf: userspace/musltest.c
+	@$(call MKDIR,build/obj/userspace)
+	@$(call MKDIR,build/iso)
+	$(CC) -static -nostdinc -isystem sdk/sysroot/include -fno-pie -fno-pic -c userspace/musltest.c -o build/obj/userspace/musltest.o
+	$(LD) -static -nostdlib -z max-page-size=0x1000 -z noexecstack \
+		sdk/sysroot/lib/crt1.o \
+		sdk/sysroot/lib/crti.o \
+		build/obj/userspace/musltest.o \
+		sdk/sysroot/lib/libc.a \
+		sdk/sysroot/lib/crtn.o \
+		-Ttext-segment 0x400000 -o build/iso/musltest.elf
+
 build/iso/font.psf: res/font.psf
 	@$(call MKDIR,build/iso)
 	@$(call CP,res/font.psf,build/iso/font.psf)
@@ -121,7 +133,7 @@ limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
 	@echo [BUILD] Limine binaries ready.
 
 # Build Hybrid ISO image
-build/equantos.iso: build/kernel.elf build/iso/hello.elf build/iso/font.psf limine.conf limine-bios-cd.bin limine-uefi-cd.bin
+build/equantos.iso: build/kernel.elf build/iso/hello.elf build/iso/musltest.elf build/iso/font.psf limine.conf limine-bios-cd.bin limine-uefi-cd.bin
 	@echo [BUILD] Preparing ISO root structure...
 	@$(call MKDIR,build/iso/boot)
 	@$(call MKDIR,build/iso/EFI/BOOT)

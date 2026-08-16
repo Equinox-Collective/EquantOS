@@ -20,12 +20,13 @@ typedef struct process {
     uint64_t pid;
     uint64_t cr3;
     uint64_t brk;
-    struct vfs_node *files[MAX_OPEN_FILES];
+    char cwd[256];                         // Текущая рабочая директория процесса
+    struct vfs_node *files[MAX_OPEN_FILES]; // Таблица открытых файлов
 } process_t;
 
 typedef struct task {
     uint64_t rsp;               // offset 0
-    uint64_t kstack_at_bottom;  // offset 8 (гарантированное смещение для ASM)
+    uint64_t kstack_at_bottom;  // offset 8
     uint64_t id;                // offset 16
     task_state_t state;
     bool running;
@@ -35,7 +36,6 @@ typedef struct task {
     
     process_t *process;
 
-    // 528 байт для динамического выравнивания по 16 байт
     uint8_t fpu_state[528];
 
     struct task *sched_next;
@@ -44,7 +44,6 @@ typedef struct task {
     struct task *prev;
 } task_t;
 
-// Динамическое выравнивание FPU адреса по 16 байт
 #define task_fpu_area(t) ((void*)(((uintptr_t)((t)->fpu_state) + 15) & ~15ULL))
 
 extern task_t *current_task;
