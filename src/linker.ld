@@ -20,7 +20,17 @@ SECTIONS
 
     .rodata : ALIGN(0x1000) {
         *(.rodata .rodata.*)
-        *(.requests)  /* Crucial: preserve Limine requests in the binary */
+        *(.requests)
+        
+        /* Initcall Table boundary definitions */
+        __initcall_start = .;
+        *(.initcall1.init)
+        *(.initcall2.init)
+        *(.initcall3.init)
+        *(.initcall4.init)
+        *(.initcall5.init)
+        *(.initcall6.init)
+        __initcall_end = .;
     } :rodata
 
     .data : ALIGN(0x1000) {
