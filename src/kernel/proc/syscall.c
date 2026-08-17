@@ -8,43 +8,25 @@
 #include "../core/gen/cpu.h"
 #include "../drivers/serial/serial.h"
 #include "../../equterm/term.h"
+#include "../misc/timer.h"
 #include "string.h"
 #include "../fs/vfs.h"
 
-// MSR адреса x86_64
 #define IA32_EFER        0xC0000080
 #define IA32_STAR        0xC0000081
 #define IA32_LSTAR       0xC0000082
 #define IA32_FMASK       0xC0000084
 #define IA32_FS_BASE_MSR 0xC0000100
 
-// Номера Linux-сисколлов
-#define SYS_READ            0
-#define SYS_WRITE           1
-#define SYS_OPEN            2
-#define SYS_CLOSE           3
-#define SYS_FSTAT           5
-#define SYS_MMAP            9
-#define SYS_MUNMAP          11
-#define SYS_BRK             12
-#define SYS_RT_SIGPROCMASK  14
-#define SYS_IOCTL           16
-#define SYS_WRITEV          20
-#define SYS_GETPID          39
-#define SYS_EXIT            60
-#define SYS_GETCWD          79
-#define SYS_CHDIR           80
-#define SYS_SYSINFO         99
-#define SYS_ARCH_PRCTL      158
-#define SYS_GETDENTS64      217
-#define SYS_SET_TID_ADDRESS 218
-#define SYS_EXIT_GROUP      231
-#define SYS_OPENAT          257
-
-#define AT_FDCWD            -100
+#define AT_FDCWD         -100
 
 #define ARCH_SET_FS      0x1002
 #define ARCH_GET_FS      0x1003
+
+#define CLOCK_REALTIME           0
+#define CLOCK_MONOTONIC          1
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#define CLOCK_THREAD_CPUTIME_ID  3
 
 struct iovec {
     void *iov_base;
@@ -57,6 +39,20 @@ struct linux_dirent64 {
     unsigned short d_reclen;
     unsigned char  d_type;
     char           d_name[];
+};
+
+struct linux_utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+    char domainname[65];
+};
+
+struct linux_timespec {
+    int64_t tv_sec;
+    int64_t tv_nsec;
 };
 
 void linux_syscall_handler(void *regs_ptr) {
@@ -72,7 +68,6 @@ typedef struct {
 
 static uint64_t mmap_virtual_base = 0x700000000000ULL;
 
-// Помощник: Резолв абсолютного пути
 static void resolve_user_path(const char *input, char *output, size_t max_len) {
     if (!input || input[0] == '\0') {
         if (current_task && current_task->process && current_task->process->cwd[0] != '\0') {
@@ -98,44 +93,43 @@ static void resolve_user_path(const char *input, char *output, size_t max_len) {
     }
 }
 
-// Помощник выделения свободного FD
 static int alloc_fd(vfs_node_t *node) {
-    if (!current_task || !current_task->process) return -1;
+    if (!current_task || !current_task->process) return -EMFILE;
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
         if (current_task->process->files[i] == NULL) {
             current_task->process->files[i] = node;
             return i;
         }
     }
-    return -1; // Превышен лимит открытых файлов
+    return -EMFILE;
 }
 
 static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, int mode) {
     (void)dirfd; (void)flags; (void)mode;
-    if (!pathname) return -1;
+    if (!pathname) return -EINVAL;
 
     char resolved[256];
     resolve_user_path(pathname, resolved, sizeof(resolved));
 
     vfs_node_t *node = vfs_open(resolved, 0);
-    if (!node) return -1;
+    if (!node) return -ENOENT;
 
     return alloc_fd(node);
 }
 
 static int64_t sys_read_handler(int fd, void *buf, size_t count) {
-    if (!current_task || !current_task->process) return -1;
-    if (fd < 0 || fd >= MAX_OPEN_FILES) return -1;
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
-    if (!node) return -1;
+    if (!node) return -EBADF;
 
     return vfs_read(node, 0, count, (uint8_t *)buf);
 }
 
 static int64_t sys_close_handler(int fd) {
-    if (!current_task || !current_task->process) return -1;
-    if (fd < 3 || fd >= MAX_OPEN_FILES) return -1;
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 3 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     if (current_task->process->files[fd]) {
         vfs_close(current_task->process->files[fd]);
@@ -145,24 +139,24 @@ static int64_t sys_close_handler(int fd) {
 }
 
 static int64_t sys_getcwd_handler(char *buf, size_t size) {
-    if (!buf || size == 0) return -1;
+    if (!buf || size == 0) return -EINVAL;
     const char *cwd = (current_task && current_task->process && current_task->process->cwd[0] != '\0')
                       ? current_task->process->cwd : "/";
     size_t len = strlen(cwd) + 1;
-    if (size < len) return -1;
+    if (size < len) return -ERANGE;
 
     memcpy(buf, cwd, len);
     return (int64_t)buf;
 }
 
 static int64_t sys_chdir_handler(const char *path) {
-    if (!path) return -1;
+    if (!path) return -EINVAL;
 
     char resolved[256];
     resolve_user_path(path, resolved, sizeof(resolved));
 
     vfs_node_t *node = vfs_open(resolved, 0);
-    if (!node || !(node->flags & FS_DIRECTORY)) return -1;
+    if (!node || !(node->flags & FS_DIRECTORY)) return -ENOENT;
 
     if (current_task && current_task->process) {
         strncpy(current_task->process->cwd, resolved, sizeof(current_task->process->cwd) - 1);
@@ -171,11 +165,11 @@ static int64_t sys_chdir_handler(const char *path) {
 }
 
 static int64_t sys_getdents64_handler(int fd, void *dirp, size_t count) {
-    if (!current_task || !current_task->process) return -1;
-    if (fd < 0 || fd >= MAX_OPEN_FILES) return -1;
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     vfs_node_t *dir = current_task->process->files[fd];
-    if (!dir || !(dir->flags & FS_DIRECTORY)) return -1;
+    if (!dir || !(dir->flags & FS_DIRECTORY)) return -ENOTDIR;
 
     uint8_t *out_buf = (uint8_t *)dirp;
     size_t written = 0;
@@ -184,7 +178,7 @@ static int64_t sys_getdents64_handler(int fd, void *dirp, size_t count) {
     vfs_node_t *child = NULL;
     while ((child = vfs_readdir(dir, idx++)) != NULL) {
         size_t name_len = strlen(child->name);
-        size_t rec_len = (sizeof(struct linux_dirent64) + name_len + 1 + 7) & ~7; // Выравнивание по 8 байт
+        size_t rec_len = (sizeof(struct linux_dirent64) + name_len + 1 + 7) & ~7;
 
         if (written + rec_len > count) break;
 
@@ -192,11 +186,11 @@ static int64_t sys_getdents64_handler(int fd, void *dirp, size_t count) {
         d->d_ino = child->inode ? child->inode : idx;
         d->d_off = idx * 32;
         d->d_reclen = (unsigned short)rec_len;
-        d->d_type = (child->flags & FS_DIRECTORY) ? 4 : 8; // DT_DIR = 4, DT_REG = 8
+        d->d_type = (child->flags & FS_DIRECTORY) ? 4 : 8;
         strcpy(d->d_name, child->name);
 
         written += rec_len;
-        kfree(child); // vfs_readdir выделяет клон ноды, освобождаем его
+        kfree(child);
     }
 
     return (int64_t)written;
@@ -219,40 +213,50 @@ static int64_t sys_exit_handler(int code) {
 }
 
 static int64_t sys_arch_prctl_handler(int code, uint64_t addr) {
-    if (!current_task) return -1;
+    if (!current_task) return -EINVAL;
 
     if (code == ARCH_SET_FS) {
         current_task->fs_base = addr;
         write_msr(IA32_FS_BASE_MSR, addr);
         return 0;
     } else if (code == ARCH_GET_FS) {
-        if (!addr) return -1;
+        if (!addr) return -EINVAL;
         *(uint64_t *)addr = current_task->fs_base;
         return 0;
     }
-    return -1;
+    return -EINVAL;
 }
 
+// FIX: Linux sys_brk MUST return the current brk pointer on failure!
 static int64_t sys_brk_handler(uint64_t new_brk) {
-    if (!current_task || !current_task->process) return -1;
+    if (!current_task || !current_task->process) return 0;
     
-    if (new_brk == 0) {
-        return current_task->process->brk;
+    uint64_t old_brk = current_task->process->brk;
+    if (new_brk == 0 || new_brk == old_brk) {
+        return old_brk;
     }
 
-    uint64_t old_brk = current_task->process->brk;
-    if (new_brk <= old_brk) {
+    if (new_brk < old_brk) {
         current_task->process->brk = new_brk;
         return new_brk;
     }
 
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
-    uint64_t start_page = (old_brk + 0xFFF) & ~0xFFFULL;
-    uint64_t end_page = (new_brk + 0xFFF) & ~0xFFFULL;
+    
+    // Выравнивание границ страниц
+    uint64_t start_page = old_brk & ~(PAGE_SIZE - 1);
+    uint64_t end_page = (new_brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
     for (uint64_t addr = start_page; addr < end_page; addr += PAGE_SIZE) {
+        // Проверяем, не замаплена ли страница уже
+        if (vmm_get_phys(pml4, addr) != 0) {
+            continue;
+        }
+
         void *phys = pmm_alloc();
-        if (!phys) return -1;
+        if (!phys && phys != (void*)0) {
+            return old_brk; // Возвращаем старый brk при ошибке PMM
+        }
         memset((void *)VIRT((uint64_t)phys), 0, PAGE_SIZE);
         vmm_map(pml4, addr, (uint64_t)phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
@@ -262,7 +266,7 @@ static int64_t sys_brk_handler(uint64_t new_brk) {
 }
 
 static int64_t sys_write_handler(int fd, const void *user_buf, size_t count) {
-    if (fd == 1 || fd == 2) { // stdout / stderr
+    if (fd == 1 || fd == 2) {
         const char *buf = (const char *)user_buf;
         for (size_t i = 0; i < count; i++) {
             char c = buf[i];
@@ -272,17 +276,17 @@ static int64_t sys_write_handler(int fd, const void *user_buf, size_t count) {
         return count;
     }
 
-    if (!current_task || !current_task->process) return -1;
-    if (fd < 3 || fd >= MAX_OPEN_FILES) return -1;
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 3 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
-    if (!node) return -1;
+    if (!node) return -EBADF;
 
     return vfs_write(node, 0, count, (uint8_t *)user_buf);
 }
 
 static int64_t sys_writev_handler(int fd, const struct iovec *iov, int iovcnt) {
-    if (!iov || iovcnt <= 0) return -1;
+    if (!iov || iovcnt <= 0) return -EINVAL;
     int64_t total = 0;
     for (int i = 0; i < iovcnt; i++) {
         if (iov[i].iov_base && iov[i].iov_len > 0) {
@@ -296,7 +300,7 @@ static int64_t sys_writev_handler(int fd, const struct iovec *iov, int iovcnt) {
 
 static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {
     (void)prot; (void)flags; (void)fd; (void)offset;
-    if (length == 0) return -1;
+    if (length == 0) return -EINVAL;
 
     size_t page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
     size_t aligned_len = page_count * PAGE_SIZE;
@@ -307,13 +311,13 @@ static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flag
         mmap_virtual_base += aligned_len;
     }
 
-    if (!current_task || !current_task->process) return -1;
+    if (!current_task || !current_task->process) return -EINVAL;
 
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
 
     for (size_t i = 0; i < page_count; i++) {
         void *phys = pmm_alloc();
-        if (!phys) return -1;
+        if (!phys) return -ENOMEM;
         memset((void *)VIRT((uint64_t)phys), 0, PAGE_SIZE);
         vmm_map(pml4, virt_addr + (i * PAGE_SIZE), (uint64_t)phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
@@ -326,15 +330,70 @@ static int64_t sys_munmap_handler(uint64_t addr, size_t length) {
     return 0;
 }
 
-static int64_t sys_rt_sigprocmask_handler(int how, const void *set, void *oldset, size_t sigsetsize) {
-    (void)how; (void)set; (void)oldset; (void)sigsetsize;
+static int64_t sys_mprotect_handler(uint64_t addr, size_t len, int prot) {
+    (void)addr; (void)len; (void)prot;
+    // Stub: Always accept memory protection changes
+    return 0;
+}
+
+static int64_t sys_uname_handler(struct linux_utsname *buf) {
+    if (!buf) return -EINVAL;
+
+    memset(buf, 0, sizeof(struct linux_utsname));
+    strcpy(buf->sysname, "EquantOS");
+    strcpy(buf->nodename, "equant");
+    strcpy(buf->release, "0.0.1-alpha");
+    strcpy(buf->version, "EquantOS Kernel v0.0.1 (x86_64)");
+    strcpy(buf->machine, "x86_64");
+    strcpy(buf->domainname, "localdomain");
+
+    return 0;
+}
+
+static int64_t sys_clock_gettime_handler(int clock_id, struct linux_timespec *tp) {
+    (void)clock_id;
+    if (!tp) return -EINVAL;
+
+    // Convert PIT ticks (100 Hz = 10ms per tick) to seconds and nanoseconds
+    uint64_t current_ticks = tick;
+    tp->tv_sec = current_ticks / 100;
+    tp->tv_nsec = (current_ticks % 100) * 10000000ULL;
+
+    return 0;
+}
+
+static int64_t sys_nanosleep_handler(const struct linux_timespec *req, struct linux_timespec *rem) {
+    (void)rem;
+    if (!req) return -EINVAL;
+
+    uint64_t target_tick = tick + (req->tv_sec * 100 + req->tv_nsec / 10000000ULL);
+    
+    if (target_tick > tick) {
+        __asm__ volatile("sti"); // Включаем прерывания, чтобы таймер PIT мог тикать
+        while (tick < target_tick) {
+            __asm__ volatile("hlt"); // Спим до следующего прерывания таймера
+        }
+        __asm__ volatile("cli"); // Выключаем прерывания перед возвратом в код сисколла
+    }
+    return 0;
+}
+
+static int64_t sys_rt_sigaction_handler(int signum, const void *act, void *oldact, size_t sigsetsize) {
+    (void)signum; (void)act; (void)oldact; (void)sigsetsize;
+    // Stub signal handler registration
+    return 0;
+}
+
+static int64_t sys_futex_handler(int *uaddr, int futex_op, int val, const struct linux_timespec *timeout, int *uaddr2, int val3) {
+    (void)uaddr; (void)futex_op; (void)val; (void)timeout; (void)uaddr2; (void)val3;
+    // Stub futex wake/wait implementation
     return 0;
 }
 
 void syscall_handler(void *regs_ptr) {
     syscall_regs_t *regs = (syscall_regs_t *)regs_ptr;
     uint64_t syscall_no = regs->rax;
-    int64_t ret = -1;
+    int64_t ret = -ENOSYS; // Default: Not Implemented
 
     switch (syscall_no) {
         case SYS_READ:
@@ -371,8 +430,21 @@ void syscall_handler(void *regs_ptr) {
         case SYS_MUNMAP:
             ret = sys_munmap_handler(regs->rdi, (size_t)regs->rsi);
             break;
+        case SYS_MPROTECT:
+            ret = sys_mprotect_handler(regs->rdi, (size_t)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_RT_SIGACTION:
+            ret = sys_rt_sigaction_handler((int)regs->rdi, (const void *)regs->rsi, (void *)regs->rdx, (size_t)regs->r10);
+            break;
         case SYS_RT_SIGPROCMASK:
-            ret = sys_rt_sigprocmask_handler((int)regs->rdi, (const void *)regs->rsi, (void *)regs->rdx, (size_t)regs->r10);
+            ret = 0;
+            break;
+        case SYS_SCHED_YIELD:
+            sched_yield();
+            ret = 0;
+            break;
+        case SYS_NANOSLEEP:
+            ret = sys_nanosleep_handler((const struct linux_timespec *)regs->rdi, (struct linux_timespec *)regs->rsi);
             break;
         case SYS_ARCH_PRCTL:
             ret = sys_arch_prctl_handler((int)regs->rdi, regs->rsi);
@@ -383,8 +455,24 @@ void syscall_handler(void *regs_ptr) {
         case SYS_GETPID:
             ret = current_task ? current_task->id : 1;
             break;
+        case SYS_GETPPID:
+            ret = 1; // Return Init PID as Parent PID
+            break;
+        case SYS_GETUID:
+        case SYS_GETGID:
+            ret = 0; // Root user / group ID
+            break;
+        case SYS_UNAME:
+            ret = sys_uname_handler((struct linux_utsname *)regs->rdi);
+            break;
         case SYS_SET_TID_ADDRESS:
             ret = current_task ? current_task->id : 1;
+            break;
+        case SYS_CLOCK_GETTIME:
+            ret = sys_clock_gettime_handler((int)regs->rdi, (struct linux_timespec *)regs->rsi);
+            break;
+        case SYS_FUTEX:
+            ret = sys_futex_handler((int *)regs->rdi, (int)regs->rsi, (int)regs->rdx, (const struct linux_timespec *)regs->r10, (int *)regs->r8, (int)regs->r9);
             break;
         case SYS_OPENAT:
             ret = sys_openat_handler((int)regs->rdi, (const char *)regs->rsi, (int)regs->rdx, (int)regs->r10);
@@ -393,15 +481,15 @@ void syscall_handler(void *regs_ptr) {
             ret = 0;
             break;
         case SYS_IOCTL:
-            ret = -1;
+            ret = 0;
             break;
         default:
-            serial_puts(COM1, "[KERNEL] Unknown Syscall: ");
+            serial_puts(COM1, "[KERNEL] Unknown Syscall: 0x");
             char buf[32];
             itoa_hex(syscall_no, buf);
             serial_puts(COM1, buf);
             serial_puts(COM1, "\n");
-            ret = -1;
+            ret = -ENOSYS;
             break;
     }
 
