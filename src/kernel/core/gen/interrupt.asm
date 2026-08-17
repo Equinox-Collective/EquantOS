@@ -228,15 +228,27 @@ linux_syscall_interrupt_asm:
     pop r15
     iretq
 
-; Аппаратный вход для инструкции 'syscall'
 [global syscall_entry_asm]
 syscall_entry_asm:
-    mov [rel user_rsp_temp], rsp
-
-    ; Загружаем стек ядра из current_task (смещение +8)
+    ; Swap GS to CPU-Local Storage (Preparing for Per-CPU architecture)
+    ; RCX contains User RIP, R11 contains User RFLAGS saved by CPU during 'syscall'
+    
+    ; Temporarily save User RSP onto User Stack or Scratch Area safely
+    ; We push user RSP to kernel stack AFTER swapping to Kernel RSP
+    mov r12, rsp                ; R12 is saved-by-callee register in System V ABI
+    
+    ; Load Kernel Stack from current_task structure safely
     mov rsp, [rel current_task]
-    mov rsp, [rsp + 8] ; kstack_at_bottom лежит по смещению 8
+    mov rsp, [rsp + 8]          ; Fetch kstack_at_bottom offset (8)
 
+    ; Push standard interrupt frame on Kernel Stack
+    push qword 0x23             ; User SS Selector
+    push r12                    ; User RSP
+    push r11                    ; User RFLAGS
+    push qword 0x1B             ; User CS Selector
+    push rcx                    ; User RIP
+
+    ; Save general purpose registers
     push rax
     push rbx
     push rcx
@@ -253,8 +265,8 @@ syscall_entry_asm:
     push r14
     push r15
 
-    mov rdi, rsp
-    sub rsp, 8          ; Выравнивание RSP для System V ABI
+    mov rdi, rsp                ; Pass stack frame pointer as arg1 to syscall_handler
+    sub rsp, 8                  ; Align RSP to 16-byte boundary for System V ABI
     call syscall_handler
     add rsp, 8
 
@@ -274,13 +286,14 @@ syscall_entry_asm:
     pop rbx
     pop rax
 
-    mov rsp, [rel user_rsp_temp]
+    ; Restore stack & register frame for sysretq
+    pop rcx                     ; Restore User RIP for sysret
+    add rsp, 8                  ; Skip CS selector
+    pop r11                     ; Restore User RFLAGS
+    pop rsp                     ; Directly restore User RSP from Kernel Stack!
 
-    db 0x48             ; REX.W префикс для 64-битного sysretq
+    db 0x48                     ; REX.W prefix for 64-bit sysretq
     sysret
-
-section .bss
-user_rsp_temp: resq 1
 
 section .data
 [global isr_stub_table]
