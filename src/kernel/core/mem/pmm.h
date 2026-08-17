@@ -9,6 +9,10 @@
 #define PAGE_SIZE 4096ULL
 #define PMM_MAX_ORDER 11 // Orders 0..10 (Up to 4MB continuous blocks)
 
+// Backward compatibility globals for shell.c & main.c
+extern uint64_t free_memory;
+extern uint64_t total_pages;
+
 typedef struct pmm_page {
     uint32_t flags;
     uint8_t order;
@@ -25,6 +29,7 @@ typedef struct {
 void pmm_init(void);
 void *pmm_alloc_pages(size_t order);
 void *pmm_alloc(void); // Order 0 helper
+void *pmm_alloc_continuous(uint64_t count);
 void pmm_free_pages(void *ptr, size_t order);
 void pmm_free(void *ptr); // Order 0 helper
 

@@ -1,145 +1,220 @@
+// src/kernel/core/mem/memory.c - Solaris Bonwick Slab / Buddy Hybrid Allocator
 #include "memory.h"
-#include "stdio.h"
+#include "pmm.h"
+#include "vmm.h"
 #include "string.h"
+#include "stdio.h"
 
-static block_header_t *heap_start = NULL;
 size_t used_memory = 0;
 
-static size_t align_size(size_t size) {
-  return (size + HEAP_ALIGNMENT - 1) & ~(HEAP_ALIGNMENT - 1);
-}
+// Slab Bucket Sizes: 16, 32, 64, 128, 256, 512, 1024, 2048 bytes
+#define NUM_SLAB_BUCKETS 8
+static const size_t bucket_sizes[NUM_SLAB_BUCKETS] = {16, 32, 64, 128, 256, 512, 1024, 2048};
+
+typedef struct slab_object {
+    struct slab_object *next;
+} slab_object_t;
+
+typedef struct slab_page {
+    size_t object_size;
+    size_t free_count;
+    slab_object_t *free_list;
+    struct slab_page *next;
+} slab_page_t;
+
+typedef struct {
+    size_t object_size;
+    slab_page_t *slabs;
+} kmem_bucket_t;
+
+static kmem_bucket_t buckets[NUM_SLAB_BUCKETS];
+
+// Large Allocation Header for allocations > 2048 bytes
+typedef struct large_alloc_header {
+    uint32_t magic;
+    size_t page_count;
+    size_t size;
+} large_alloc_header_t;
+
+#define LARGE_ALLOC_MAGIC 0x4C415247 // "LARG"
 
 void init_heap(uint64_t start_addr, size_t size) {
-  uint64_t aligned_start = align_size(start_addr);
-  size -= (aligned_start - start_addr);
+    (void)start_addr;
+    (void)size;
 
-  heap_start = (block_header_t *)aligned_start;
-  heap_start->magic = HEAP_MAGIC_FREE;
-  heap_start->size = size;
-  heap_start->free = 1;
-  heap_start->next = NULL;
-  heap_start->canary = 0xDEADC0DE;
-
-  used_memory = 0;
+    for (int i = 0; i < NUM_SLAB_BUCKETS; i++) {
+        buckets[i].object_size = bucket_sizes[i];
+        buckets[i].slabs = NULL;
+    }
+    used_memory = 0;
+    printf("[MEMORY] Solaris-style Slab & Buddy Kernel Heap Initialized.\n");
 }
 
-void *krealloc(void *ptr, size_t new_size) {
-  if (!ptr)
-    return kmalloc(new_size);
-  if (new_size == 0) {
-    kfree(ptr);
-    return NULL;
-  }
+static slab_page_t *create_slab_page(size_t object_size) {
+    void *phys = pmm_alloc(); // Allocate 1 physical page (4KB) from Buddy Allocator
+    if (!phys) return NULL;
 
-  block_header_t *block =
-      (block_header_t *)((uint8_t *)ptr - sizeof(block_header_t));
-  size_t old_data_size = block->size - sizeof(block_header_t);
+    slab_page_t *slab = (slab_page_t *)VIRT(phys);
+    slab->object_size = object_size;
+    slab->next = NULL;
 
-  if (new_size <= old_data_size)
-    return ptr; // Уже влезает
+    uint8_t *payload_start = (uint8_t *)slab + sizeof(slab_page_t);
+    // Align payload to 16 bytes boundary
+    payload_start = (uint8_t *)(((uintptr_t)payload_start + 15) & ~15ULL);
 
-  // Выделяем новый кусок
-  void *new_ptr = kmalloc(new_size);
-  if (!new_ptr)
-    return NULL;
+    size_t available_space = PAGE_SIZE - (size_t)(payload_start - (uint8_t *)slab);
+    size_t capacity = available_space / object_size;
 
-  // Копируем данные
-  memcpy(new_ptr, ptr, old_data_size);
+    slab->free_count = capacity;
+    slab->free_list = (slab_object_t *)payload_start;
 
-  // Освобождаем старый
-  kfree(ptr);
+    slab_object_t *curr = slab->free_list;
+    for (size_t i = 0; i < capacity - 1; i++) {
+        uint8_t *next_obj = (uint8_t *)curr + object_size;
+        curr->next = (slab_object_t *)next_obj;
+        curr = curr->next;
+    }
+    curr->next = NULL;
 
-  return new_ptr;
+    return slab;
 }
 
 void *kmalloc(size_t size) {
-  if (size == 0 || !heap_start)
-    return NULL;
+    if (size == 0) return NULL;
 
-  // Ensure total requested size + header is strictly aligned to HEAP_ALIGNMENT (16 bytes)
-  size_t total_needed = align_size(size) + sizeof(block_header_t);
-  total_needed = align_size(total_needed); // Strict block alignment
+    // 1. Small Allocations (<= 2048 bytes): Handle via Slab Object Cache (O(1))
+    if (size <= 2048) {
+        int bucket_idx = -1;
+        for (int i = 0; i < NUM_SLAB_BUCKETS; i++) {
+            if (bucket_sizes[i] >= size) {
+                bucket_idx = i;
+                break;
+            }
+        }
 
-  block_header_t *current = heap_start;
+        if (bucket_idx != -1) {
+            kmem_bucket_t *bucket = &buckets[bucket_idx];
+            slab_page_t *slab = bucket->slabs;
 
-  while (current) {
-    if (current->magic != HEAP_MAGIC_FREE &&
-        current->magic != HEAP_MAGIC_ACTIVE) {
-      printf("\n!!! KERNEL PANIC: HEAP CORRUPTION DETECTED AT %x !!!\n",
-             (uint64_t)current);
-      __asm__("cli; hlt");
+            // Find a slab page with free objects
+            while (slab && slab->free_count == 0) {
+                slab = slab->next;
+            }
+
+            if (!slab) {
+                slab = create_slab_page(bucket->object_size);
+                if (!slab) return NULL;
+                slab->next = bucket->slabs;
+                bucket->slabs = slab;
+            }
+
+            // Pop object from slab free list (O(1) Constant Time)
+            slab_object_t *obj = slab->free_list;
+            slab->free_list = obj->next;
+            slab->free_count--;
+
+            used_memory += bucket->object_size;
+            return (void *)obj;
+        }
     }
 
-    if (current->free && current->size >= total_needed) {
-      // Split block if remaining space is large enough
-      if (current->size >= total_needed + sizeof(block_header_t) + 32) {
-        block_header_t *next_node =
-            (block_header_t *)((uint8_t *)current + total_needed);
-        next_node->magic = HEAP_MAGIC_FREE;
-        next_node->size = current->size - total_needed;
-        next_node->free = 1;
-        next_node->next = current->next;
-        next_node->canary = 0xDEADC0DE;
+    // 2. Large Allocations (> 2048 bytes): Delegate directly to Buddy Allocator
+    size_t total_needed = size + sizeof(large_alloc_header_t);
+    size_t pages_needed = (total_needed + PAGE_SIZE - 1) / PAGE_SIZE;
 
-        current->size = total_needed;
-        current->next = next_node;
-      }
+    void *phys = pmm_alloc_continuous(pages_needed);
+    if (!phys) return NULL;
 
-      current->free = 0;
-      current->magic = HEAP_MAGIC_ACTIVE;
-      used_memory += current->size;
+    large_alloc_header_t *header = (large_alloc_header_t *)VIRT(phys);
+    header->magic = LARGE_ALLOC_MAGIC;
+    header->page_count = pages_needed;
+    header->size = size;
 
-      // Return data payload strictly aligned to 16 bytes
-      void *ptr = (void *)((uint8_t *)current + sizeof(block_header_t));
-      return ptr;
-    }
-    current = current->next;
-  }
-  return NULL;
+    used_memory += (pages_needed * PAGE_SIZE);
+    return (void *)((uint8_t *)header + sizeof(large_alloc_header_t));
 }
 
-// ВАЖНО: kzalloc обнуляет память. Именно это пофиксит твой GPF!
-void* kzalloc(size_t size) {
-    void* ptr = kmalloc(size);
-    if (ptr != NULL) {
+void *kzalloc(size_t size) {
+    void *ptr = kmalloc(size);
+    if (ptr) {
         memset(ptr, 0, size);
     }
-    return ptr; // Если NULL, вернем NULL, а не упадем
+    return ptr;
 }
+
 void kfree(void *ptr) {
-  if (!ptr)
-    return;
-  block_header_t *block =
-      (block_header_t *)((uint8_t *)ptr - sizeof(block_header_t));
+    if (!ptr) return;
 
-  if (block->magic != HEAP_MAGIC_ACTIVE) {
-    printf("KFREE: Double free or invalid magic at %x\n", (uint64_t)ptr);
-    return;
-  }
+    // Check if pointer belongs to a Large Allocation (> 2048 bytes)
+    uint64_t addr = (uint64_t)ptr;
+    uint64_t page_base = addr & ~0xFFFULL;
 
-  block->free = 1;
-  block->magic = HEAP_MAGIC_FREE;
-  used_memory -= block->size;
-
-  // Склеивание
-  block_header_t *curr = heap_start;
-  while (curr && curr->next) {
-    if (curr->free && curr->next->free) {
-      curr->size += curr->next->size;
-      curr->next = curr->next->next;
-    } else {
-      curr = curr->next;
+    large_alloc_header_t *header = (large_alloc_header_t *)page_base;
+    if ((uint8_t *)ptr == (uint8_t *)header + sizeof(large_alloc_header_t) &&
+        header->magic == LARGE_ALLOC_MAGIC) {
+        
+        size_t pages = header->page_count;
+        used_memory -= (pages * PAGE_SIZE);
+        pmm_free_pages((void *)PHYS(page_base), 0); // Return pages to Buddy Allocator
+        return;
     }
-  }
+
+    // Otherwise, pointer belongs to a Slab Page
+    slab_page_t *slab = (slab_page_t *)page_base;
+    slab_object_t *obj = (slab_object_t *)ptr;
+
+    // Push object back onto slab free list (O(1) Constant Time)
+    obj->next = slab->free_list;
+    slab->free_list = obj;
+    slab->free_count++;
+
+    if (used_memory >= slab->object_size) {
+        used_memory -= slab->object_size;
+    }
 }
 
-void kheap_dump() {
-  block_header_t *current = heap_start;
-  printf("--- KERNEL HEAP DUMP ---\n");
-  while (current) {
-    printf("Block @ %x | Size: %u bytes | Free: %d | Magic: %x\n",
-           (uint64_t)current, (unsigned int)current->size, current->free, current->magic);
-    current = current->next;
-  }
-  printf("------------------------\n");
+void *krealloc(void *ptr, size_t new_size) {
+    if (!ptr) return kmalloc(new_size);
+    if (new_size == 0) {
+        kfree(ptr);
+        return NULL;
+    }
+
+    void *new_ptr = kmalloc(new_size);
+    if (!new_ptr) return NULL;
+
+    // Determine copy size
+    uint64_t page_base = (uint64_t)ptr & ~0xFFFULL;
+    large_alloc_header_t *header = (large_alloc_header_t *)page_base;
+
+    size_t old_size = 0;
+    if ((uint8_t *)ptr == (uint8_t *)header + sizeof(large_alloc_header_t) &&
+        header->magic == LARGE_ALLOC_MAGIC) {
+        old_size = header->size;
+    } else {
+        slab_page_t *slab = (slab_page_t *)page_base;
+        old_size = slab->object_size;
+    }
+
+    size_t copy_size = (new_size < old_size) ? new_size : old_size;
+    memcpy(new_ptr, ptr, copy_size);
+    kfree(ptr);
+
+    return new_ptr;
+}
+
+void kheap_dump(void) {
+    printf("--- KERNEL SLAB HEAP DUMP ---\n");
+    for (int i = 0; i < NUM_SLAB_BUCKETS; i++) {
+        size_t total_slabs = 0;
+        slab_page_t *s = buckets[i].slabs;
+        while (s) {
+            total_slabs++;
+            s = s->next;
+        }
+        printf("Bucket [%u bytes]: %u slab pages active\n", 
+               (unsigned int)bucket_sizes[i], (unsigned int)total_slabs);
+    }
+    printf("Total Heap Allocated: %u KB\n", (unsigned int)(used_memory / 1024));
+    printf("-----------------------------\n");
 }
