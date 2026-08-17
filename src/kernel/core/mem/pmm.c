@@ -13,6 +13,10 @@ static pmm_page_t *page_array = NULL;
 static uint64_t total_phys_pages = 0;
 static uint64_t free_phys_pages = 0;
 
+uint64_t total_pages = 0;
+uint64_t free_memory = 0;
+
+
 __attribute__((used, section(".requests")))
 static volatile struct limine_memmap_request memmap_request = {
     .id = { 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b, 0x67cf3d9d378a806f, 0xe304acdfc50c3c62 },
