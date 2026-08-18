@@ -1,4 +1,4 @@
-// src/kernel/core/mem/pmm.c - Production Buddy Allocator (Linux/BSD style)
+// src/kernel/core/mem/pmm.c - Production Buddy Allocator with Exact Math Accounting
 #include "pmm.h"
 #include "vmm.h"
 #include "../panic.h"
@@ -8,14 +8,14 @@
 
 extern uint64_t hhdm_offset;
 
+// Exported backward-compatibility globals for shell.c & main.c
+uint64_t total_pages = 0;
+uint64_t free_memory = 0;
+
 static pmm_free_area_t free_areas[PMM_MAX_ORDER];
 static pmm_page_t *page_array = NULL;
 static uint64_t total_phys_pages = 0;
 static uint64_t free_phys_pages = 0;
-
-uint64_t total_pages = 0;
-uint64_t free_memory = 0;
-
 
 __attribute__((used, section(".requests")))
 static volatile struct limine_memmap_request memmap_request = {
@@ -52,6 +52,11 @@ static inline void list_remove(pmm_page_t **head, pmm_page_t *page) {
     }
     page->next = NULL;
     page->prev = NULL;
+}
+
+static inline void sync_legacy_globals(void) {
+    total_pages = total_phys_pages;
+    free_memory = free_phys_pages * PAGE_SIZE;
 }
 
 void pmm_init(void) {
@@ -105,14 +110,22 @@ void pmm_init(void) {
 
             for (uint64_t p = 0; p < count; p++) {
                 uint64_t pfn = base_pfn + p;
-                if (pfn == 0) continue; // Safety guard for Zero Page
+                if (pfn == 0) continue; // Guard Zero Page
+
+                pmm_page_t *pg = pfn_to_page(pfn);
+                pg->is_free = false;
+                pg->order = 0;
+
                 pmm_free_pages((void *)(pfn * PAGE_SIZE), 0);
             }
         }
     }
 
-    printf("PMM: Buddy Allocator initialized. Free RAM: %u MB\n", 
-           (unsigned int)(free_phys_pages * PAGE_SIZE / (1024 * 1024)));
+    sync_legacy_globals();
+
+    printf("PMM: Buddy Allocator initialized. Free RAM: %u MB (Total: %u MB)\n", 
+           (unsigned int)(free_phys_pages * PAGE_SIZE / (1024 * 1024)),
+           (unsigned int)(total_phys_pages * PAGE_SIZE / (1024 * 1024)));
 }
 
 void *pmm_alloc_pages(size_t order) {
@@ -139,6 +152,7 @@ void *pmm_alloc_pages(size_t order) {
             page->order = order;
             page->is_free = false;
             free_phys_pages -= (1ULL << order);
+            sync_legacy_globals();
             return (void *)(page_to_pfn(page) * PAGE_SIZE);
         }
     }
@@ -153,7 +167,10 @@ void pmm_free_pages(void *ptr, size_t order) {
     if (pfn >= total_phys_pages) return;
 
     pmm_page_t *page = pfn_to_page(pfn);
-    page->order = order;
+    if (page->is_free) return; // Prevent double-free
+
+    page->is_free = true;
+    free_phys_pages += (1ULL << order); // Account for freed pages ONCE
 
     // Coalesce (Merge) free buddies upwards
     while (order < PMM_MAX_ORDER - 1) {
@@ -165,7 +182,7 @@ void pmm_free_pages(void *ptr, size_t order) {
             break; // Buddy cannot be merged
         }
 
-        // Remove buddy from its current free list and merge
+        // Merge buddy into larger continuous block
         list_remove(&free_areas[order].freelist, buddy);
         free_areas[order].free_count--;
         buddy->is_free = false;
@@ -179,7 +196,8 @@ void pmm_free_pages(void *ptr, size_t order) {
     page->is_free = true;
     list_add(&free_areas[order].freelist, page);
     free_areas[order].free_count++;
-    free_phys_pages += (1ULL << order);
+
+    sync_legacy_globals();
 }
 
 void *pmm_alloc(void) {
@@ -199,6 +217,7 @@ void *pmm_alloc_continuous(uint64_t count) {
 }
 
 uint64_t pmm_get_used_memory(void) {
+    if (free_phys_pages > total_phys_pages) return 0;
     return (total_phys_pages - free_phys_pages) * PAGE_SIZE;
 }
 
