@@ -2,6 +2,7 @@
 #include "pci.h"
 #include "../../core/mem/vmm.h"
 #include "../serial/serial.h"
+#include <stddef.h>
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
