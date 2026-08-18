@@ -8,6 +8,7 @@
 #include "../core/mem/memory.h"
 #include "string.h"
 #include "../drivers/serial/serial.h"
+#include "../core/initcall.h"
 
 typedef struct {
     block_device_t dev;
@@ -583,3 +584,11 @@ void fat32_init(void) {
         }
     }
 }
+
+// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
+
+static int __init fat32_fs_initcall(void) {
+    fat32_init();
+    return 0;
+}
+fs_initcall(fat32_fs_initcall);

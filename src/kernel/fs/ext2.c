@@ -7,6 +7,7 @@
 #include "string.h"
 #include "stdio.h"
 #include "../drivers/serial/serial.h"
+#include "../core/initcall.h"
 
 typedef struct {
     block_device_t dev;
@@ -501,3 +502,11 @@ vfs_node_t *ext2_mount_partition(block_device_t dev, uint32_t partition_lba) {
 void ext2_init(void) {
     serial_puts(COM1, "[EXT2] Initializing EXT2 file system driver...\n");
 }
+
+// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
+
+static int __init ext2_fs_initcall(void) {
+    ext2_init();
+    return 0;
+}
+fs_initcall(ext2_fs_initcall);
