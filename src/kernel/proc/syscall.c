@@ -11,6 +11,7 @@
 #include "../misc/timer.h"
 #include "string.h"
 #include "../fs/vfs.h"
+#include "../core/initcall.h"
 
 #define IA32_EFER        0xC0000080
 #define IA32_STAR        0xC0000081
@@ -567,3 +568,18 @@ void init_syscalls(void) {
 
     serial_puts(COM1, "[KERNEL] Native x86_64 Hardware 'syscall' MSRs Initialized.\n");
 }
+
+
+
+
+
+
+
+
+// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
+
+static int __init init_syscalls_initcall(void) {
+    init_syscalls();
+    return 0;
+}
+arch_initcall(init_syscalls_initcall);
