@@ -3,6 +3,7 @@
 #include "../../core/gen/io.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include "../../core/initcall.h"
 
 static uint8_t key_buffer[128];
 static int key_head = 0;
@@ -119,3 +120,11 @@ void keyboard_init(void) {
         inb(0x60);
     }
 }
+
+// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
+
+static int __init keyboard_dev_initcall(void) {
+    keyboard_init();
+    return 0;
+}
+device_initcall(keyboard_dev_initcall);
