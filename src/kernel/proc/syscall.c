@@ -138,6 +138,65 @@ static int64_t sys_close_handler(int fd) {
     return 0;
 }
 
+// Hash Table for Futex Wait Queues
+#define FUTEX_HASH_SIZE 64
+static task_t *futex_queues[FUTEX_HASH_SIZE] = {NULL};
+
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
+
+static inline uint32_t futex_hash(uint64_t uaddr) {
+    return (uint32_t)((uaddr >> 3) % FUTEX_HASH_SIZE);
+}
+
+static int64_t sys_futex_handler(int *uaddr, int futex_op, int val, const struct linux_timespec *timeout, int *uaddr2, int val3) {
+    (void)timeout; (void)uaddr2; (void)val3;
+    if (!uaddr) return -EINVAL;
+
+    uint64_t vaddr = (uint64_t)uaddr;
+    uint32_t hash = futex_hash(vaddr);
+    int op = futex_op & 127; // Mask out FUTEX_PRIVATE_FLAG
+
+    if (op == FUTEX_WAIT) {
+        // Atomic check: if value changed in user space, don't sleep
+        if (*uaddr != val) {
+            return -EAGAIN;
+        }
+
+        // Put current task into Futex Wait Queue
+        current_task->futex_addr = vaddr;
+        current_task->futex_next = futex_queues[hash];
+        futex_queues[hash] = current_task;
+
+        // Block current task and switch context
+        sched_block(current_task);
+        sched_yield();
+
+        return 0;
+    } 
+    else if (op == FUTEX_WAKE) {
+        int woken = 0;
+        task_t **curr = &futex_queues[hash];
+
+        while (*curr && woken < val) {
+            if ((*curr)->futex_addr == vaddr) {
+                task_t *target = *curr;
+                *curr = target->futex_next;
+                target->futex_addr = 0;
+                target->futex_next = NULL;
+
+                sched_unblock(target); // Unblock waiting thread
+                woken++;
+            } else {
+                curr = &(*curr)->futex_next;
+            }
+        }
+        return woken; // Return count of woken threads
+    }
+
+    return -ENOSYS;
+}
+
 static int64_t sys_getcwd_handler(char *buf, size_t size) {
     if (!buf || size == 0) return -EINVAL;
     const char *cwd = (current_task && current_task->process && current_task->process->cwd[0] != '\0')

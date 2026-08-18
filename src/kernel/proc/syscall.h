@@ -6,14 +6,15 @@
 #include <stddef.h>
 
 // Linux Error Codes (negative return values in RAX)
-#define ENOENT  2
-#define EBADF   9
-#define ENOMEM 12
-#define ENOTDIR 20
-#define EINVAL 22
-#define EMFILE 24
-#define ERANGE 34
-#define ENOSYS 38
+#define ENOENT              2
+#define EBADF               9
+#define EAGAIN              11
+#define ENOMEM              12
+#define ENOTDIR             20
+#define EINVAL              22
+#define EMFILE              24
+#define ERANGE              34
+#define ENOSYS              38
 
 // Standard Linux Syscall Numbers
 #define SYS_READ            0
