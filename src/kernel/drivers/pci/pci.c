@@ -2,6 +2,7 @@
 #include "pci.h"
 #include "../../core/mem/vmm.h"
 #include "../serial/serial.h"
+#include "../../core/initcall.h"
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
@@ -105,3 +106,11 @@ void pci_init(void) {
     }
     serial_puts(COM1, "[PCI] Bus scan complete.\n");
 }
+
+// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
+
+static int __init pci_bus_initcall(void) {
+    pci_init();
+    return 0;
+}
+subsys_initcall(pci_bus_initcall);

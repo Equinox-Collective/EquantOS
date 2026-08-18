@@ -3,6 +3,9 @@
 #include "../core/mem/memory.h"
 #include "string.h"
 #include "stdio.h"
+#include "../core/initcall.h"
+#include "ramfs.h"
+#include "../drivers/serial/serial.h"
 
 vfs_node_t *vfs_root = NULL;
 
@@ -122,3 +125,14 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
     }
     return node->ops->finddir(node, name);
 }
+
+// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
+
+static int __init vfs_subsys_initcall(void) {
+    vfs_init();
+    vfs_node_t *ramfs_root = ramfs_create_root();
+    vfs_mount("/", ramfs_root);
+    serial_puts(COM1, "[KERNEL] VFS and RAMFS Root '/' Subsystem Initialized.\n");
+    return 0;
+}
+subsys_initcall(vfs_subsys_initcall);
