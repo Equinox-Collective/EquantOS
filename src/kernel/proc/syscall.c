@@ -444,12 +444,6 @@ static int64_t sys_rt_sigaction_handler(int signum, const void *act, void *oldac
     return 0;
 }
 
-static int64_t sys_futex_handler(int *uaddr, int futex_op, int val, const struct linux_timespec *timeout, int *uaddr2, int val3) {
-    (void)uaddr; (void)futex_op; (void)val; (void)timeout; (void)uaddr2; (void)val3;
-    // Stub futex wake/wait implementation
-    return 0;
-}
-
 void syscall_handler(void *regs_ptr) {
     syscall_regs_t *regs = (syscall_regs_t *)regs_ptr;
     uint64_t syscall_no = regs->rax;
