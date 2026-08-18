@@ -566,24 +566,30 @@ void fat32_init(void) {
     serial_puts(COM1, "[FAT32] Scanning GPT partitions on NVMe...\n");
     gpt_init_device(nvme_dev);
 
-    // FIX: Iterate through ALL GPT partitions and mount the one with valid FAT32 BPB
+    // Ensure /drives directory exists in VFS root
+    vfs_node_t *drives_dir = vfs_finddir(vfs_root, "drives");
+    if (!drives_dir) {
+        drives_dir = ramfs_create_directory(vfs_root, "drives");
+    }
+
     int p_count = gpt_get_partition_count();
     for (int i = 0; i < p_count; i++) {
         partition_info_t *part = gpt_get_partition(i);
         if (part) {
             vfs_node_t *fat_root = fat32_mount_partition(nvme_dev, part->start_lba, part->sector_count);
-            if (fat_root) {
-                vfs_node_t *disk_dir = ramfs_create_directory(vfs_root, "disk");
+            if (fat_root && drives_dir) {
+                vfs_node_t *disk_dir = ramfs_create_directory(drives_dir, "nvme0p1");
                 if (disk_dir) {
                     disk_dir->flags |= FS_MOUNTPOINT;
                     disk_dir->ptr = (vfs_node_t *)fat_root;
-                    serial_puts(COM1, "[FAT32 SUCCESS] Mounted FAT32 partition to /disk\n");
+                    serial_puts(COM1, "[FAT32 SUCCESS] Mounted FAT32 partition at '/drives/nvme0p1'\n");
                     return;
                 }
             }
         }
     }
 }
+
 
 // // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
 
