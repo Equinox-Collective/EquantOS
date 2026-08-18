@@ -1,9 +1,11 @@
 #include "task.h"
 #include "sched.h"
-#include "memory.h"
-#include "pmm.h"
+#include "../core/mem/memory.h"
+#include "../core/mem/pmm.h"
 #include "string.h"
 #include "stdio.h"
+#include "../core/initcall.h"
+#include "../drivers/serial/serial.h"
 
 task_t *current_task = NULL;
 static task_t *task_list = NULL;
@@ -88,3 +90,13 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2) {
 void yield(void) {
     __asm__ volatile ("int $32");
 }
+
+// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
+
+static int __init tasking_subsys_initcall(void) {
+    task_init();
+    sched_init(current_task);
+    serial_puts(COM1, "[KERNEL] Multithreading & O(1) Scheduler Subsystem Initialized.\n");
+    return 0;
+}
+subsys_initcall(tasking_subsys_initcall);

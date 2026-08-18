@@ -1,5 +1,6 @@
 #include "timer.h"
 #include "../core/gen/io.h"
+#include "../core/initcall.h"
 
 volatile uint32_t tick = 0;
 
@@ -20,3 +21,11 @@ void sleep(uint32_t ms) {
         __asm__ __volatile__("pause");
     }
 }
+
+// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
+
+static int __init timer_arch_initcall(void) {
+    init_timer(100); // Initialize PIT at 100 Hz (10ms quantum ticks)
+    return 0;
+}
+arch_initcall(timer_arch_initcall);

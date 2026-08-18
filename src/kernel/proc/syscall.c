@@ -569,13 +569,6 @@ void init_syscalls(void) {
     serial_puts(COM1, "[KERNEL] Native x86_64 Hardware 'syscall' MSRs Initialized.\n");
 }
 
-
-
-
-
-
-
-
 // // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
 
 static int __init init_syscalls_initcall(void) {
