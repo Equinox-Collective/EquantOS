@@ -234,8 +234,30 @@ void term_print(const char *str) {
     }
 }
 
+static bool shift_pressed = false;
+
 // Convert Input Event Keycode to ASCII Character
-static char input_code_to_ascii(uint16_t code) {
+static char input_code_to_ascii(uint16_t code, bool shift) {
+    if (shift) {
+        switch (code) {
+            case KEY_1: return '!'; case KEY_2: return '@'; case KEY_3: return '#';
+            case KEY_4: return '$'; case KEY_5: return '%'; case KEY_6: return '^';
+            case KEY_7: return '&'; case KEY_8: return '*'; case KEY_9: return '(';
+            case KEY_0: return ')'; case KEY_MINUS: return '_'; case KEY_EQUAL: return '+';
+            case KEY_Q: return 'Q'; case KEY_W: return 'W'; case KEY_E: return 'E';
+            case KEY_R: return 'R'; case KEY_T: return 'T'; case KEY_Y: return 'Y';
+            case KEY_U: return 'U'; case KEY_I: return 'I'; case KEY_O: return 'O';
+            case KEY_P: return 'P'; case KEY_A: return 'A'; case KEY_S: return 'S';
+            case KEY_D: return 'D'; case KEY_F: return 'F'; case KEY_G: return 'G';
+            case KEY_H: return 'H'; case KEY_J: return 'J'; case KEY_K: return 'K';
+            case KEY_L: return 'L'; case KEY_Z: return 'Z'; case KEY_X: return 'X';
+            case KEY_C: return 'C'; case KEY_V: return 'V'; case KEY_B: return 'B';
+            case KEY_N: return 'N'; case KEY_M: return 'M'; case KEY_SPACE: return ' ';
+            case KEY_DOT: return '>'; case KEY_SLASH: return '?'; case KEY_COMMA: return '<';
+            default: return 0;
+        }
+    }
+
     switch (code) {
         case KEY_1: return '1'; case KEY_2: return '2'; case KEY_3: return '3';
         case KEY_4: return '4'; case KEY_5: return '5'; case KEY_6: return '6';
@@ -283,8 +305,16 @@ void term_poll_keyboard(void) {
     input_event_t ev;
     if (!input_pop_event(&ev)) return;
 
-    // Only process Key Press events
-    if (ev.type != EV_KEY || ev.value != KEY_PRESS) return;
+    if (ev.type != EV_KEY) return;
+
+    // Отслеживаем зажатие и отпускание Shift
+    if (ev.code == KEY_LEFTSHIFT || ev.code == KEY_RIGHTSHIFT) {
+        shift_pressed = (ev.value == KEY_PRESS);
+        return;
+    }
+
+    // Обрабатываем нажатия обычных клавиш
+    if (ev.value != KEY_PRESS) return;
 
     if (ev.code == KEY_ENTER) {
         term_draw_cursor(false);
@@ -313,7 +343,7 @@ void term_poll_keyboard(void) {
         return;
     }
 
-    char c = input_code_to_ascii(ev.code);
+    char c = input_code_to_ascii(ev.code, shift_pressed);
     if (c != 0 && cmd_len < CMD_BUF_SIZE - 1) {
         term_draw_cursor(false);
         cmd_buf[cmd_len++] = c;

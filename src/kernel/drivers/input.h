@@ -65,8 +65,16 @@
 #define KEY_COMMA      51
 #define KEY_DOT        52
 #define KEY_SLASH      53
+#define KEY_RIGHTSHIFT 54
 #define KEY_SPACE      57
 #define KEY_CAPSLOCK   58
+#define KEY_LEFT       150
+#define KEY_RIGHT      151
+#define KEY_UP         152
+#define KEY_DOWN       153
+#define KEY_HOME       154
+#define KEY_END        155
+#define KEY_DELETE     156
 
 typedef struct {
     uint16_t type;  // EV_KEY, EV_REL, EV_ABS

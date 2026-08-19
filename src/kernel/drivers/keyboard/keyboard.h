@@ -15,12 +15,4 @@ bool keyboard_alt_pressed(void);
 bool keyboard_ctrl_pressed(void);
 bool keyboard_shift_pressed(void);
 
-#define KEY_LEFT   150
-#define KEY_RIGHT  151
-#define KEY_UP     152
-#define KEY_DOWN   153
-#define KEY_HOME   154
-#define KEY_END    155
-#define KEY_DELETE 156
-
 #endif // KEYBOARD_H

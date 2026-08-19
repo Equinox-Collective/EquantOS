@@ -18,7 +18,7 @@ static const uint16_t ps2_to_input_table[128] = {
     [0x1C] = KEY_ENTER, [0x1D] = KEY_LEFTCTRL,
     [0x1E] = KEY_A, [0x1F] = KEY_S, [0x20] = KEY_D, [0x21] = KEY_F,
     [0x22] = KEY_G, [0x23] = KEY_H, [0x24] = KEY_J, [0x25] = KEY_K,
-    [0x26] = KEY_L, [0x2A] = KEY_LEFTSHIFT,
+    [0x26] = KEY_L, [0x2A] = KEY_LEFTSHIFT, [0x36] = KEY_RIGHTSHIFT,
     [0x2C] = KEY_Z, [0x2D] = KEY_X, [0x2E] = KEY_C, [0x2F] = KEY_V,
     [0x30] = KEY_B, [0x31] = KEY_N, [0x32] = KEY_M,
     [0x33] = KEY_COMMA, [0x34] = KEY_DOT, [0x35] = KEY_SLASH,
