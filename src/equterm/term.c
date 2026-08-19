@@ -1,7 +1,8 @@
-// term.c - Professional Terminal with ANSI colors, Visual Cursor & Line Editing
+// src/equterm/term.c - Advanced Terminal with Input Subsystem & Tab Completion
 #include "term.h"
 #include "../kernel/drivers/serial/serial.h"
-#include "../kernel/drivers/keyboard/keyboard.h"
+#include "../kernel/drivers/input.h"
+#include "../kernel/fs/vfs.h"
 #include "shell.h"
 #include "string.h"
 #include "../kernel/drivers/display/font8x8.h"
@@ -24,7 +25,6 @@ static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_len = 0;
 static int cursor_pos = 0;
 
-// ANSI escape sequence state machine variables
 static bool in_escape = false;
 static char esc_buf[16];
 static int esc_len = 0;
@@ -54,7 +54,6 @@ static void term_clear_rect(size_t y0, size_t y1) {
     }
 }
 
-// Draw or clear visual cursor block at (cursor_x, cursor_y)
 static void term_draw_cursor(bool visible) {
     if (!term_fb_address) return;
     int gw = get_glyph_width();
@@ -235,134 +234,89 @@ void term_print(const char *str) {
     }
 }
 
-// Command History & Line Editor buffers
-#define MAX_HISTORY 16
-static char history[MAX_HISTORY][CMD_BUF_SIZE];
-static int history_count = 0;
-static int history_index = 0;
+// Convert Input Event Keycode to ASCII Character
+static char input_code_to_ascii(uint16_t code) {
+    switch (code) {
+        case KEY_1: return '1'; case KEY_2: return '2'; case KEY_3: return '3';
+        case KEY_4: return '4'; case KEY_5: return '5'; case KEY_6: return '6';
+        case KEY_7: return '7'; case KEY_8: return '8'; case KEY_9: return '9';
+        case KEY_0: return '0'; case KEY_MINUS: return '-'; case KEY_EQUAL: return '=';
+        case KEY_Q: return 'q'; case KEY_W: return 'w'; case KEY_E: return 'e';
+        case KEY_R: return 'r'; case KEY_T: return 't'; case KEY_Y: return 'y';
+        case KEY_U: return 'u'; case KEY_I: return 'i'; case KEY_O: return 'o';
+        case KEY_P: return 'p'; case KEY_A: return 'a'; case KEY_S: return 's';
+        case KEY_D: return 'd'; case KEY_F: return 'f'; case KEY_G: return 'g';
+        case KEY_H: return 'h'; case KEY_J: return 'j'; case KEY_K: return 'k';
+        case KEY_L: return 'l'; case KEY_Z: return 'z'; case KEY_X: return 'x';
+        case KEY_C: return 'c'; case KEY_V: return 'v'; case KEY_B: return 'b';
+        case KEY_N: return 'n'; case KEY_M: return 'm'; case KEY_SPACE: return ' ';
+        default: return 0;
+    }
+}
+
+// Tab Autocompletion Engine
+static void term_handle_tab_completion(void) {
+    if (cmd_len == 0 || !vfs_root) return;
+
+    vfs_node_t *dir = vfs_root;
+    uint32_t idx = 0;
+    vfs_node_t *child = NULL;
+
+    while ((child = vfs_readdir(dir, idx++)) != NULL) {
+        if (strncmp(child->name, cmd_buf, cmd_len) == 0) {
+            // Autocomplete matching prefix
+            const char *match = child->name + cmd_len;
+            while (*match) {
+                if (cmd_len < CMD_BUF_SIZE - 1) {
+                    cmd_buf[cmd_len++] = *match;
+                    term_putchar(*match);
+                }
+                match++;
+            }
+            break;
+        }
+    }
+}
 
 void term_poll_keyboard(void) {
-    uint8_t scancode = keyboard_pop();
-    if (scancode == 0) return;
+    input_event_t ev;
+    if (!input_pop_event(&ev)) return;
 
-    if (keyboard_ctrl_pressed()) {
-        char c = get_ascii_char(scancode);
-        if (c == 'l' || c == 'L') {
-            term_clear();
-            shell_init();
-            cmd_len = 0;
-            cursor_pos = 0;
-            term_draw_cursor(true);
-            return;
-        }
-    }
+    // Only process Key Press events
+    if (ev.type != EV_KEY || ev.value != KEY_PRESS) return;
 
-    if (scancode == KEY_UP) {
-        if (history_count > 0 && history_index > 0) {
-            history_index--;
-            term_draw_cursor(false);
-            while (cmd_len > 0) {
-                term_putchar('\b');
-                cmd_len--;
-            }
-            strcpy(cmd_buf, history[history_index]);
-            cmd_len = strlen(cmd_buf);
-            cursor_pos = cmd_len;
-            term_print(cmd_buf);
-            term_draw_cursor(true);
-        }
-        return;
-    }
-
-    if (scancode == KEY_DOWN) {
-        if (history_count > 0 && history_index < history_count - 1) {
-            history_index++;
-            term_draw_cursor(false);
-            while (cmd_len > 0) {
-                term_putchar('\b');
-                cmd_len--;
-            }
-            strcpy(cmd_buf, history[history_index]);
-            cmd_len = strlen(cmd_buf);
-            cursor_pos = cmd_len;
-            term_print(cmd_buf);
-            term_draw_cursor(true);
-        } else if (history_index >= history_count - 1) {
-            history_index = history_count;
-            term_draw_cursor(false);
-            while (cmd_len > 0) {
-                term_putchar('\b');
-                cmd_len--;
-            }
-            cmd_buf[0] = '\0';
-            cmd_len = 0;
-            cursor_pos = 0;
-            term_draw_cursor(true);
-        }
-        return;
-    }
-
-    char c = get_ascii_char(scancode);
-    if (c == 0) return;
-
-    if (c == '\n') {
+    if (ev.code == KEY_ENTER) {
         term_draw_cursor(false);
         term_putchar('\n');
         cmd_buf[cmd_len] = '\0';
         
-        if (cmd_len > 0) {
-            if (history_count < MAX_HISTORY) {
-                strcpy(history[history_count++], cmd_buf);
-            } else {
-                for (int i = 0; i < MAX_HISTORY - 1; i++) {
-                    strcpy(history[i], history[i + 1]);
-                }
-                strcpy(history[MAX_HISTORY - 1], cmd_buf);
-            }
-            history_index = history_count;
-        }
-
         shell_execute(cmd_buf);
         cmd_len = 0;
         cursor_pos = 0;
         term_draw_cursor(true);
-    } else if (c == '\b') {
-        if (keyboard_ctrl_pressed()) {
+        return;
+    }
+
+    if (ev.code == KEY_TAB) {
+        term_handle_tab_completion();
+        return;
+    }
+
+    if (ev.code == KEY_BACKSPACE) {
+        if (cmd_len > 0) {
             term_draw_cursor(false);
-            while (cmd_len > 0 && cursor_pos > 0 && cmd_buf[cursor_pos - 1] == ' ') {
-                for (int i = cursor_pos - 1; i < cmd_len - 1; i++) cmd_buf[i] = cmd_buf[i + 1];
-                cmd_len--; cursor_pos--;
-                term_putchar('\b');
-            }
-            while (cmd_len > 0 && cursor_pos > 0 && cmd_buf[cursor_pos - 1] != ' ') {
-                for (int i = cursor_pos - 1; i < cmd_len - 1; i++) cmd_buf[i] = cmd_buf[i + 1];
-                cmd_len--; cursor_pos--;
-                term_putchar('\b');
-            }
-            term_draw_cursor(true);
-        } else {
-            if (cmd_len > 0 && cursor_pos > 0) {
-                term_draw_cursor(false);
-                for (int i = cursor_pos - 1; i < cmd_len - 1; i++) {
-                    cmd_buf[i] = cmd_buf[i + 1];
-                }
-                cmd_len--;
-                cursor_pos--;
-                term_putchar('\b');
-                term_draw_cursor(true);
-            }
-        }
-    } else {
-        if (cmd_len < CMD_BUF_SIZE - 1) {
-            term_draw_cursor(false);
-            for (int i = cmd_len; i > cursor_pos; i--) {
-                cmd_buf[i] = cmd_buf[i - 1];
-            }
-            cmd_buf[cursor_pos] = c;
-            cmd_len++;
-            cursor_pos++;
-            term_putchar(c);
+            cmd_len--;
+            term_putchar('\b');
             term_draw_cursor(true);
         }
+        return;
+    }
+
+    char c = input_code_to_ascii(ev.code);
+    if (c != 0 && cmd_len < CMD_BUF_SIZE - 1) {
+        term_draw_cursor(false);
+        cmd_buf[cmd_len++] = c;
+        term_putchar(c);
+        term_draw_cursor(true);
     }
 }

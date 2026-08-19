@@ -9,6 +9,7 @@
 #include "string.h"
 #include "../drivers/serial/serial.h"
 #include "../core/initcall.h"
+#include "ext2.h"
 
 typedef struct {
     block_device_t dev;
@@ -563,29 +564,41 @@ void fat32_init(void) {
 
     block_device_t nvme_dev = nvme_get_block_device();
 
-    serial_puts(COM1, "[FAT32] Scanning GPT partitions on NVMe...\n");
-    gpt_init_device(nvme_dev);
+    // Scan partitions via Unified Partition Scanner
+    disk_partition_scan_device(nvme_dev);
 
-    // Ensure /drives directory exists in VFS root
     vfs_node_t *drives_dir = vfs_finddir(vfs_root, "drives");
     if (!drives_dir) {
         drives_dir = ramfs_create_directory(vfs_root, "drives");
     }
 
-    int p_count = gpt_get_partition_count();
+    int p_count = disk_get_partition_count();
     for (int i = 0; i < p_count; i++) {
-        partition_info_t *part = gpt_get_partition(i);
-        if (part) {
-            vfs_node_t *fat_root = fat32_mount_partition(nvme_dev, part->start_lba, part->sector_count);
-            if (fat_root && drives_dir) {
-                vfs_node_t *disk_dir = ramfs_create_directory(drives_dir, "nvme0p1");
-                if (disk_dir) {
-                    disk_dir->flags |= FS_MOUNTPOINT;
-                    disk_dir->ptr = (vfs_node_t *)fat_root;
-                    serial_puts(COM1, "[FAT32 SUCCESS] Mounted FAT32 partition at '/drives/nvme0p1'\n");
-                    return;
-                }
+        partition_info_t *part = disk_get_partition(i);
+        if (!part) continue;
+
+        // Try mounting as FAT32
+        vfs_node_t *fat_root = fat32_mount_partition(nvme_dev, part->start_lba, part->sector_count);
+        if (fat_root && drives_dir) {
+            vfs_node_t *disk_dir = ramfs_create_directory(drives_dir, "fat32_nvme");
+            if (disk_dir) {
+                disk_dir->flags |= FS_MOUNTPOINT;
+                disk_dir->ptr = (vfs_node_t *)fat_root;
+                serial_puts(COM1, "[STORAGE] Mounted FAT32 partition at '/drives/fat32_nvme'\n");
             }
+            continue;
+        }
+
+        // Try mounting as EXT2
+        vfs_node_t *ext2_root = ext2_mount_partition(nvme_dev, part->start_lba);
+        if (ext2_root && drives_dir) {
+            vfs_node_t *ext2_dir = ramfs_create_directory(drives_dir, "ext2_nvme");
+            if (ext2_dir) {
+                ext2_dir->flags |= FS_MOUNTPOINT;
+                ext2_dir->ptr = (vfs_node_t *)ext2_root;
+                serial_puts(COM1, "[STORAGE] Mounted EXT2 partition at '/drives/ext2_nvme'\n");
+            }
+            continue;
         }
     }
 }

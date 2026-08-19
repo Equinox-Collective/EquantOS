@@ -5,7 +5,7 @@
 #include "vfs.h"
 #include "ramfs.h"
 #include "../drivers/serial/serial.h"
-#include "../drivers/keyboard/input.h"
+#include "../drivers/input.h"
 #include "../../equterm/term.h"
 #include "../core/initcall.h"
 

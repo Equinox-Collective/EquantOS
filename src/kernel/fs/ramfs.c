@@ -3,6 +3,11 @@
 #include "../core/mem/memory.h"
 #include "string.h"
 #include "stdio.h"
+#include "../core/initcall.h"
+#include "../../limine.h"
+#include "../drivers/serial/serial.h"
+
+extern volatile struct limine_module_request module_request;
 
 static int64_t ramfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     ramfs_file_data_t *fdata = (ramfs_file_data_t *)node->ptr;
@@ -153,3 +158,33 @@ vfs_node_t *ramfs_create_file(vfs_node_t *parent, const char *name, void *data, 
     }
     return file;
 }
+
+static int __init ramfs_populate_modules_initcall(void) {
+    if (!vfs_root) return 0;
+
+    vfs_node_t *sys_dir = vfs_finddir(vfs_root, "sys");
+    if (!sys_dir) {
+        sys_dir = ramfs_create_directory(vfs_root, "sys");
+    }
+    vfs_node_t *bin_dir = ramfs_create_directory(sys_dir, "bin");
+
+    if (module_request.response != NULL && module_request.response->module_count > 0) {
+        for (uint64_t i = 0; i < module_request.response->module_count; i++) {
+            struct limine_file *mod = module_request.response->modules[i];
+            const char *filename = strrchr(mod->path, '/');
+            filename = (filename != NULL) ? filename + 1 : mod->path;
+
+            // Register in Root '/' AND '/sys/bin/'
+            ramfs_create_file(vfs_root, filename, mod->address, mod->size);
+            if (bin_dir) {
+                ramfs_create_file(bin_dir, filename, mod->address, mod->size);
+            }
+
+            serial_puts(COM1, "[RAMFS] Module loaded to VFS: ");
+            serial_puts(COM1, filename);
+            serial_puts(COM1, "\n");
+        }
+    }
+    return 0;
+}
+fs_initcall(ramfs_populate_modules_initcall);
