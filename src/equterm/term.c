@@ -250,6 +250,7 @@ static char input_code_to_ascii(uint16_t code) {
         case KEY_L: return 'l'; case KEY_Z: return 'z'; case KEY_X: return 'x';
         case KEY_C: return 'c'; case KEY_V: return 'v'; case KEY_B: return 'b';
         case KEY_N: return 'n'; case KEY_M: return 'm'; case KEY_SPACE: return ' ';
+        case KEY_DOT: return '.'; case KEY_SLASH: return '/'; case KEY_COMMA: return ',';
         default: return 0;
     }
 }
