@@ -11,6 +11,7 @@ extern void keyboard_handler(void);
 extern void irq0_handler_asm(void);
 extern void irq_ignore_handler(void);
 extern void syscall_interrupt_asm(void);
+extern void page_fault_asm(void); // <-- Добавили объявление
 
 void set_idt_gate(int n, uint64_t handler, uint16_t sel) {
     idt[n].low_offset = (uint16_t)(handler & 0xFFFF);
@@ -30,15 +31,15 @@ void init_idt(void) {
 
     uint16_t sel = 0x08;
   
-    // 1. Set CPU Exceptions (Vectors 0..31) to panic stubs by default
+    // 1. Исключения CPU 0..31
     for (int i = 0; i < 32; i++) { 
         set_idt_gate(i, isr_stub_table[i], sel); 
     }
 
-    // 2. Register Special Page Fault Handler (#PF Vector 14)
-    set_idt_gate(14, (uint64_t)vmm_page_fault_handler, sel);
+    // 2. Регистрируем правильный АССЕМБЛЕРНЫЙ ШЛЮЗ для Page Fault (#PF Vector 14)
+    set_idt_gate(14, (uint64_t)page_fault_asm, sel); // <-- ВМЕСТО vmm_page_fault_handler
 
-    // 3. Route hardware IRQs (Vectors 32..255)
+    // 3. Аппаратные IRQ 32..255
     for (int i = 32; i < 256; i++) {
         set_idt_gate(i, (uint64_t)irq_ignore_handler, sel);
     }

@@ -30,14 +30,14 @@ static char esc_buf[16];
 static int esc_len = 0;
 
 static int get_glyph_width(void) {
-    if (kernel_psf2_font.loaded) {
+    if (kernel_psf2_font.loaded && kernel_psf2_font.hdr) {
         return (int)kernel_psf2_font.hdr->width;
     }
     return 8;
 }
 
 static int get_glyph_height(void) {
-    if (kernel_psf2_font.loaded) {
+    if (kernel_psf2_font.loaded && kernel_psf2_font.hdr) {
         return (int)kernel_psf2_font.hdr->height;
     }
     return 8;
@@ -195,7 +195,7 @@ void term_putchar_raw(char c) {
         term_advance_line();
     }
 
-    if (kernel_psf2_font.loaded) {
+    if (kernel_psf2_font.loaded && kernel_psf2_font.hdr) {
         int drawn_width = psf2_draw_char(&kernel_psf2_font, term_fb_address, 
                                          (int)term_width, (int)term_height, 
                                          (int)cursor_x, (int)cursor_y, 

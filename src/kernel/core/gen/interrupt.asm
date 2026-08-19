@@ -7,6 +7,7 @@
 [extern tasks]
 [extern syscall_handler]
 [extern linux_syscall_handler]
+[extern vmm_page_fault_handler]
 
 %macro SAVE_REGS 0
     push rax
@@ -294,6 +295,18 @@ syscall_entry_asm:
 
     db 0x48                     ; REX.W prefix for 64-bit sysretq
     sysret
+
+[global page_fault_asm]
+page_fault_asm:
+    push qword 14       ; Номер прерывания (Vector 14)
+    SAVE_REGS           ; Сохраняем все регистры RAX..R15 на стек
+    mov rdi, rsp        ; Передаем ЧЕСТНЫЙ указатель на cpu_state_t в RDI для C
+    sub rsp, 8          ; Выравниваем стек по 16 байт
+    call vmm_page_fault_handler
+    add rsp, 8
+    RESTORE_REGS        ; Восстанавливаем регистры
+    add rsp, 16         ; Сбрасываем номер прерывания и error_code от CPU
+    iretq
 
 section .data
 [global isr_stub_table]
