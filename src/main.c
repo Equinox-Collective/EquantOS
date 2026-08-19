@@ -14,10 +14,10 @@
 #include "kernel/core/initcall.h"
 
 __attribute__((used, section(".requests")))
-static volatile uint64_t base_revision[3] = LIMINE_BASE_REVISION(3);
+volatile uint64_t base_revision[3] = LIMINE_BASE_REVISION(3);
 
 __attribute__((used, section(".requests")))
-static volatile struct limine_framebuffer_request framebuffer_request = {
+volatile struct limine_framebuffer_request framebuffer_request = {
     .id = LIMINE_FRAMEBUFFER_REQUEST_ID,
     .revision = 0
 };
@@ -25,13 +25,13 @@ static volatile struct limine_framebuffer_request framebuffer_request = {
 uint64_t hhdm_offset = 0;
 
 __attribute__((used, section(".requests")))
-static volatile struct limine_hhdm_request hhdm_request = {
+volatile struct limine_hhdm_request hhdm_request = {
     .id = LIMINE_HHDM_REQUEST_ID,
     .revision = 0
 };
 
 __attribute__((used, section(".requests")))
-static volatile struct limine_module_request module_request = {
+volatile struct limine_module_request module_request = {
     .id = { 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b, 0x3e7e279702be32af, 0xca1c4f3bd1280cee },
     .revision = 0,
     .response = NULL
