@@ -92,34 +92,47 @@ bool elf_load(void *elf_data, uint64_t size) {
                 PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
 
-    // Инициализируем стек пользователя по спецификации System V AMD64 ABI для Musl CRT (_start)
+    // Подготавливаем полный стек System V AMD64 ABI с AUXV для Musl libc
     uint8_t *k_stack_top = (uint8_t *)VIRT((uint64_t)stack_phys + (stack_pages * PAGE_SIZE));
     
-    // Помещаем имя бинарника в самую верхушку стека
+    // 1. Помещаем 16 случайных байт для AT_RANDOM (нужны для канареек стека в Musl)
+    uint8_t *k_rand_ptr = k_stack_top - 16;
+    memset(k_rand_ptr, 0x42, 16);
+    uint64_t user_rand_vaddr = user_stack_top - 16;
+
+    // 2. Помещаем имя программы
     const char *prog_name = "/hello.elf";
     size_t prog_len = strlen(prog_name) + 1;
-    
-    uint8_t *k_str_ptr = k_stack_top - prog_len;
+    uint8_t *k_str_ptr = k_rand_ptr - prog_len;
     memcpy(k_str_ptr, prog_name, prog_len);
-    uint64_t user_str_vaddr = user_stack_top - prog_len;
+    uint64_t user_str_vaddr = user_rand_vaddr - prog_len;
 
-    // Выравниваем указатель стека по 16 байт
+    // 3. Выравниваем указатель стека по 16 байт
     uint64_t *k_sp = (uint64_t *)((uintptr_t)k_str_ptr & ~0xFULL);
 
-    // Формируем структуру аргументов на стеке:
-    // [AT_NULL] -> [envp = NULL] -> [argv[1] = NULL] -> [argv[0] = "/hello.elf"] -> [argc = 1]
-    *--k_sp = 0; // AUXV AT_NULL (2 qwords)
-    *--k_sp = 0;
-    *--k_sp = 0; // envp[0] = NULL
-    *--k_sp = 0; // argv[1] = NULL
-    *--k_sp = user_str_vaddr; // argv[0]
-    *--k_sp = 1; // argc = 1
+    // 4. Формируем Auxiliary Vector (AUXV) для Musl:
+    *--k_sp = 0;                   *--k_sp = 0;  // AT_NULL (0) - конец вектора
+    *--k_sp = user_rand_vaddr;     *--k_sp = 25; // AT_RANDOM (25)
+    *--k_sp = 0;                   *--k_sp = 23; // AT_SECURE (23)
+    *--k_sp = 0;                   *--k_sp = 14; // AT_EGID (14)
+    *--k_sp = 0;                   *--k_sp = 13; // AT_GID (13)
+    *--k_sp = 0;                   *--k_sp = 12; // AT_EUID (12)
+    *--k_sp = 0;                   *--k_sp = 11; // AT_UID (11)
+    *--k_sp = ehdr->e_entry;       *--k_sp = 9;  // AT_ENTRY (9)
+    *--k_sp = PAGE_SIZE;           *--k_sp = 6;  // AT_PAGESZ (6) = 4096
+    *--k_sp = ehdr->e_phnum;       *--k_sp = 5;  // AT_PHNUM (5)
+    *--k_sp = ehdr->e_phentsize;   *--k_sp = 4;  // AT_PHENT (4)
+    *--k_sp = 0x400000 + ehdr->e_phoff; *--k_sp = 3; // AT_PHDR (3) = Точный адрес PHDR в памяти!
 
-    // Вычисляем виртуальный адрес RSP для процесса
+    // 5. Передаем envp, argv и argc
+    *--k_sp = 0;              // envp[0] = NULL
+    *--k_sp = 0;              // argv[1] = NULL
+    *--k_sp = user_str_vaddr; // argv[0] = "/hello.elf"
+    *--k_sp = 1;              // argc = 1
+
     uint64_t initial_user_rsp = user_stack_top - (uint64_t)(k_stack_top - (uint8_t *)k_sp);
 
-    printf("DEBUG [6/7]: System V ABI stack initialized. User RSP: %x\n", initial_user_rsp);
-
+    printf("DEBUG [6/7]: Complete System V AUXV Stack initialized. User RSP: %x\n", initial_user_rsp);
     // 4. Create process and task structures
     process_t *proc = (process_t *)kmalloc(sizeof(process_t));
     if (!proc) {

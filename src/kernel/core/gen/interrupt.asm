@@ -229,27 +229,35 @@ linux_syscall_interrupt_asm:
     pop r15
     iretq
 
+[global page_fault_asm]
+page_fault_asm:
+    push qword 14       ; Номер прерывания (Vector 14)
+    SAVE_REGS           ; Сохраняем все регистры RAX..R15 на стек
+    mov rdi, rsp        ; Передаем ЧЕСТНЫЙ указатель на cpu_state_t в RDI для C
+    sub rsp, 8          ; Выравниваем стек по 16 байт
+    call vmm_page_fault_handler
+    add rsp, 8
+    RESTORE_REGS        ; Восстанавливаем регистры
+    add rsp, 16         ; Сбрасываем номер прерывания и error_code от CPU
+    iretq
+
 [global syscall_entry_asm]
 syscall_entry_asm:
-    ; Swap GS to CPU-Local Storage (Preparing for Per-CPU architecture)
-    ; RCX contains User RIP, R11 contains User RFLAGS saved by CPU during 'syscall'
-    
-    ; Temporarily save User RSP onto User Stack or Scratch Area safely
-    ; We push user RSP to kernel stack AFTER swapping to Kernel RSP
-    mov r12, rsp                ; R12 is saved-by-callee register in System V ABI
-    
-    ; Load Kernel Stack from current_task structure safely
+    ; 1. Сохраняем User RSP во временную переменную в BSS, НЕ ТРОГАЯ регистры R12-R15!
+    mov [rel user_rsp_temp], rsp
+
+    ; 2. Переключаемся на стек ядра из структуры current_task
     mov rsp, [rel current_task]
-    mov rsp, [rsp + 8]          ; Fetch kstack_at_bottom offset (8)
+    mov rsp, [rsp + 8]          ; Смещение kstack_at_bottom (8)
 
-    ; Push standard interrupt frame on Kernel Stack
-    push qword 0x23             ; User SS Selector
-    push r12                    ; User RSP
-    push r11                    ; User RFLAGS
-    push qword 0x1B             ; User CS Selector
-    push rcx                    ; User RIP
+    ; 3. Формируем фрейм прерывания на стеке ядра
+    push qword 0x23             ; Селектор User SS
+    push qword [rel user_rsp_temp] ; User RSP (сохранен без порчи R12!)
+    push r11                    ; User RFLAGS (сохранен процессором в R11)
+    push qword 0x1B             ; Селектор User CS
+    push rcx                    ; User RIP (сохранен процессором в RCX)
 
-    ; Save general purpose registers
+    ; 4. Сохраняем ВСЕ регистры общего назначения (от RAX до R15)
     push rax
     push rbx
     push rcx
@@ -261,20 +269,22 @@ syscall_entry_asm:
     push r9
     push r10
     push r11
-    push r12
+    push r12                    ; Сохраняет ОРИГИНАЛЬНЫЙ R12 юзерленда!
     push r13
     push r14
     push r15
 
-    mov rdi, rsp                ; Pass stack frame pointer as arg1 to syscall_handler
-    sub rsp, 8                  ; Align RSP to 16-byte boundary for System V ABI
+    ; 5. Передаем указатель на регистры (RSP) в C-обработчик
+    mov rdi, rsp
+    sub rsp, 8                  ; Выравнивание RSP по 16 байт для System V ABI
     call syscall_handler
     add rsp, 8
 
+    ; 6. Восстанавливаем ВСЕ регистры общего назначения
     pop r15
     pop r14
     pop r13
-    pop r12
+    pop r12                     ; Восстанавливает ОРИГИНАЛЬНЫЙ R12 юзерленда!
     pop r11
     pop r10
     pop r9
@@ -287,26 +297,17 @@ syscall_entry_asm:
     pop rbx
     pop rax
 
-    ; Restore stack & register frame for sysretq
-    pop rcx                     ; Restore User RIP for sysret
-    add rsp, 8                  ; Skip CS selector
-    pop r11                     ; Restore User RFLAGS
-    pop rsp                     ; Directly restore User RSP from Kernel Stack!
+    ; 7. Восстанавливаем User RIP, RFLAGS и User RSP для инструкции sysret
+    pop rcx                     ; User RIP для sysret
+    add rsp, 8                  ; Пропускаем User CS
+    pop r11                     ; User RFLAGS
+    pop rsp                     ; Восстанавливаем User RSP
 
-    db 0x48                     ; REX.W prefix for 64-bit sysretq
+    db 0x48                     ; REX.W префикс для 64-битного sysretq
     sysret
 
-[global page_fault_asm]
-page_fault_asm:
-    push qword 14       ; Номер прерывания (Vector 14)
-    SAVE_REGS           ; Сохраняем все регистры RAX..R15 на стек
-    mov rdi, rsp        ; Передаем ЧЕСТНЫЙ указатель на cpu_state_t в RDI для C
-    sub rsp, 8          ; Выравниваем стек по 16 байт
-    call vmm_page_fault_handler
-    add rsp, 8
-    RESTORE_REGS        ; Восстанавливаем регистры
-    add rsp, 16         ; Сбрасываем номер прерывания и error_code от CPU
-    iretq
+section .bss
+user_rsp_temp: resq 1
 
 section .data
 [global isr_stub_table]

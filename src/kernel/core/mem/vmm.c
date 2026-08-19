@@ -4,7 +4,7 @@
 #include "pmm.h"
 #include "../panic.h"
 #include "stdio.h"
-#include "cpu.h"
+#include "../gen/cpu.h"
 #include "../../drivers/serial/serial.h"
 
 static page_table_t *kernel_pml4;
