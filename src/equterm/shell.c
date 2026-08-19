@@ -10,6 +10,8 @@
 #include "../kernel/core/mem/memory.h"
 #include "../kernel/drivers/pci/pci.h"
 #include "../kernel/misc/power.h"
+#include "../kernel/proc/loader.h"
+#include "../kernel/proc/sched.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -621,12 +623,20 @@ static void cmd_run(int argc, char **argv) {
     term_print(resolved);
     term_print("\n");
 
+    last_spawned_task = NULL;
+
     if (elf_load(elf_buf, file->length)) {
-        term_print("Process spawned successfully!\n");
+        // СИНХРОННОЕ ОЖИДАНИЕ: Шелл передает кванты времени и ждет, пока процесс станет ZOMBIE
+        while (last_spawned_task && last_spawned_task->state != TASK_STATE_ZOMBIE) {
+            sched_yield();
+        }
+
+        term_print("\nProcess execution finished.\n");
     } else {
         term_print("run: ELF load failed\n");
-        kfree(elf_buf);
     }
+
+    kfree(elf_buf);
 }
 
 static void cmd_cp(int argc, char **argv) {

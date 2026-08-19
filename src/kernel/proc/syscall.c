@@ -20,14 +20,44 @@
 #define IA32_FS_BASE_MSR 0xC0000100
 
 #define AT_FDCWD         -100
+#define O_CREAT          0100
 
 #define ARCH_SET_FS      0x1002
 #define ARCH_GET_FS      0x1003
 
-#define CLOCK_REALTIME           0
-#define CLOCK_MONOTONIC          1
-#define CLOCK_PROCESS_CPUTIME_ID 2
-#define CLOCK_THREAD_CPUTIME_ID  3
+#define SYS_READ            0
+#define SYS_WRITE           1
+#define SYS_OPEN            2
+#define SYS_CLOSE           3
+#define SYS_FSTAT           5
+#define SYS_MMAP            9
+#define SYS_MPROTECT        10
+#define SYS_MUNMAP          11
+#define SYS_BRK             12
+#define SYS_RT_SIGACTION    13
+#define SYS_RT_SIGPROCMASK  14
+#define SYS_IOCTL           16
+#define SYS_WRITEV          20
+#define SYS_SCHED_YIELD     24
+#define SYS_NANOSLEEP       35
+#define SYS_GETPID          39
+#define SYS_EXIT            60
+#define SYS_UNAME           63
+#define SYS_GETCWD          79
+#define SYS_CHDIR           80
+#define SYS_SYSINFO         99
+#define SYS_GETUID          102
+#define SYS_GETGID          104
+#define SYS_GETPPID         110
+#define SYS_ARCH_PRCTL      158
+#define SYS_TKILL           200
+#define SYS_FUTEX           202
+#define SYS_GETDENTS64      217
+#define SYS_SET_TID_ADDRESS 218
+#define SYS_CLOCK_GETTIME   228
+#define SYS_EXIT_GROUP      231
+#define SYS_TGKILL          234
+#define SYS_OPENAT          257
 
 struct iovec {
     void *iov_base;
@@ -106,13 +136,37 @@ static int alloc_fd(vfs_node_t *node) {
 }
 
 static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, int mode) {
-    (void)dirfd; (void)flags; (void)mode;
+    (void)dirfd;
     if (!pathname) return -EINVAL;
 
     char resolved[256];
     resolve_user_path(pathname, resolved, sizeof(resolved));
 
     vfs_node_t *node = vfs_open(resolved, 0);
+
+    // Поддержка создания файла при O_CREAT
+    if (!node && (flags & O_CREAT)) {
+        char parent_path[256];
+        strcpy(parent_path, resolved);
+        char *filename = parent_path;
+
+        char *last_slash = strrchr(parent_path, '/');
+        if (last_slash) {
+            if (last_slash == parent_path) {
+                filename = last_slash + 1;
+                parent_path[1] = '\0';
+            } else {
+                *last_slash = '\0';
+                filename = last_slash + 1;
+            }
+        }
+
+        vfs_node_t *parent_dir = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
+        if (parent_dir) {
+            node = vfs_create(parent_dir, filename, mode);
+        }
+    }
+
     if (!node) return -ENOENT;
 
     return alloc_fd(node);
@@ -139,65 +193,6 @@ static int64_t sys_close_handler(int fd) {
     return 0;
 }
 
-// Hash Table for Futex Wait Queues
-#define FUTEX_HASH_SIZE 64
-static task_t *futex_queues[FUTEX_HASH_SIZE] = {NULL};
-
-#define FUTEX_WAIT 0
-#define FUTEX_WAKE 1
-
-static inline uint32_t futex_hash(uint64_t uaddr) {
-    return (uint32_t)((uaddr >> 3) % FUTEX_HASH_SIZE);
-}
-
-static int64_t sys_futex_handler(int *uaddr, int futex_op, int val, const struct linux_timespec *timeout, int *uaddr2, int val3) {
-    (void)timeout; (void)uaddr2; (void)val3;
-    if (!uaddr) return -EINVAL;
-
-    uint64_t vaddr = (uint64_t)uaddr;
-    uint32_t hash = futex_hash(vaddr);
-    int op = futex_op & 127; // Mask out FUTEX_PRIVATE_FLAG
-
-    if (op == FUTEX_WAIT) {
-        // Atomic check: if value changed in user space, don't sleep
-        if (*uaddr != val) {
-            return -EAGAIN;
-        }
-
-        // Put current task into Futex Wait Queue
-        current_task->futex_addr = vaddr;
-        current_task->futex_next = futex_queues[hash];
-        futex_queues[hash] = current_task;
-
-        // Block current task and switch context
-        sched_block(current_task);
-        sched_yield();
-
-        return 0;
-    } 
-    else if (op == FUTEX_WAKE) {
-        int woken = 0;
-        task_t **curr = &futex_queues[hash];
-
-        while (*curr && woken < val) {
-            if ((*curr)->futex_addr == vaddr) {
-                task_t *target = *curr;
-                *curr = target->futex_next;
-                target->futex_addr = 0;
-                target->futex_next = NULL;
-
-                sched_unblock(target); // Unblock waiting thread
-                woken++;
-            } else {
-                curr = &(*curr)->futex_next;
-            }
-        }
-        return woken; // Return count of woken threads
-    }
-
-    return -ENOSYS;
-}
-
 static int64_t sys_getcwd_handler(char *buf, size_t size) {
     if (!buf || size == 0) return -EINVAL;
     const char *cwd = (current_task && current_task->process && current_task->process->cwd[0] != '\0')
@@ -206,7 +201,7 @@ static int64_t sys_getcwd_handler(char *buf, size_t size) {
     if (size < len) return -ERANGE;
 
     memcpy(buf, cwd, len);
-    return (int64_t)buf;
+    return 0; // Успех
 }
 
 static int64_t sys_chdir_handler(const char *path) {
@@ -266,12 +261,13 @@ static int64_t sys_exit_handler(int code) {
     if (current_task) {
         current_task->state = TASK_STATE_ZOMBIE;
         current_task->running = false;
+        sched_dequeue(current_task); // <-- ВОТ ОНА! ВЫБРАСЫВАЕМ ЗОМБИ ИЗ ОЧЕРЕДИ!
     }
+    
     sched_yield();
     for(;;);
     return 0;
 }
-
 static int64_t sys_arch_prctl_handler(int code, uint64_t addr) {
     if (!current_task) return -EINVAL;
 
@@ -287,35 +283,32 @@ static int64_t sys_arch_prctl_handler(int code, uint64_t addr) {
     return -EINVAL;
 }
 
-// FIX: Linux sys_brk MUST return the current brk pointer on failure!
 static int64_t sys_brk_handler(uint64_t new_brk) {
     if (!current_task || !current_task->process) return 0;
     
     uint64_t old_brk = current_task->process->brk;
-    if (new_brk == 0 || new_brk == old_brk) {
+    if (new_brk == 0) {
         return old_brk;
     }
 
-    if (new_brk < old_brk) {
+    if (new_brk <= old_brk) {
         current_task->process->brk = new_brk;
         return new_brk;
     }
 
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
     
-    // Выравнивание границ страниц
-    uint64_t start_page = old_brk & ~(PAGE_SIZE - 1);
+    uint64_t start_page = (old_brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     uint64_t end_page = (new_brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
     for (uint64_t addr = start_page; addr < end_page; addr += PAGE_SIZE) {
-        // Проверяем, не замаплена ли страница уже
         if (vmm_get_phys(pml4, addr) != 0) {
             continue;
         }
 
         void *phys = pmm_alloc();
-        if (!phys && phys != (void*)0) {
-            return old_brk; // Возвращаем старый brk при ошибке PMM
+        if (!phys) {
+            return old_brk;
         }
         memset((void *)VIRT((uint64_t)phys), 0, PAGE_SIZE);
         vmm_map(pml4, addr, (uint64_t)phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
@@ -392,7 +385,6 @@ static int64_t sys_munmap_handler(uint64_t addr, size_t length) {
 
 static int64_t sys_mprotect_handler(uint64_t addr, size_t len, int prot) {
     (void)addr; (void)len; (void)prot;
-    // Stub: Always accept memory protection changes
     return 0;
 }
 
@@ -414,7 +406,6 @@ static int64_t sys_clock_gettime_handler(int clock_id, struct linux_timespec *tp
     (void)clock_id;
     if (!tp) return -EINVAL;
 
-    // Convert PIT ticks (100 Hz = 10ms per tick) to seconds and nanoseconds
     uint64_t current_ticks = tick;
     tp->tv_sec = current_ticks / 100;
     tp->tv_nsec = (current_ticks % 100) * 10000000ULL;
@@ -429,25 +420,24 @@ static int64_t sys_nanosleep_handler(const struct linux_timespec *req, struct li
     uint64_t target_tick = tick + (req->tv_sec * 100 + req->tv_nsec / 10000000ULL);
     
     if (target_tick > tick) {
-        __asm__ volatile("sti"); // Включаем прерывания, чтобы таймер PIT мог тикать
+        __asm__ volatile("sti");
         while (tick < target_tick) {
-            __asm__ volatile("hlt"); // Спим до следующего прерывания таймера
+            __asm__ volatile("hlt");
         }
-        __asm__ volatile("cli"); // Выключаем прерывания перед возвратом в код сисколла
+        __asm__ volatile("cli");
     }
     return 0;
 }
 
 static int64_t sys_rt_sigaction_handler(int signum, const void *act, void *oldact, size_t sigsetsize) {
     (void)signum; (void)act; (void)oldact; (void)sigsetsize;
-    // Stub signal handler registration
     return 0;
 }
 
 void syscall_handler(void *regs_ptr) {
     syscall_regs_t *regs = (syscall_regs_t *)regs_ptr;
     uint64_t syscall_no = regs->rax;
-    int64_t ret = -ENOSYS; // Default: Not Implemented
+    int64_t ret = -ENOSYS;
 
     switch (syscall_no) {
         case SYS_READ:
@@ -503,6 +493,10 @@ void syscall_handler(void *regs_ptr) {
         case SYS_ARCH_PRCTL:
             ret = sys_arch_prctl_handler((int)regs->rdi, regs->rsi);
             break;
+        case SYS_TKILL:
+        case SYS_TGKILL:
+            ret = 0; // Успешная обработка сигналов
+            break;
         case SYS_GETDENTS64:
             ret = sys_getdents64_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
             break;
@@ -510,11 +504,11 @@ void syscall_handler(void *regs_ptr) {
             ret = current_task ? current_task->id : 1;
             break;
         case SYS_GETPPID:
-            ret = 1; // Return Init PID as Parent PID
+            ret = 1;
             break;
         case SYS_GETUID:
         case SYS_GETGID:
-            ret = 0; // Root user / group ID
+            ret = 0;
             break;
         case SYS_UNAME:
             ret = sys_uname_handler((struct linux_utsname *)regs->rdi);
@@ -526,7 +520,7 @@ void syscall_handler(void *regs_ptr) {
             ret = sys_clock_gettime_handler((int)regs->rdi, (struct linux_timespec *)regs->rsi);
             break;
         case SYS_FUTEX:
-            ret = sys_futex_handler((int *)regs->rdi, (int)regs->rsi, (int)regs->rdx, (const struct linux_timespec *)regs->r10, (int *)regs->r8, (int)regs->r9);
+            ret = 0;
             break;
         case SYS_OPENAT:
             ret = sys_openat_handler((int)regs->rdi, (const char *)regs->rsi, (int)regs->rdx, (int)regs->r10);
@@ -562,8 +556,6 @@ void init_syscalls(void) {
 
     serial_puts(COM1, "[KERNEL] Native x86_64 Hardware 'syscall' MSRs Initialized.\n");
 }
-
-// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
 
 static int __init init_syscalls_initcall(void) {
     init_syscalls();

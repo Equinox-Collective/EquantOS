@@ -7,6 +7,8 @@
 #include "string.h"
 #include "stdio.h"
 
+task_t *last_spawned_task = NULL;
+
 extern uint64_t hhdm_offset;
 #define VIRT(addr) ((uint64_t)(addr) + hhdm_offset)
 #define PHYS(addr) ((uint64_t)(addr) - hhdm_offset)
@@ -177,8 +179,8 @@ bool elf_load(void *elf_data, uint64_t size) {
     task->rsp = (uint64_t)stack;
 
     printf("DEBUG [7/7]: Task structure fully ready. Enqueueing to scheduler...\n");
+    last_spawned_task = task; // Сохраняем запущенный процесс
     sched_enqueue(task);
     printf("ELF Loader: Task successfully enqueued. Returning true.\n");
-
     return true;
 }
