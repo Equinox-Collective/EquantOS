@@ -578,15 +578,27 @@ static void cmd_run(int argc, char **argv) {
     resolve_path(argv[1], resolved, sizeof(resolved));
 
     vfs_node_t *file = vfs_open(resolved, 0);
+
+    // Fallback: Check System Binary PATH (/sys/bin/)
     if (!file) {
-        term_print("run: file not found: ");
-        term_print(resolved);
+        char path_buf[256];
+        strcpy(path_buf, "/sys/bin/");
+        strcat(path_buf, argv[1]);
+        file = vfs_open(path_buf, 0);
+        if (file) {
+            strcpy(resolved, path_buf);
+        }
+    }
+
+    if (!file) {
+        term_print("run: executable not found in current directory or /sys/bin/: ");
+        term_print(argv[1]);
         term_print("\n");
         return;
     }
 
     if (file->flags & FS_DIRECTORY) {
-        term_print("run: is a directory: ");
+        term_print("run: path is a directory: ");
         term_print(resolved);
         term_print("\n");
         return;
@@ -594,7 +606,7 @@ static void cmd_run(int argc, char **argv) {
 
     uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
     if (!elf_buf) {
-        term_print("run: out of memory for loading file\n");
+        term_print("run: out of memory for loading binary\n");
         return;
     }
 
@@ -605,7 +617,7 @@ static void cmd_run(int argc, char **argv) {
         return;
     }
 
-    term_print("Spawning process from VFS: ");
+    term_print("Spawning process: ");
     term_print(resolved);
     term_print("\n");
 

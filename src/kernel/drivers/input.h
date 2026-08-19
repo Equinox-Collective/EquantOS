@@ -62,6 +62,9 @@
 #define KEY_B          48
 #define KEY_N          49
 #define KEY_M          50
+#define KEY_COMMA      51
+#define KEY_DOT        52
+#define KEY_SLASH      53
 #define KEY_SPACE      57
 #define KEY_CAPSLOCK   58
 
