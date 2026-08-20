@@ -30,6 +30,12 @@
 #include <string.h>
 #include <unistd.h>
 
+// Перенесли макрос ПОСЛЕ системных заголовков
+#if defined(_WIN32) || defined(__WIN32__) || defined(__MINGW32__)
+#include <direct.h>
+#define mkdir(path, mode) _mkdir(path)
+#endif
+
 #define ERROR_EXIT(strExit)						\
     {									\
 	const int errnoSave = errno;					\
@@ -38,8 +44,6 @@
 	perror((strExit));						\
 	exit(1);							\
     }
-
-
 
 int main(int argc, const char * argv [])
 {
@@ -168,27 +172,9 @@ int main(int argc, const char * argv [])
 	*(ptarget-1) = '\n';
     }
 
-    /*
-     * Close autoconfig file.
-     * Terminate the target list.
-     */
     if (fclose(fp_config) != 0)
 	ERROR_EXIT(str_file_autoconf);
     *ptarget = '\0';
-
-    /*
-     * Fix up existing files which have no new value.
-     * This is Case 4 and Case 5.
-     *
-     * I re-read the tree and filter it against list_target.
-     * This is crude.  But it avoids data copies.  Also, list_target
-     * is compact and contiguous, so it easily fits into cache.
-     *
-     * Notice that list_target contains strings separated by \n,
-     * with a \n before the first string and after the last.
-     * fgets gives the incoming names a terminating \n.
-     * So by having an initial \n, strstr will find exact matches.
-     */
 
     fp_find = popen("find * -type f -name \"*.h\" -print", "r");
     if (fp_find == 0)
@@ -199,18 +185,11 @@ int main(int argc, const char * argv [])
     {
 	if (strstr(list_target, line) == NULL)
 	{
-	    /*
-	     * This is an old file with no CONFIG_* flag in autoconf.h.
-	     */
-
-	    /* First strip the \n. */
 	    line[strlen(line)-1] = '\0';
 
-	    /* Grab size. */
 	    if (stat(line+1, &stat_buf) != 0)
 		ERROR_EXIT(line);
 
-	    /* If file is not empty, make it empty and give it a fresh date. */
 	    if (stat_buf.st_size != 0)
 	    {
 		if ((fp_target = fopen(line+1, "w")) == NULL)

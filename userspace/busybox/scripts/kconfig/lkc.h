@@ -8,12 +8,21 @@
 
 #include "expr.h"
 
-#ifndef KBUILD_NO_NLS
+#if defined(_WIN32) || defined(__WIN32__) || defined(__MINGW32__)
+# undef ENABLE_NLS
+# define random() rand()
+# define srandom(x) srand(x)
+#endif
+
+#ifdef ENABLE_NLS
 # include <libintl.h>
 #else
 # define gettext(Msgid) ((const char *) (Msgid))
-# define textdomain(Domainname) ((const char *) (Domainname))
-# define bindtextdomain(Domainname, Dirname) ((const char *) (Dirname))
+# define dgettext(Domain, Msgid) ((const char *) (Msgid))
+# define ngettext(Msgid1, Msgid2, N) \
+    ((N) == 1 ? (const char *) (Msgid1) : (const char *) (Msgid2))
+# define bindtextdomain(Domain, Directory) (Domain)
+# define textdomain(Domain) (Domain)
 #endif
 
 #ifdef __cplusplus

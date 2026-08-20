@@ -12,8 +12,13 @@
 /* On Darwin, this may be needed to get SIGWINCH: */
 #define _DARWIN_C_SOURCE 1
 
+#if defined(_WIN32) || defined(__WIN32__) || defined(__MINGW32__)
+#include <windows.h>
+#else
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <termios.h>
+#endif
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -23,7 +28,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h> /* for strcasecmp */
-#include <termios.h>
 #include <unistd.h>
 #include <locale.h>
 
