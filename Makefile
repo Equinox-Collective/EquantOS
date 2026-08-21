@@ -101,6 +101,10 @@ build/iso/hello.elf: userspace/hello.c
 		sdk/sysroot/lib/crtn.o \
 		-Ttext-segment 0x400000 -o build/iso/hello.elf
 
+build/iso/busybox.elf: res/busybox.elf
+	@$(call MKDIR,build/iso)
+	@$(call CP,res/busybox.elf,build/iso/busybox.elf)
+
 build/iso/musltest.elf: userspace/musltest.c
 	@$(call MKDIR,build/obj/userspace)
 	@$(call MKDIR,build/iso)
@@ -133,7 +137,7 @@ limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
 	@echo [BUILD] Limine binaries ready.
 
 # Build Hybrid ISO image
-build/equantos.iso: build/kernel.elf build/iso/hello.elf build/iso/musltest.elf build/iso/font.psf limine.conf limine-bios-cd.bin limine-uefi-cd.bin
+build/equantos.iso: build/kernel.elf build/iso/hello.elf build/iso/musltest.elf build/iso/busybox.elf build/iso/font.psf limine.conf limine-bios-cd.bin limine-uefi-cd.bin
 	@echo [BUILD] Preparing ISO root structure...
 	@$(call MKDIR,build/iso/boot)
 	@$(call MKDIR,build/iso/EFI/BOOT)

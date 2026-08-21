@@ -23,3 +23,11 @@ typedef struct __user_cap_data_struct {
 #define CAP_SYS_ADMIN       21
 
 #endif
+
+#ifndef _LINUX_CAPABILITY_U32S_3
+#define _LINUX_CAPABILITY_U32S_1 1
+#define _LINUX_CAPABILITY_U32S_2 2
+#define _LINUX_CAPABILITY_U32S_3 2
+#define CAP_LAST_CAP 40
+#define cap_valid(x) ((unsigned)(x) <= CAP_LAST_CAP)
+#endif

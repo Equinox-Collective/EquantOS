@@ -40,15 +40,18 @@
 #define SYS_SYSINFO         99
 #define SYS_GETUID          102
 #define SYS_GETGID          104
+#define SYS_GETEUID         107
+#define SYS_GETEGID         108
 #define SYS_GETPPID         110
 #define SYS_ARCH_PRCTL      158
+#define SYS_TKILL           200
 #define SYS_FUTEX           202
 #define SYS_GETDENTS64      217
 #define SYS_SET_TID_ADDRESS 218
 #define SYS_CLOCK_GETTIME   228
 #define SYS_EXIT_GROUP      231
+#define SYS_TGKILL          234
 #define SYS_OPENAT          257
-
 
 typedef struct {
     uint64_t total_ram;

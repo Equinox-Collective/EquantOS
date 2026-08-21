@@ -25,40 +25,6 @@
 #define ARCH_SET_FS      0x1002
 #define ARCH_GET_FS      0x1003
 
-#define SYS_READ            0
-#define SYS_WRITE           1
-#define SYS_OPEN            2
-#define SYS_CLOSE           3
-#define SYS_FSTAT           5
-#define SYS_MMAP            9
-#define SYS_MPROTECT        10
-#define SYS_MUNMAP          11
-#define SYS_BRK             12
-#define SYS_RT_SIGACTION    13
-#define SYS_RT_SIGPROCMASK  14
-#define SYS_IOCTL           16
-#define SYS_WRITEV          20
-#define SYS_SCHED_YIELD     24
-#define SYS_NANOSLEEP       35
-#define SYS_GETPID          39
-#define SYS_EXIT            60
-#define SYS_UNAME           63
-#define SYS_GETCWD          79
-#define SYS_CHDIR           80
-#define SYS_SYSINFO         99
-#define SYS_GETUID          102
-#define SYS_GETGID          104
-#define SYS_GETPPID         110
-#define SYS_ARCH_PRCTL      158
-#define SYS_TKILL           200
-#define SYS_FUTEX           202
-#define SYS_GETDENTS64      217
-#define SYS_SET_TID_ADDRESS 218
-#define SYS_CLOCK_GETTIME   228
-#define SYS_EXIT_GROUP      231
-#define SYS_TGKILL          234
-#define SYS_OPENAT          257
-
 struct iovec {
     void *iov_base;
     size_t iov_len;
@@ -457,6 +423,10 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_GETCWD:
             ret = sys_getcwd_handler((char *)regs->rdi, (size_t)regs->rsi);
+            break;
+        case SYS_GETEUID:
+        case SYS_GETEGID:
+            ret = 0; // Возвращаем 0 (UID 0 = ROOT!)
             break;
         case SYS_CHDIR:
             ret = sys_chdir_handler((const char *)regs->rdi);
