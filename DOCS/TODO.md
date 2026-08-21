@@ -1,3 +1,5 @@
+# TODO:
+
 ~~Make OS even boot ; Serial Logs~~
 ~~Panic handler~~
 ~~Keyboard (PS/2) + Basic TERM commands in other file so it wont mess up the code of the terminal itself~~
@@ -12,9 +14,11 @@
 ~~NVME, GPT~~
 ~~+ Run on your real OS~~
 ~~Musl/mlibc, LABI (POSIX syscalls)~~
-Busybox / Bash <
-USB
+~~Busybox / Bash~~
+USB <
 Installer
+
+# ENTERING THE LONG TERM ZONE (OS DONE AS USABLE)
 
 Long Term:
 GPU (Through LinuxKPI)
