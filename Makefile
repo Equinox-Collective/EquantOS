@@ -26,6 +26,7 @@ LDFLAGS  := -nostdlib -static -z max-page-size=0x1000 -T src/linker.ld
 # QEMU Flags
 QEMU      := qemu-system-x86_64
 QEMUFLAGS := -boot d \
+             -device qemu-xhci,id=xhci \
              -drive file=disk_gpt_ext2.img,format=raw,if=none,id=nvme0 \
              -device nvme,drive=nvme0,serial=deadbeef \
              -drive file=disk_mbr_fat32.img,format=raw,if=none,id=fat0 \

@@ -1,25 +1,27 @@
-// src/kernel/core/initcall.h
+// src/kernel/core/initcall.h - Kernel Subsystem Initcall Levels
 #ifndef INITCALL_H
 #define INITCALL_H
 
 #include <stdint.h>
-#include <stdbool.h>
 
 typedef int (*initcall_t)(void);
 
-#define __init __attribute__((section(".init.text")))
-#define __initdata __attribute__((section(".init.data")))
-
-#define define_initcall(fn, id) \
+#define __define_initcall(fn, id) \
     static initcall_t __initcall_##fn##_id __attribute__((used, section(".initcall" #id ".init"))) = fn
 
-// Initcall levels corresponding to kernel boot stages
-#define early_initcall(fn)      define_initcall(fn, 1)
-#define arch_initcall(fn)       define_initcall(fn, 2)
-#define subsys_initcall(fn)     define_initcall(fn, 3)
-#define fs_initcall(fn)         define_initcall(fn, 4)
-#define device_initcall(fn)     define_initcall(fn, 5)
-#define late_initcall(fn)       define_initcall(fn, 6)
+// Standard Linux-style Initcall Levels
+#define pure_initcall(fn)       __define_initcall(fn, 1)
+#define core_initcall(fn)       __define_initcall(fn, 2)
+#define arch_initcall(fn)       __define_initcall(fn, 3)
+#define subsys_initcall(fn)     __define_initcall(fn, 4)
+#define fs_initcall(fn)         __define_initcall(fn, 5)
+#define device_initcall(fn)     __define_initcall(fn, 6)
+
+// Dedicated Initcall for USB Drivers & Stack (Executes after PCI & Storage)
+#define usb_initcall(fn)        __define_initcall(fn, 6)
+
+#define late_initcall(fn)       __define_initcall(fn, 7)
+#define module_initcall(fn)     __define_initcall(fn, 7)
 
 void do_initcalls(void);
 
