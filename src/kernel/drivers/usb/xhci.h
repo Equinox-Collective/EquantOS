@@ -1,4 +1,4 @@
-// src/kernel/drivers/usb/xhci.h - USB 3.0 xHCI Controller Specification
+// src/kernel/drivers/usb/xhci.h - Extended xHCI Specification with Doorbells & Contexts
 #ifndef XHCI_H
 #define XHCI_H
 
@@ -18,8 +18,20 @@
 #define TRB_TYPE_DISABLE_SLOT     10
 #define TRB_TYPE_ADDRESS_DEVICE   11
 #define TRB_TYPE_CONFIG_ENDPOINT  12
-#define TRB_TYPE_CMD_COMPLETION   32
+#define TRB_TYPE_TRANSFER_EVENT   32
+#define TRB_TYPE_CMD_COMPLETION   33
 #define TRB_TYPE_PORT_STATUS_CHG  34
+
+// PORTSC Register Bits
+#define PORTSC_CCS        (1U << 0)  // Current Connect Status
+#define PORTSC_PED        (1U << 1)  // Port Enabled/Disabled
+#define PORTSC_OCA        (1U << 3)  // Over-Current Active
+#define PORTSC_PR         (1U << 4)  // Port Reset
+#define PORTSC_PLS_MASK   (0x0FU << 5)
+#define PORTSC_PP         (1U << 9)  // Port Power
+#define PORTSC_SPEED_MASK (0x0FU << 10)
+#define PORTSC_CSC        (1U << 17) // Connect Status Change
+#define PORTSC_PRC        (1U << 21) // Port Reset Change
 
 // xHCI Transfer Request Block (16 Bytes)
 typedef struct {
@@ -35,6 +47,14 @@ typedef struct {
     uint16_t reserved0;
     uint32_t reserved1;
 } __attribute__((packed)) xhci_erst_entry_t;
+
+// Port Registers Structure
+typedef struct {
+    uint32_t portsc;
+    uint32_t portpmsc;
+    uint32_t portli;
+    uint32_t portlpm;
+} __attribute__((packed)) xhci_port_regs_t;
 
 // Capability Registers (Read-Only)
 typedef struct {
@@ -79,12 +99,31 @@ typedef struct {
     xhci_interrupter_regs_t ir[1];
 } __attribute__((packed)) xhci_rt_regs_t;
 
-// xHCI Controller State
+// Slot Context (32 Bytes)
 typedef struct {
-    volatile xhci_cap_regs_t *cap_regs;
-    volatile xhci_op_regs_t  *op_regs;
-    volatile xhci_rt_regs_t  *rt_regs;
-    volatile uint32_t        *db_regs;
+    uint32_t info1;
+    uint32_t info2;
+    uint32_t tt_info;
+    uint32_t state;
+    uint32_t reserved[4];
+} __attribute__((packed)) xhci_slot_ctx_t;
+
+// Endpoint Context (32 Bytes)
+typedef struct {
+    uint32_t info1;
+    uint32_t info2;
+    uint64_t tr_dequeue_ptr;
+    uint32_t avg_trb_len;
+    uint32_t reserved[3];
+} __attribute__((packed)) xhci_ep_ctx_t;
+
+// Controller State
+typedef struct {
+    volatile xhci_cap_regs_t  *cap_regs;
+    volatile xhci_op_regs_t   *op_regs;
+    volatile xhci_rt_regs_t   *rt_regs;
+    volatile uint32_t         *db_regs;
+    volatile xhci_port_regs_t *port_regs;
 
     uint32_t max_slots;
     uint32_t max_ports;
@@ -108,6 +147,8 @@ typedef struct {
     uint8_t            event_ccs; // Consumer Cycle State
 } xhci_t;
 
-void xhci_init(void);
+void xhci_ring_doorbell(uint32_t slot, uint32_t target);
+void xhci_poll_event_ring(void);
+void xhci_scan_ports(void);
 
 #endif // XHCI_H
