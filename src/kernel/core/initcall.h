@@ -4,6 +4,15 @@
 
 #include <stdint.h>
 
+// Compiler annotations for boot-time code/data
+#ifndef __init
+#define __init
+#endif
+
+#ifndef __initdata
+#define __initdata
+#endif
+
 typedef int (*initcall_t)(void);
 
 #define __define_initcall(fn, id) \
@@ -17,7 +26,7 @@ typedef int (*initcall_t)(void);
 #define fs_initcall(fn)         __define_initcall(fn, 5)
 #define device_initcall(fn)     __define_initcall(fn, 6)
 
-// Dedicated Initcall for USB Drivers & Stack (Executes after PCI & Storage)
+// Dedicated Initcall for USB Drivers & Stack
 #define usb_initcall(fn)        __define_initcall(fn, 6)
 
 #define late_initcall(fn)       __define_initcall(fn, 7)
