@@ -12,6 +12,7 @@
 #include "kernel/core/mem/vmm.h"
 #include "kernel/core/mem/memory.h"
 #include "kernel/core/initcall.h"
+#include "kernel/drivers/tty/tty.h"
 
 __attribute__((used, section(".requests")))
 volatile uint64_t base_revision[3] = LIMINE_BASE_REVISION(3);
@@ -87,7 +88,7 @@ void _start(void) {
     term_print("EquantOS> ");
 
     for (;;) {
-        term_poll_keyboard();
+        tty_poll_input();
         asm volatile ("hlt");
     }
 }
