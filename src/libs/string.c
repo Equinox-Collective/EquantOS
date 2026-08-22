@@ -272,3 +272,27 @@ char *strsep(char **stringp, const char *delim) {
     *stringp = NULL;
     return start;
 }
+
+// Move memory block handling overlapping regions
+void *memmove(void *dest, const void *src, size_t n) {
+    uint8_t *d = (uint8_t *)dest;
+    const uint8_t *s = (const uint8_t *)src;
+
+    if (d == s || n == 0) {
+        return dest;
+    }
+
+    if (d < s) {
+        // Copy forward if destination is before source
+        for (size_t i = 0; i < n; i++) {
+            d[i] = s[i];
+        }
+    } else {
+        // Copy backward if destination overlaps after source
+        for (size_t i = n; i > 0; i--) {
+            d[i - 1] = s[i - 1];
+        }
+    }
+
+    return dest;
+}

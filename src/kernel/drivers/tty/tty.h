@@ -1,3 +1,4 @@
+// src/kernel/drivers/tty/tty.h - Stream-based Virtual Consoles (Zero-Term Touch)
 #ifndef TTY_H
 #define TTY_H
 
@@ -7,31 +8,34 @@
 
 #define MAX_TTYS 6
 #define TTY_BUF_SIZE 256
+#define TTY_LOG_SIZE 4096
 #define HISTORY_MAX 16
 
 typedef struct {
     int id;
     bool active;
-    
-    // Line buffer & cursor position
+    bool initialized;
+
+    // Command Input Line & History
     char line_buf[TTY_BUF_SIZE];
     int line_len;
-    int cursor_pos;
 
-    // Command History
     char history[HISTORY_MAX][TTY_BUF_SIZE];
     int history_count;
     int history_idx;
 
-    // Visual State
-    uint32_t fg_color;
-    size_t cursor_x;
-    size_t cursor_y;
+    // Output Stream Log
+    char log_buf[TTY_LOG_SIZE];
+    size_t log_len;
 } tty_t;
 
 void tty_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch);
 void tty_switch(int index);
 tty_t *tty_get_current(void);
+
+void tty_putchar(char c);
+void tty_print(const char *str);
+void tty_clear(void);
 void tty_poll_input(void);
 
 #endif // TTY_H

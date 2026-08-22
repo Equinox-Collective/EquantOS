@@ -1,4 +1,4 @@
-// src/kernel/drivers/tty/tty.c - Multi-Instance Virtual Console Subsystem
+// src/kernel/drivers/tty/tty.c - Stream Log Virtual Consoles
 #include "tty.h"
 #include "../../core/globalkeybinds.h"
 #include "../serial/serial.h"
@@ -9,8 +9,106 @@
 
 static tty_t ttys[MAX_TTYS];
 static int current_tty_id = 0;
-
 static bool shift_pressed = false;
+
+static void tty_append_log(tty_t *tty, char c) {
+    if (tty->log_len < TTY_LOG_SIZE - 1) {
+        tty->log_buf[tty->log_len++] = c;
+        tty->log_buf[tty->log_len] = '\0';
+    } else {
+        // Shift buffer left by 1024 bytes if log is full
+        memmove(tty->log_buf, tty->log_buf + 1024, tty->log_len - 1024);
+        tty->log_len -= 1024;
+        tty->log_buf[tty->log_len++] = c;
+        tty->log_buf[tty->log_len] = '\0';
+    }
+}
+
+void tty_putchar(char c) {
+    tty_t *tty = &ttys[current_tty_id];
+
+    // Handle Backspace in Stream Log
+    if (c == '\b') {
+        if (tty->log_len > 0 && tty->log_buf[tty->log_len - 1] != '\n') {
+            tty->log_len--;
+            tty->log_buf[tty->log_len] = '\0';
+        }
+    } else {
+        tty_append_log(tty, c);
+    }
+
+    serial_putchar(COM1, c);
+
+    // If this TTY is active, pass directly to term.c
+    if (tty->active) {
+        term_putchar_raw(c);
+    }
+}
+
+void tty_print(const char *str) {
+    while (*str) {
+        tty_putchar(*str++);
+    }
+}
+
+void tty_clear(void) {
+    tty_t *tty = &ttys[current_tty_id];
+    tty->log_len = 0;
+    tty->log_buf[0] = '\0';
+    if (tty->active) {
+        term_clear();
+    }
+}
+
+void tty_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch) {
+    term_init(fb_addr, width, height, pitch);
+
+    for (int i = 0; i < MAX_TTYS; i++) {
+        ttys[i].id = i;
+        ttys[i].active = (i == 0);
+        ttys[i].initialized = false;
+        ttys[i].line_len = 0;
+        ttys[i].history_count = 0;
+        ttys[i].history_idx = -1;
+        ttys[i].log_len = 0;
+        ttys[i].log_buf[0] = '\0';
+    }
+
+    current_tty_id = 0;
+    ttys[0].initialized = true;
+
+    serial_puts(COM1, "[TTY] Virtual Consoles initialized successfully.\n");
+}
+
+void tty_switch(int index) {
+    if (index < 0 || index >= MAX_TTYS || index == current_tty_id) return;
+
+    ttys[current_tty_id].active = false;
+    current_tty_id = index;
+
+    tty_t *tty = &ttys[current_tty_id];
+    tty->active = true;
+
+    // Reset native term.c renderer cleanly
+    term_clear();
+
+    if (!tty->initialized) {
+        tty->initialized = true;
+        tty_print("=== EquantOS Virtual Console TTY");
+        char num[4] = {'1' + (char)index, '\n', '\0'};
+        tty_print(num);
+        shell_init();
+    } else {
+        // Replay saved output stream into term.c
+        term_print(tty->log_buf);
+        term_print("EquantOS> ");
+        term_print(tty->line_buf);
+    }
+}
+
+tty_t *tty_get_current(void) {
+    return &ttys[current_tty_id];
+}
 
 static char input_code_to_ascii(uint16_t code, bool shift) {
     if (shift) {
@@ -51,62 +149,20 @@ static char input_code_to_ascii(uint16_t code, bool shift) {
     }
 }
 
-void tty_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch) {
-    term_init(fb_addr, width, height, pitch);
-
-    for (int i = 0; i < MAX_TTYS; i++) {
-        ttys[i].id = i;
-        ttys[i].active = (i == 0);
-        ttys[i].line_len = 0;
-        ttys[i].cursor_pos = 0;
-        ttys[i].history_count = 0;
-        ttys[i].history_idx = -1;
-        ttys[i].fg_color = 0x00FFFFFF;
-    }
-
-    current_tty_id = 0;
-    serial_puts(COM1, "[TTY] Initialized 6 Virtual Consoles (TTY1..TTY6).\n");
-}
-
-tty_t *tty_get_current(void) {
-    return &ttys[current_tty_id];
-}
-
-void tty_switch(int index) {
-    if (index < 0 || index >= MAX_TTYS || index == current_tty_id) return;
-
-    ttys[current_tty_id].active = false;
-    current_tty_id = index;
-    ttys[current_tty_id].active = true;
-
-    term_clear();
-    term_print("[TTY] Switched to TTY");
-    char num[4];
-    num[0] = '1' + index;
-    num[1] = '\n';
-    num[2] = '\0';
-    term_print(num);
-
-    shell_init();
-}
-
-static void tty_redraw_line(tty_t *tty) {
-    // Clear current line on screen and redraw input buffer
-    while (tty->cursor_pos > 0) {
-        term_putchar('\b');
-        tty->cursor_pos--;
+static void tty_redraw_input_line(tty_t *tty) {
+    while (tty->line_len > 0) {
+        tty_putchar('\b');
     }
     for (int i = 0; i < tty->line_len; i++) {
-        term_putchar(tty->line_buf[i]);
+        tty_putchar(tty->line_buf[i]);
     }
-    tty->cursor_pos = tty->line_len;
 }
 
 void tty_poll_input(void) {
     input_event_t ev;
     while (input_pop_event(&ev)) {
 
-        // 1. Check Global Hotkeys First (Reboot, TTY switch)
+        // 1. Global Keybinds Check
         if (globalkeybinds_process(&ev)) {
             continue;
         }
@@ -122,36 +178,36 @@ void tty_poll_input(void) {
 
         tty_t *tty = &ttys[current_tty_id];
 
-        // 2. Up Arrow -> Command History Previous
+        // 2. Command History Up (Arrow Up)
         if (ev.code == KEY_UP) {
             if (tty->history_count > 0 && tty->history_idx < tty->history_count - 1) {
                 tty->history_idx++;
                 strcpy(tty->line_buf, tty->history[tty->history_count - 1 - tty->history_idx]);
                 tty->line_len = strlen(tty->line_buf);
-                tty_redraw_line(tty);
+                tty_redraw_input_line(tty);
             }
             continue;
         }
 
-        // 3. Down Arrow -> Command History Next
+        // 3. Command History Down (Arrow Down)
         if (ev.code == KEY_DOWN) {
             if (tty->history_idx > 0) {
                 tty->history_idx--;
                 strcpy(tty->line_buf, tty->history[tty->history_count - 1 - tty->history_idx]);
                 tty->line_len = strlen(tty->line_buf);
-                tty_redraw_line(tty);
+                tty_redraw_input_line(tty);
             } else if (tty->history_idx == 0) {
                 tty->history_idx = -1;
                 tty->line_buf[0] = '\0';
                 tty->line_len = 0;
-                tty_redraw_line(tty);
+                tty_redraw_input_line(tty);
             }
             continue;
         }
 
-        // 4. Enter -> Execute Command & Save to History
+        // 4. Enter Key Execution
         if (ev.code == KEY_ENTER) {
-            term_putchar('\n');
+            tty_putchar('\n');
             tty->line_buf[tty->line_len] = '\0';
 
             if (tty->line_len > 0) {
@@ -167,27 +223,26 @@ void tty_poll_input(void) {
 
             shell_execute(tty->line_buf);
             tty->line_len = 0;
-            tty->cursor_pos = 0;
             tty->history_idx = -1;
             continue;
         }
 
-        // 5. Backspace -> Delete character
+        // 5. Backspace Key
         if (ev.code == KEY_BACKSPACE) {
             if (tty->line_len > 0) {
                 tty->line_len--;
                 tty->line_buf[tty->line_len] = '\0';
-                term_putchar('\b');
+                tty_putchar('\b');
             }
             continue;
         }
 
-        // 6. Regular ASCII Character Entry
+        // 6. Regular ASCII Key Output
         char c = input_code_to_ascii(ev.code, shift_pressed);
         if (c != 0 && tty->line_len < TTY_BUF_SIZE - 1) {
             tty->line_buf[tty->line_len++] = c;
             tty->line_buf[tty->line_len] = '\0';
-            term_putchar(c);
+            tty_putchar(c);
         }
     }
 }
