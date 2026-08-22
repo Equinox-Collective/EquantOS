@@ -1,13 +1,18 @@
-// src/kernel/drivers/pci/pci.c - PCI Bus Driver Matching & Enumeration Engine
+// src/kernel/drivers/pci/pci.c - Dynamic PCI Device Cache & Driver Matching Engine
 #include "pci.h"
 #include "../../core/mem/vmm.h"
 #include "../serial/serial.h"
+#include "../../core/initcall.h"
 #include <stddef.h>
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
+#define MAX_PCI_DEVICES    64
 
 static pci_driver_t *registered_drivers = NULL;
+static pci_device_t pci_devices[MAX_PCI_DEVICES];
+static size_t pci_device_count = 0;
+static bool pci_bus_scanned = false;
 
 uint32_t pci_read_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
     uint32_t address = (uint32_t)((1U << 31) | 
@@ -48,36 +53,40 @@ void *pci_map_mmio(uint64_t phys_addr, uint32_t size) {
     return (void *)(virt_start + (phys_addr & 0xFFF));
 }
 
-void pci_register_driver(pci_driver_t *driver) {
-    if (!driver) return;
-    driver->next = registered_drivers;
-    registered_drivers = driver;
+static void pci_match_device_against_driver(pci_device_t *dev, pci_driver_t *drv) {
+    if (!dev || !drv || !drv->id_table) return;
+
+    pci_device_id_t *id = drv->id_table;
+    while (id->vendor_id != 0 || id->class_code != 0) {
+        bool match_vendor = (id->vendor_id == 0xFFFF || id->vendor_id == dev->vendor_id);
+        bool match_device = (id->device_id == 0xFFFF || id->device_id == dev->device_id);
+        bool match_class  = (id->class_code == 0 || id->class_code == dev->class_code);
+        bool match_sub    = (id->subclass == 0 || id->subclass == dev->subclass);
+
+        if (match_vendor && match_device && match_class && match_sub) {
+            serial_puts(COM1, "[PCI] Driver match found: ");
+            serial_puts(COM1, drv->name);
+            serial_puts(COM1, "\n");
+            if (drv->probe) {
+                drv->probe(dev);
+            }
+            return;
+        }
+        id++;
+    }
 }
 
-static void pci_check_driver_match(pci_device_t *dev) {
-    pci_driver_t *drv = registered_drivers;
-    while (drv) {
-        if (drv->id_table) {
-            pci_device_id_t *id = drv->id_table;
-            while (id->vendor_id != 0 || id->class_code != 0) {
-                bool match_vendor = (id->vendor_id == 0xFFFF || id->vendor_id == dev->vendor_id);
-                bool match_device = (id->device_id == 0xFFFF || id->device_id == dev->device_id);
-                bool match_class  = (id->class_code == 0 || id->class_code == dev->class_code);
-                bool match_sub    = (id->subclass == 0 || id->subclass == dev->subclass);
+void pci_register_driver(pci_driver_t *driver) {
+    if (!driver) return;
+    
+    driver->next = registered_drivers;
+    registered_drivers = driver;
 
-                if (match_vendor && match_device && match_class && match_sub) {
-                    serial_puts(COM1, "[PCI] Driver match found: ");
-                    serial_puts(COM1, drv->name);
-                    serial_puts(COM1, "\n");
-                    if (drv->probe) {
-                        drv->probe(dev);
-                    }
-                    return;
-                }
-                id++;
-            }
+    // If PCI bus has already been scanned, match new driver against cached devices immediately
+    if (pci_bus_scanned) {
+        for (size_t i = 0; i < pci_device_count; i++) {
+            pci_match_device_against_driver(&pci_devices[i], driver);
         }
-        drv = drv->next;
     }
 }
 
@@ -90,18 +99,25 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
 
     uint32_t class_rev = pci_read_dword(bus, slot, func, 0x08);
     
-    pci_device_t dev;
-    dev.bus = bus;
-    dev.slot = slot;
-    dev.func = func;
-    dev.vendor_id = vendor;
-    dev.device_id = device;
-    dev.class_code = (class_rev >> 24) & 0xFF;
-    dev.subclass   = (class_rev >> 16) & 0xFF;
-    dev.prog_if    = (class_rev >> 8)  & 0xFF;
-    dev.revision   = class_rev & 0xFF;
+    if (pci_device_count < MAX_PCI_DEVICES) {
+        pci_device_t *dev = &pci_devices[pci_device_count++];
+        dev->bus = bus;
+        dev->slot = slot;
+        dev->func = func;
+        dev->vendor_id = vendor;
+        dev->device_id = device;
+        dev->class_code = (class_rev >> 24) & 0xFF;
+        dev->subclass   = (class_rev >> 16) & 0xFF;
+        dev->prog_if    = (class_rev >> 8)  & 0xFF;
+        dev->revision   = class_rev & 0xFF;
 
-    pci_check_driver_match(&dev);
+        // Match device against all drivers registered so far
+        pci_driver_t *drv = registered_drivers;
+        while (drv) {
+            pci_match_device_against_driver(dev, drv);
+            drv = drv->next;
+        }
+    }
 }
 
 static void pci_check_device(uint8_t bus, uint8_t slot) {
@@ -121,10 +137,25 @@ static void pci_check_device(uint8_t bus, uint8_t slot) {
 }
 
 void pci_init(void) {
-    serial_puts(COM1, "[PCI] Enumerating PCI Bus and matching registered drivers...\n");
+    if (pci_bus_scanned) return;
+    
+    serial_puts(COM1, "[PCI] Scanning PCI bus topology and caching devices...\n");
+    pci_device_count = 0;
+
     for (uint16_t bus = 0; bus < 256; bus++) {
         for (uint8_t slot = 0; slot < 32; slot++) {
             pci_check_device(bus, slot);
         }
     }
+
+    pci_bus_scanned = true;
+    serial_puts(COM1, "[PCI] Scan complete.\n");
 }
+
+// Automatically execute PCI scanning on Subsystem Initcall level
+static int __init pci_subsys_init(void) {
+    pci_init();
+    return 0;
+}
+
+subsys_initcall(pci_subsys_init);
