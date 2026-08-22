@@ -1,4 +1,4 @@
-// src/kernel/drivers/tty/tty.h - Stream-based Virtual Consoles (Zero-Term Touch)
+// src/kernel/drivers/tty/tty.h - Clean TTY Subsystem Header
 #ifndef TTY_H
 #define TTY_H
 
@@ -16,7 +16,6 @@ typedef struct {
     bool active;
     bool initialized;
 
-    // Command Input Line & History
     char line_buf[TTY_BUF_SIZE];
     int line_len;
 
@@ -24,7 +23,6 @@ typedef struct {
     int history_count;
     int history_idx;
 
-    // Output Stream Log
     char log_buf[TTY_LOG_SIZE];
     size_t log_len;
 } tty_t;
@@ -35,6 +33,7 @@ tty_t *tty_get_current(void);
 
 void tty_putchar(char c);
 void tty_print(const char *str);
+void tty_set_color(uint32_t color);
 void tty_clear(void);
 void tty_poll_input(void);
 

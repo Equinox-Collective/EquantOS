@@ -1,4 +1,4 @@
-// src/main.c - Ultra-Clean Kernel Entry Point
+// src/main.c - Clean Kernel Entry Point
 #include <stdint.h>
 #include <stddef.h>
 #include "limine.h"
@@ -13,6 +13,7 @@
 #include "kernel/core/mem/memory.h"
 #include "kernel/core/initcall.h"
 #include "kernel/drivers/tty/tty.h"
+#include "equterm/shell.h"
 
 __attribute__((used, section(".requests")))
 volatile uint64_t base_revision[3] = LIMINE_BASE_REVISION(3);
@@ -50,11 +51,10 @@ void _start(void) {
     }
     hhdm_offset = hhdm_request.response->offset;
 
-    // 2. Graphical Terminal Display
+    // 2. Graphical Terminal Display & TTY System
     if (framebuffer_request.response != NULL && framebuffer_request.response->framebuffer_count > 0) {
         struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
-        term_init(fb->address, fb->width, fb->height, fb->pitch);
-        term_print("[KERNEL] Framebuffer Terminal initialized.\n");
+        tty_init(fb->address, fb->width, fb->height, fb->pitch);
     }
 
     // 3. Buddy Memory & Slab Allocators
@@ -67,7 +67,7 @@ void _start(void) {
     }
     init_heap(VIRT(heap_phys), 256 * 4096);
 
-    // 4. Load Limine Boot Modules into memory if present
+    // 4. Load Limine Boot Modules into memory
     if (module_request.response != NULL && module_request.response->module_count > 0) {
         for (uint64_t i = 0; i < module_request.response->module_count; i++) {
             struct limine_file *mod = module_request.response->modules[i];
@@ -77,15 +77,15 @@ void _start(void) {
         }
     }
 
-    // 5. Execute all Initcalls (Syscalls, Timer, Tasking, VFS, PCI, Drivers)
+    // 5. Execute all Initcalls (Syscalls, Timer, Tasking, VFS, Storage)
     serial_puts(COM1, "[KERNEL] Executing Initcalls...\n");
     do_initcalls();
 
-    // 6. Enable Interrupts & Launch Interactive Shell
+    // 6. Enable Interrupts & Launch Shell AFTER ALL INITCALL LOGS ARE DONE
     asm volatile ("sti");
 
-    term_print("\nWelcome to EquantOS!\n\n");
-    term_print("EquantOS> ");
+    tty_print("\nWelcome to EquantOS!\n\n");
+    shell_init(); // <-- Print prompt RIGHT HERE after boot logs finish!
 
     for (;;) {
         tty_poll_input();
