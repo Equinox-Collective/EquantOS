@@ -1,76 +1,109 @@
+// src/libs/stdio.c - Kernel Standard I/O Implementation with Safe Buffer Bounds
 #include "stdio.h"
 #include "string.h"
+#include <stdbool.h>
 
-// Нам нужно знать про функцию терминала (она в kernel.c)
 extern void term_print(const char *str);
 
-int vsprintf(char *buffer, const char *format, va_list args) {
-  char *ptr = buffer;
-  const char *f = format;
-  char temp_buf[64];
+int vsnprintf(char *buffer, size_t size, const char *format, va_list args) {
+    if (!buffer || size == 0) return 0;
 
-  while (*f) {
-    if (*f != '%') {
-      *ptr++ = *f++;
-      continue;
+    char *ptr = buffer;
+    const char *f = format;
+    char temp_buf[64];
+    size_t written = 0;
+    size_t max_chars = size - 1; // Leave 1 byte for null-terminator
+
+    while (*f && written < max_chars) {
+        if (*f != '%') {
+            *ptr++ = *f++;
+            written++;
+            continue;
+        }
+
+        f++; // Skip '%'
+
+        int width = 0;
+        char pad = ' ';
+        if (*f == '0') {
+            pad = '0';
+            f++;
+        }
+        while (*f >= '0' && *f <= '9') {
+            width = width * 10 + (*f - '0');
+            f++;
+        }
+
+        // Check for long modifiers (%lx, %lld, etc.)
+        bool is_long = false;
+        if (*f == 'l') {
+            is_long = true;
+            f++;
+            if (*f == 'l') {
+                f++;
+            }
+        }
+
+        if (*f == 'u' || *f == 'd' || *f == 'x' || *f == 'X' || *f == 'p') {
+            uint64_t val;
+            if (*f == 'p' || is_long) {
+                val = va_arg(args, uint64_t);
+            } else {
+                val = (uint64_t)va_arg(args, unsigned int);
+            }
+
+            if (*f == 'p' || *f == 'x' || *f == 'X') {
+                itoa_hex(val, temp_buf);
+            } else {
+                itoa((int64_t)val, 10, temp_buf);
+            }
+
+            int len = strlen(temp_buf);
+            while (len < width && written < max_chars) {
+                *ptr++ = pad;
+                written++;
+                len++;
+            }
+
+            char *t = temp_buf;
+            while (*t && written < max_chars) {
+                *ptr++ = *t++;
+                written++;
+            }
+        } else if (*f == 's') {
+            char *s = va_arg(args, char *);
+            if (!s) s = "(null)";
+            while (*s && written < max_chars) {
+                *ptr++ = *s++;
+                written++;
+            }
+        } else if (*f == 'c') {
+            *ptr++ = (char)va_arg(args, int);
+            written++;
+        } else if (*f == '%') {
+            *ptr++ = '%';
+            written++;
+        }
+
+        if (*f) f++;
     }
 
-    f++; // Пропускаем '%'
-
-    int width = 0;
-    char pad = ' ';
-    if (*f == '0') {
-      pad = '0';
-      f++;
-    }
-    while (*f >= '0' && *f <= '9') {
-      width = width * 10 + (*f - '0');
-      f++;
-    }
-
-    if (*f == 'u' || *f == 'd' || *f == 'x' || *f == 'p') {
-      unsigned long long val;
-      if (*f == 'p') {
-          val = va_arg(args, unsigned long long);
-          itoa_hex(val, temp_buf);
-      } else if (*f == 'x') {
-          val = va_arg(args, unsigned int);
-          itoa_hex(val, temp_buf);
-      } else {
-          val = va_arg(args, unsigned int);
-          itoa(val, 10, temp_buf);
-      }
-
-      int len = strlen(temp_buf);
-      // Добавляем набивку (padding), если число короче нужной ширины
-      while (len < width) {
-        *ptr++ = pad;
-        len++;
-      }
-
-      char *t = temp_buf;
-      while (*t)
-        *ptr++ = *t++;
-    } else if (*f == 's') {
-      char *s = va_arg(args, char *);
-      if (!s)
-        s = "(null)";
-      while (*s)
-        *ptr++ = *s++;
-    } else if (*f == 'c') {
-      *ptr++ = (char)va_arg(args, int);
-    } else if (*f == '%') {
-      *ptr++ = '%';
-    }
-
-    if (*f)
-      f++; // Пропускаем символ формата (u, d, x и т.д.), если мы еще не в конце
-           // строки
-  }
-
-  *ptr = '\0';
-  return (int)(ptr - buffer);
+    *ptr = '\0';
+    return (int)written;
 }
+
+int snprintf(char *buffer, size_t size, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int len = vsnprintf(buffer, size, format, args);
+    va_end(args);
+    return len;
+}
+
+int vsprintf(char *buffer, const char *format, va_list args) {
+    return vsnprintf(buffer, (size_t)-1, format, args);
+}
+
 int sprintf(char *buffer, const char *format, ...) {
     va_list args;
     va_start(args, format);
@@ -79,18 +112,12 @@ int sprintf(char *buffer, const char *format, ...) {
     return len;
 }
 
-// ГЛАВНЫЙ БОСС
 void printf(const char *format, ...) {
     char buffer[1024];
     va_list args;
     va_start(args, format);
-    vsprintf(buffer, format, args);
+    vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
 
-    // Вместо term_print(buffer) мы могли бы делать:
-    // vfs_node_t* tty = vfs_find("tty0");
-    // vfs_write(tty, 0, strlen(buffer), (uint8_t*)buffer);
-
-    // Но пока для простоты оставим мост, но назовем его правильно:
     term_print(buffer);
 }
