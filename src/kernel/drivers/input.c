@@ -1,7 +1,7 @@
 // src/kernel/drivers/input.c - Centralized Input Event Ring Buffer
 #include "input.h"
-#include "../../core/initcall.h"
-#include "../serial/serial.h"
+#include "../core/initcall.h"
+#include "serial/serial.h"
 
 #define INPUT_BUFFER_SIZE 256
 
