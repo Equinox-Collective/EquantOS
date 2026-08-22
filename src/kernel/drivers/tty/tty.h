@@ -1,4 +1,4 @@
-// src/kernel/drivers/tty/tty.h - Clean TTY Subsystem Header
+// src/kernel/drivers/tty/tty.h - Line Editor TTY Header
 #ifndef TTY_H
 #define TTY_H
 
@@ -18,6 +18,10 @@ typedef struct {
 
     char line_buf[TTY_BUF_SIZE];
     int line_len;
+    int cursor_pos; // Mid-line cursor index (0 <= cursor_pos <= line_len)
+
+    size_t prompt_x;
+    size_t prompt_y;
 
     char history[HISTORY_MAX][TTY_BUF_SIZE];
     int history_count;

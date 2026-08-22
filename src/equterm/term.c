@@ -1,4 +1,4 @@
-// src/equterm/term.c - Pure Framebuffer Display Driver (Zero Recursion)
+// src/equterm/term.c - Pure Display Driver with Mid-Line Redraw Support
 #include "term.h"
 #include "../kernel/drivers/tty/tty.h"
 #include "string.h"
@@ -63,7 +63,68 @@ static void term_draw_cursor(bool visible) {
     }
 }
 
-// Pure hardware screen clear (NO TTY CALLS HERE!)
+size_t term_get_cursor_x(void) { return cursor_x; }
+size_t term_get_cursor_y(void) { return cursor_y; }
+
+void term_redraw_input_line(size_t start_x, size_t start_y, const char *line, size_t cursor_idx) {
+    term_draw_cursor(false);
+
+    int gw = get_glyph_width();
+    int gh = get_glyph_height();
+
+    // Гарантируем, что цвет текста НЕ чёрный!
+    uint32_t fg = (term_fg_color == 0) ? 0x00FFFFFF : term_fg_color;
+
+    // Erase active command line pixels
+    size_t erase_width = (strlen(line) + 20) * gw;
+    for (size_t y = 0; y < (size_t)gh; y++) {
+        for (size_t x = 0; x < erase_width; x++) {
+            size_t px = start_x + x;
+            size_t py = start_y + y;
+            if (px < term_width && py < term_height) {
+                term_fb_address[py * term_pitch + px] = 0x00000000;
+            }
+        }
+    }
+
+    cursor_x = start_x;
+    cursor_y = start_y;
+
+    // Draw updated command string
+    const char *ptr = line;
+    while (*ptr) {
+        if (kernel_psf2_font.loaded && kernel_psf2_font.hdr) {
+            int drawn_width = psf2_draw_char(&kernel_psf2_font, term_fb_address, 
+                                             (int)term_width, (int)term_height, 
+                                             (int)cursor_x, (int)cursor_y, 
+                                             (uint32_t)(unsigned char)*ptr, fg);
+            cursor_x += drawn_width;
+        } else {
+            if ((unsigned char)*ptr < 128) {
+                const uint8_t *glyph = font8x8_basic[(unsigned char)*ptr];
+                for (size_t y = 0; y < 8; y++) {
+                    uint8_t row = glyph[y];
+                    for (size_t x = 0; x < 8; x++) {
+                        if (row & (1 << x)) {
+                            size_t px = cursor_x + x;
+                            size_t py = cursor_y + y;
+                            if (px < term_width && py < term_height) {
+                                term_fb_address[py * term_pitch + px] = fg;
+                            }
+                        }
+                    }
+                }
+            }
+            cursor_x += gw;
+        }
+        ptr++;
+    }
+
+    // Set cursor to exact character index
+    cursor_x = start_x + (cursor_idx * gw);
+    term_draw_cursor(true);
+}
+
 void term_clear_screen(void) {
     term_clear_rect(0, term_height);
     cursor_x = 0;
@@ -207,7 +268,6 @@ void term_putchar_raw(char c) {
     term_draw_cursor(true);
 }
 
-// Public Wrappers targeting active TTY
 void term_putchar(char c) {
     tty_putchar(c);
 }

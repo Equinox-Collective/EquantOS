@@ -1,4 +1,4 @@
-// src/kernel/drivers/tty/tty.c - High-Performance Clean TTY Subsystem
+// src/kernel/drivers/tty/tty.c - Mid-Line Editor & Full Arrow Navigation
 #include "tty.h"
 #include "../../core/globalkeybinds.h"
 #include "../serial/serial.h"
@@ -10,6 +10,12 @@
 static tty_t ttys[MAX_TTYS];
 static int current_tty_id = 0;
 static bool shift_pressed = false;
+
+static void tty_refresh_line(tty_t *tty) {
+    if (tty->active) {
+        term_redraw_input_line(tty->prompt_x, tty->prompt_y, tty->line_buf, tty->cursor_pos);
+    }
+}
 
 static void tty_log_append_char(tty_t *tty, char c) {
     if (tty->log_len < TTY_LOG_SIZE - 1) {
@@ -38,6 +44,9 @@ void tty_putchar(char c) {
 
     if (tty->active) {
         term_putchar_raw(c);
+        // Track screen position right after prompt
+        tty->prompt_x = term_get_cursor_x();
+        tty->prompt_y = term_get_cursor_y();
     }
 }
 
@@ -68,7 +77,9 @@ void tty_clear(void) {
     tty->log_len = 0;
     tty->log_buf[0] = '\0';
     if (tty->active) {
-        term_clear_screen(); // Call hardware screen clear directly (NO RECURSION!)
+        term_clear_screen();
+        tty->prompt_x = 0;
+        tty->prompt_y = 0;
     }
 }
 
@@ -80,6 +91,9 @@ void tty_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch) {
         ttys[i].active = (i == 0);
         ttys[i].initialized = false;
         ttys[i].line_len = 0;
+        ttys[i].cursor_pos = 0;
+        ttys[i].prompt_x = 0;
+        ttys[i].prompt_y = 0;
         ttys[i].line_buf[0] = '\0';
         ttys[i].history_count = 0;
         ttys[i].history_idx = -1;
@@ -90,7 +104,7 @@ void tty_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch) {
     current_tty_id = 0;
     ttys[0].initialized = true;
 
-    serial_puts(COM1, "[TTY] Subsystem initialized successfully.\n");
+    serial_puts(COM1, "[TTY] Line Editor & Arrow Subsystem initialized.\n");
 }
 
 void tty_switch(int index) {
@@ -109,10 +123,9 @@ void tty_switch(int index) {
         shell_init();
     } else {
         tty_replay_log(tty);
-        const char *line = tty->line_buf;
-        while (*line) {
-            term_putchar_raw(*line++);
-        }
+        tty->prompt_x = term_get_cursor_x();
+        tty->prompt_y = term_get_cursor_y();
+        term_redraw_input_line(tty->prompt_x, tty->prompt_y, tty->line_buf, tty->cursor_pos);
     }
 }
 
@@ -159,13 +172,6 @@ static char input_code_to_ascii(uint16_t code, bool shift) {
     }
 }
 
-static void tty_redraw_input_line(tty_t *tty) {
-    while (tty->line_len > 0) {
-        term_putchar_raw('\b');
-        tty->line_len--;
-    }
-}
-
 void tty_poll_input(void) {
     input_event_t ev;
     while (input_pop_event(&ev)) {
@@ -185,36 +191,94 @@ void tty_poll_input(void) {
 
         tty_t *tty = &ttys[current_tty_id];
 
-        // 1. Arrow Up -> History Prev
+        // 1. Arrow Left
+        if (ev.code == KEY_LEFT) {
+            if (tty->cursor_pos > 0) {
+                tty->cursor_pos--;
+                tty_refresh_line(tty);
+            }
+            continue;
+        }
+
+        // 2. Arrow Right
+        if (ev.code == KEY_RIGHT) {
+            if (tty->cursor_pos < tty->line_len) {
+                tty->cursor_pos++;
+                tty_refresh_line(tty);
+            }
+            continue;
+        }
+
+        // 3. Home Key
+        if (ev.code == KEY_HOME) {
+            tty->cursor_pos = 0;
+            tty_refresh_line(tty);
+            continue;
+        }
+
+        // 4. End Key
+        if (ev.code == KEY_END) {
+            tty->cursor_pos = tty->line_len;
+            tty_refresh_line(tty);
+            continue;
+        }
+
+        // 5. Arrow Up -> History Prev
         if (ev.code == KEY_UP) {
             if (tty->history_count > 0 && tty->history_idx < tty->history_count - 1) {
-                tty_redraw_input_line(tty);
                 tty->history_idx++;
                 strcpy(tty->line_buf, tty->history[tty->history_count - 1 - tty->history_idx]);
                 tty->line_len = strlen(tty->line_buf);
-                term_print(tty->line_buf);
+                tty->cursor_pos = tty->line_len;
+                tty_refresh_line(tty);
             }
             continue;
         }
 
-        // 2. Arrow Down -> History Next
+        // 6. Arrow Down -> History Next
         if (ev.code == KEY_DOWN) {
             if (tty->history_idx > 0) {
-                tty_redraw_input_line(tty);
                 tty->history_idx--;
                 strcpy(tty->line_buf, tty->history[tty->history_count - 1 - tty->history_idx]);
                 tty->line_len = strlen(tty->line_buf);
-                term_print(tty->line_buf);
+                tty->cursor_pos = tty->line_len;
+                tty_refresh_line(tty);
             } else if (tty->history_idx == 0) {
-                tty_redraw_input_line(tty);
                 tty->history_idx = -1;
                 tty->line_buf[0] = '\0';
                 tty->line_len = 0;
+                tty->cursor_pos = 0;
+                tty_refresh_line(tty);
             }
             continue;
         }
 
-        // 3. Enter Key Execution
+        // 7. Delete Key
+        if (ev.code == KEY_DELETE) {
+            if (tty->cursor_pos < tty->line_len) {
+                memmove(&tty->line_buf[tty->cursor_pos],
+                        &tty->line_buf[tty->cursor_pos + 1],
+                        tty->line_len - tty->cursor_pos);
+                tty->line_len--;
+                tty_refresh_line(tty);
+            }
+            continue;
+        }
+
+        // 8. Backspace Key
+        if (ev.code == KEY_BACKSPACE) {
+            if (tty->cursor_pos > 0) {
+                memmove(&tty->line_buf[tty->cursor_pos - 1],
+                        &tty->line_buf[tty->cursor_pos],
+                        tty->line_len - tty->cursor_pos + 1);
+                tty->line_len--;
+                tty->cursor_pos--;
+                tty_refresh_line(tty);
+            }
+            continue;
+        }
+
+        // 9. Enter Key Execution
         if (ev.code == KEY_ENTER) {
             term_putchar_raw('\n');
             tty->line_buf[tty->line_len] = '\0';
@@ -239,27 +303,33 @@ void tty_poll_input(void) {
             shell_execute(tty->line_buf);
 
             tty->line_len = 0;
+            tty->cursor_pos = 0;
             tty->line_buf[0] = '\0';
             tty->history_idx = -1;
             continue;
         }
 
-        // 4. Backspace Key
-        if (ev.code == KEY_BACKSPACE) {
-            if (tty->line_len > 0) {
-                tty->line_len--;
-                tty->line_buf[tty->line_len] = '\0';
-                term_putchar_raw('\b');
-            }
-            continue;
-        }
-
-        // 5. Normal ASCII Input
+        // 10. Normal ASCII Character Insertion
         char c = input_code_to_ascii(ev.code, shift_pressed);
         if (c != 0 && tty->line_len < TTY_BUF_SIZE - 1) {
-            tty->line_buf[tty->line_len++] = c;
-            tty->line_buf[tty->line_len] = '\0';
-            term_putchar_raw(c);
+            if (tty->cursor_pos < tty->line_len) {
+                // Вставка в середину
+                memmove(&tty->line_buf[tty->cursor_pos + 1],
+                        &tty->line_buf[tty->cursor_pos],
+                        tty->line_len - tty->cursor_pos + 1);
+                tty->line_buf[tty->cursor_pos] = c;
+                tty->line_len++;
+                tty->cursor_pos++;
+                tty->line_buf[tty->line_len] = '\0';
+                tty_refresh_line(tty);
+            } else {
+                // Обычная печать в конец строки — мгновенный видимый вывод!
+                tty->line_buf[tty->cursor_pos] = c;
+                tty->line_len++;
+                tty->cursor_pos++;
+                tty->line_buf[tty->line_len] = '\0';
+                term_putchar_raw(c);
+            }
         }
     }
 }
