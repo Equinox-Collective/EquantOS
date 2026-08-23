@@ -20,7 +20,10 @@ static const uint16_t hid_to_system_keymap[256] = {
     [0x26] = KEY_9, [0x27] = KEY_0,
     [0x28] = KEY_ENTER,     [0x29] = KEY_ESC,       [0x2A] = KEY_BACKSPACE,
     [0x2B] = KEY_TAB,       [0x2C] = KEY_SPACE,     [0x2D] = KEY_MINUS,
-    [0x2E] = KEY_EQUAL,     [0x4F] = KEY_RIGHT,     [0x50] = KEY_LEFT,
+    [0x2E] = KEY_EQUAL,     [0x2F] = KEY_LEFTBRACE, [0x30] = KEY_RIGHTBRACE,
+    [0x31] = KEY_BACKSLASH, [0x33] = KEY_SEMICOLON, [0x34] = KEY_APOSTROPHE,
+    [0x35] = KEY_GRAVE,     [0x36] = KEY_COMMA,     [0x37] = KEY_DOT,
+    [0x38] = KEY_SLASH,     [0x4F] = KEY_RIGHT,     [0x50] = KEY_LEFT,
     [0x51] = KEY_DOWN,      [0x52] = KEY_UP
 };
 
@@ -44,7 +47,7 @@ void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len) {
     }
     prev_modifiers = modifiers;
 
-    // Process Released Keys
+    // 1. Обработка отпущенных клавиш
     for (int i = 0; i < 6; i++) {
         uint8_t old_code = prev_keycodes[i];
         if (old_code == 0) continue;
@@ -65,7 +68,7 @@ void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len) {
         }
     }
 
-    // Process Pressed Keys
+    // 2. Обработка нажатых клавиш
     for (int i = 0; i < 6; i++) {
         uint8_t new_code = report[2 + i];
         if (new_code == 0) continue;
@@ -84,8 +87,11 @@ void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len) {
                 input_push_event(EV_KEY, sys_key, KEY_PRESS);
             }
         }
+    }
 
-        prev_keycodes[i] = new_code;
+    // 3. Синхронизация состояния (Записываем НУЛИ при отпускании!)
+    for (int i = 0; i < 6; i++) {
+        prev_keycodes[i] = report[2 + i];
     }
 }
 
@@ -123,7 +129,6 @@ void usb_hid_parse_mouse_report(const uint8_t *report, size_t len) {
 void usb_hid_parse_report(const uint8_t *report, size_t len) {
     if (!report || len == 0) return;
 
-    // Distinguish USB HID Boot Mouse (3 or 4 bytes) vs Boot Keyboard (8 bytes)
     if (len == 3 || len == 4) {
         usb_hid_parse_mouse_report(report, len);
     } else if (len >= 8) {
