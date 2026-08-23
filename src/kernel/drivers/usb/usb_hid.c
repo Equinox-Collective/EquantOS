@@ -1,11 +1,11 @@
-// src/kernel/drivers/usb/usb_hid.c - Layer 3: USB HID Driver implementation
+// src/kernel/drivers/usb/usb_hid.c - Fully Traceable USB HID Driver
 #include "usb_hid.h"
-#include "../input.h" // Layer 4 Target
+#include "../input.h"
 #include "../serial/serial.h"
+#include "stdio.h"
 
 static uint8_t prev_keycodes[6] = {0};
 
-// Map USB HID Usage IDs (Boot Protocol) to Generic System Keycodes
 static const uint16_t hid_to_system_keymap[256] = {
     [0x04] = KEY_A, [0x05] = KEY_B, [0x06] = KEY_C, [0x07] = KEY_D,
     [0x08] = KEY_E, [0x09] = KEY_F, [0x0A] = KEY_G, [0x0B] = KEY_H,
@@ -26,15 +26,20 @@ static const uint16_t hid_to_system_keymap[256] = {
 void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len) {
     if (!report || len < 8) return;
 
-    // Report format: [0] Modifiers, [1] Reserved, [2..7] Keycodes (Up to 6 keys)
+    // Log Raw 8-Byte HID Report
+    char raw_log[128];
+    snprintf(raw_log, sizeof(raw_log), 
+             "[USB-HID-RAW] Bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+             report[0], report[1], report[2], report[3], report[4], report[5], report[6], report[7]);
+    serial_puts(COM1, raw_log);
+
     uint8_t modifiers = report[0];
     
-    // Handle Modifiers (Shift, Ctrl, Alt, Super)
     input_push_event(EV_KEY, KEY_LEFTSHIFT, (modifiers & (1 << 1)) ? KEY_PRESS : KEY_RELEASE);
     input_push_event(EV_KEY, KEY_LEFTCTRL,  (modifiers & (1 << 0)) ? KEY_PRESS : KEY_RELEASE);
     input_push_event(EV_KEY, KEY_LEFTALT,   (modifiers & (1 << 2)) ? KEY_PRESS : KEY_RELEASE);
 
-    // Check Released Keys
+    // Released Keys
     for (int i = 0; i < 6; i++) {
         uint8_t old_code = prev_keycodes[i];
         if (old_code == 0) continue;
@@ -50,12 +55,16 @@ void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len) {
         if (!still_pressed) {
             uint16_t sys_key = hid_to_system_keymap[old_code];
             if (sys_key != KEY_RESERVED) {
+                char log_buf[64];
+                snprintf(log_buf, sizeof(log_buf), "[USB-HID] Released Usage ID: 0x%02x -> SysKey: %u\n", old_code, sys_key);
+                serial_puts(COM1, log_buf);
+
                 input_push_event(EV_KEY, sys_key, KEY_RELEASE);
             }
         }
     }
 
-    // Check Newly Pressed Keys
+    // Pressed Keys
     for (int i = 0; i < 6; i++) {
         uint8_t new_code = report[2 + i];
         if (new_code == 0) continue;
@@ -71,6 +80,10 @@ void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len) {
         if (!was_pressed) {
             uint16_t sys_key = hid_to_system_keymap[new_code];
             if (sys_key != KEY_RESERVED) {
+                char log_buf[64];
+                snprintf(log_buf, sizeof(log_buf), "[USB-HID] Pressed Usage ID: 0x%02x -> SysKey: %u\n", new_code, sys_key);
+                serial_puts(COM1, log_buf);
+
                 input_push_event(EV_KEY, sys_key, KEY_PRESS);
             }
         }

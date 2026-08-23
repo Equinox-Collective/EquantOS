@@ -1,27 +1,29 @@
-// src/kernel/drivers/usb/xhci.c - Safe IRQ-Context xHCI Driver (Zero Allocations in ISR)
+// src/kernel/drivers/usb/xhci.c - xHCI Engine with Exact 0x08 TR Dequeue Pointer Offset
 #include "xhci.h"
 #include "usb_hid.h"
 #include "../pci/pci.h"
+#include "../serial/serial.h"
+#include "../../core/initcall.h"
 #include "../../core/mem/pmm.h"
 #include "../../core/mem/vmm.h"
-#include "../serial/serial.h"
 #include "stdio.h"
-#include "../../core/initcall.h"
 #include "string.h"
 
-// xHCI Slot Command States
 typedef enum {
-    XHCI_SLOT_STATE_DISABLED   = 0,
-    XHCI_SLOT_STATE_ENABLING   = 1,
-    XHCI_SLOT_STATE_ADDRESSING = 2,
-    XHCI_SLOT_STATE_ADDRESSED  = 3
+    XHCI_SLOT_STATE_DISABLED      = 0,
+    XHCI_SLOT_STATE_ENABLING      = 1,
+    XHCI_SLOT_STATE_ADDRESSING    = 2,
+    XHCI_SLOT_STATE_CONFIGURING   = 3,
+    XHCI_SLOT_STATE_SETTING_CONFIG= 4,
+    XHCI_SLOT_STATE_ADDRESSED     = 5
 } xhci_slot_state_t;
 
 static xhci_t g_xhci;
 static uint32_t active_slot_id = 1;
+static uint32_t active_port_num = 1;
+static uint32_t active_port_speed = 3;
 static xhci_slot_state_t slot_cmd_state = XHCI_SLOT_STATE_DISABLED;
 
-// Input Control Context Structures
 typedef struct {
     uint32_t drop_flags;
     uint32_t add_flags;
@@ -36,11 +38,13 @@ typedef struct {
     xhci_ep_ctx_t         ep1_in;
 } __attribute__((packed)) xhci_input_ctx_t;
 
-// Pre-allocated Contexts & Buffers
 static xhci_input_ctx_t *input_ctx_virt = NULL;
 static uint64_t          input_ctx_phys = 0;
 static void             *output_ctx_virt = NULL;
 static uint64_t          output_ctx_phys = 0;
+
+static xhci_trb_t *ep0_transfer_ring_virt = NULL;
+static uint64_t    ep0_transfer_ring_phys = 0;
 
 static xhci_trb_t *ep1_transfer_ring_virt = NULL;
 static uint64_t    ep1_transfer_ring_phys = 0;
@@ -50,11 +54,31 @@ static uint8_t     ep1_pcs = 1;
 static uint8_t *hid_report_buffer_virt = NULL;
 static uint64_t hid_report_buffer_phys = 0;
 
+static const char *xhci_error_string(uint32_t error) {
+    switch (error) {
+        case 1:  return "Success";
+        case 2:  return "Data Buffer Error";
+        case 3:  return "Babble Detected Error";
+        case 4:  return "USB Transaction Error";
+        case 5:  return "TRB Error";
+        case 6:  return "Stall Error";
+        case 7:  return "Resource Error";
+        case 8:  return "Bandwidth Error";
+        case 9:  return "No Slots Available Error";
+        case 11: return "Slot Not Enabled Error";
+        case 12: return "Endpoint Not Enabled Error";
+        case 13: return "Short Packet";
+        case 17: return "Parameter Error";
+        case 19: return "Context State Error";
+        default: return "Undefined xHCI Error";
+    }
+}
+
 void xhci_ring_doorbell(uint32_t slot, uint32_t target) {
     if (!g_xhci.db_regs) return;
     
     char buf[128];
-    snprintf(buf, sizeof(buf), "[xHCI-DOORBELL] Ringing Doorbell for Slot %u (Target Endpoint: %u)\n", 
+    snprintf(buf, sizeof(buf), "[xHCI-DOORBELL] Ringing Doorbell Slot: %u | Target EP: %u\n", 
              (unsigned int)slot, (unsigned int)target);
     serial_puts(COM1, buf);
 
@@ -66,6 +90,11 @@ static void xhci_post_command(uint64_t param, uint32_t status, uint32_t control)
     trb->parameter = param;
     trb->status    = status;
     trb->control   = (control & ~1U) | g_xhci.cmd_pcs;
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "[xHCI-CMD] Enqueued Cmd TRB #%u | Type: %u | Param: 0x%lx | Ctrl: 0x%x\n",
+             (unsigned int)g_xhci.cmd_enqueue_idx, (unsigned int)((control >> 10) & 0x3F), param, (unsigned int)trb->control);
+    serial_puts(COM1, buf);
 
     g_xhci.cmd_enqueue_idx++;
     if (g_xhci.cmd_enqueue_idx >= XHCI_TRB_RING_SIZE - 1) {
@@ -81,14 +110,18 @@ static void xhci_post_command(uint64_t param, uint32_t status, uint32_t control)
     xhci_ring_doorbell(0, 0);
 }
 
-// Arm Endpoint 1 IN Transfer Ring and Ring Doorbell Target 3
 static void xhci_arm_keyboard_endpoint(uint32_t slot_id) {
     if (!ep1_transfer_ring_virt || !hid_report_buffer_virt) return;
 
     xhci_trb_t *trb = &ep1_transfer_ring_virt[ep1_enqueue_idx];
     trb->parameter = hid_report_buffer_phys;
-    trb->status    = 8; // Expect 8 bytes HID report
-    trb->control   = (TRB_TYPE_NORMAL << 10) | (1U << 5) | ep1_pcs; // IOC=1
+    trb->status    = 8;
+    trb->control   = (TRB_TYPE_NORMAL << 10) | (1U << 5) | (1U << 2) | ep1_pcs;
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "[xHCI-ARM] Arming EP1 Ring Index %u | BufferPhys: 0x%lx\n", 
+             (unsigned int)ep1_enqueue_idx, hid_report_buffer_phys);
+    serial_puts(COM1, buf);
 
     ep1_enqueue_idx++;
     if (ep1_enqueue_idx >= 15) {
@@ -101,35 +134,81 @@ static void xhci_arm_keyboard_endpoint(uint32_t slot_id) {
         ep1_pcs ^= 1;
     }
 
-    // Ring Doorbell for Slot ID, Target 3 (Endpoint 1 IN)
     xhci_ring_doorbell(slot_id, 3);
 }
 
-// Configure Slot & Issue Address Device Command
+static void xhci_set_configuration(uint32_t slot_id) {
+    if (!ep0_transfer_ring_virt) return;
+
+    uint64_t setup_pkt = 0x0000000000010900ULL; // SET_CONFIGURATION(1)
+
+    // 1. Setup Stage TRB
+    ep0_transfer_ring_virt[0].parameter = setup_pkt;
+    ep0_transfer_ring_virt[0].status    = 8;
+    ep0_transfer_ring_virt[0].control   = (TRB_TYPE_SETUP_STAGE << 10) | (1U << 6) | 1U;
+
+    // 2. Status Stage TRB (DIR bit 16 = 1U << 16)
+    ep0_transfer_ring_virt[1].parameter = 0;
+    ep0_transfer_ring_virt[1].status    = 0;
+    ep0_transfer_ring_virt[1].control   = (TRB_TYPE_STATUS_STAGE << 10) | (1U << 5) | (1U << 16) | 1U;
+
+    serial_puts(COM1, "[xHCI-USB] Sending SET_CONFIGURATION(1) Request to EP0...\n");
+    xhci_ring_doorbell(slot_id, 1);
+}
+
 static void xhci_address_device(uint32_t slot_id) {
     if (!input_ctx_virt) return;
 
     memset(input_ctx_virt, 0, sizeof(xhci_input_ctx_t));
     memset(output_ctx_virt, 0, PAGE_SIZE);
 
-    // Bind Output Context to DCBAA Slot
     g_xhci.dcbaa_virt[slot_id] = output_ctx_phys;
 
-    // Enable Slot Context, EP0 Context, and EP1 IN Context
-    input_ctx_virt->ctrl.add_flags = (1U << 0) | (1U << 1) | (1U << 3);
+    input_ctx_virt->ctrl.add_flags = 3U; // A0 + A1
 
-    // Slot Context Setup
-    input_ctx_virt->slot.info1 = (3U << 27) | (1U << 16); // Context Entries = 3, Root Hub Port = 1
-    input_ctx_virt->slot.info2 = (3U << 20); // Speed = High/Full
+    input_ctx_virt->slot.info1 = (1U << 27) | ((active_port_speed & 0x0F) << 20);
+    input_ctx_virt->slot.info2 = ((active_port_num & 0xFF) << 16);
 
-    // EP1 IN Context Setup (Keyboard Interrupt IN)
-    input_ctx_virt->ep1_in.info1 = (7U << 3); // EP Type = Interrupt IN
-    input_ctx_virt->ep1_in.info2 = (8U << 16) | (3U << 1); // Max Packet Size = 8, Error Count = 3
+    uint32_t max_packet_size = (active_port_speed == 2 || active_port_speed == 1) ? 8 : 64;
+    input_ctx_virt->ep0.info0 = 0;
+    input_ctx_virt->ep0.info1 = (3U << 1) | (4U << 3) | (max_packet_size << 16);
+    input_ctx_virt->ep0.tr_dequeue_ptr = ep0_transfer_ring_phys | 1U;
+    input_ctx_virt->ep0.avg_trb_len = 8;
+
+    char log_buf[256];
+    snprintf(log_buf, sizeof(log_buf), 
+             "[xHCI-ADDRESS] InputCtx AddFlags: 0x%x | Slot Entries: 1 | Port: %u | Speed: %u | EP0_TR_Ptr: 0x%lx\n",
+             (unsigned int)input_ctx_virt->ctrl.add_flags, (unsigned int)active_port_num, 
+             (unsigned int)active_port_speed, ep0_transfer_ring_phys);
+    serial_puts(COM1, log_buf);
+
+    xhci_post_command(input_ctx_phys, 0, (TRB_TYPE_ADDRESS_DEVICE << 10) | (slot_id << 24));
+}
+
+static void xhci_configure_keyboard_endpoint(uint32_t slot_id) {
+    if (!input_ctx_virt) return;
+
+    memset(input_ctx_virt, 0, sizeof(xhci_input_ctx_t));
+
+    input_ctx_virt->ctrl.add_flags = (1U << 0) | (1U << 3); // A0 + A3
+
+    input_ctx_virt->slot.info1 = (3U << 27) | ((active_port_speed & 0x0F) << 20);
+    input_ctx_virt->slot.info2 = ((active_port_num & 0xFF) << 16);
+
+    input_ctx_virt->ep1_in.info0 = (3U << 16); // Interval = 3 (8ms)
+    input_ctx_virt->ep1_in.info1 = (3U << 1) | (7U << 3) | (8U << 16); // CErr=3, Interrupt IN, MaxPktSize=8
     input_ctx_virt->ep1_in.tr_dequeue_ptr = ep1_transfer_ring_phys | 1U;
     input_ctx_virt->ep1_in.avg_trb_len = 8;
 
-    serial_puts(COM1, "[xHCI-ADDRESS] Issuing Address Device Command TRB...\n");
-    xhci_post_command(input_ctx_phys, 0, (TRB_TYPE_ADDRESS_DEVICE << 10) | (slot_id << 24));
+    char log_buf[256];
+    snprintf(log_buf, sizeof(log_buf), 
+             "[xHCI-CONFIG] InputCtx AddFlags: 0x%x | Slot Entries: 3 | Port: %u | EP1_TR_Ptr: 0x%lx\n",
+             (unsigned int)input_ctx_virt->ctrl.add_flags, (unsigned int)active_port_num, 
+             ep1_transfer_ring_phys);
+    serial_puts(COM1, log_buf);
+
+    serial_puts(COM1, "[xHCI-CONFIG] Issuing Configure Endpoint Command TRB...\n");
+    xhci_post_command(input_ctx_phys, 0, (TRB_TYPE_CONFIG_ENDPOINT << 10) | (slot_id << 24));
 }
 
 void xhci_handle_events(void) {
@@ -146,12 +225,11 @@ void xhci_handle_events(void) {
         uint32_t slot_id = (event->control >> 24) & 0xFF;
 
         char log_buf[128];
-        snprintf(log_buf, sizeof(log_buf), "[xHCI-EVENT] TRB #%u | Type: %u | Code: %u | Slot: %u\n",
+        snprintf(log_buf, sizeof(log_buf), "[xHCI-EVENT] TRB #%u | Type: %u | Code: %u (%s) | Slot: %u\n",
                  (unsigned int)g_xhci.event_dequeue_idx, (unsigned int)trb_type, 
-                 (unsigned int)completion_code, (unsigned int)slot_id);
+                 (unsigned int)completion_code, xhci_error_string(completion_code), (unsigned int)slot_id);
         serial_puts(COM1, log_buf);
 
-        // 1. Command Completion State Machine
         if (trb_type == TRB_TYPE_CMD_COMPLETION) {
             if (slot_cmd_state == XHCI_SLOT_STATE_ENABLING && completion_code == 1) {
                 slot_cmd_state = XHCI_SLOT_STATE_ADDRESSING;
@@ -160,19 +238,25 @@ void xhci_handle_events(void) {
                 xhci_address_device(active_slot_id);
             } 
             else if (slot_cmd_state == XHCI_SLOT_STATE_ADDRESSING && completion_code == 1) {
+                slot_cmd_state = XHCI_SLOT_STATE_CONFIGURING;
+                serial_puts(COM1, "[xHCI-SLOT] Address Device Complete! Configuring Keyboard Endpoint...\n");
+                xhci_configure_keyboard_endpoint(active_slot_id);
+            }
+            else if (slot_cmd_state == XHCI_SLOT_STATE_CONFIGURING && completion_code == 1) {
                 slot_cmd_state = XHCI_SLOT_STATE_ADDRESSED;
-                serial_puts(COM1, "[xHCI-SLOT] Address Device Complete! Arming EP1 IN...\n");
+                serial_puts(COM1, "[xHCI-SLOT] Endpoint Configured! Transitioning USB Device to CONFIGURED state...\n");
+                
+                xhci_set_configuration(active_slot_id);
+
+                serial_puts(COM1, "[xHCI-USB] Arming Keyboard EP1 IN Doorbell (Target 3)...\n");
                 xhci_arm_keyboard_endpoint(active_slot_id);
             }
         } 
-        // 2. Transfer Event (USB HID Report Received)
         else if (trb_type == TRB_TYPE_TRANSFER_EVENT) {
             serial_puts(COM1, "[xHCI-HID] Transfer Event Received! Passing HID Report to Layer 3 Driver...\n");
             
-            // Pass raw 8-byte HID report buffer to Layer 3 USB HID Driver
             usb_hid_parse_keyboard_report(hid_report_buffer_virt, 8);
 
-            // Re-arm Transfer Ring for next USB keystroke
             xhci_arm_keyboard_endpoint(active_slot_id);
         }
 
@@ -198,6 +282,14 @@ void xhci_scan_ports(void) {
         uint32_t portsc = g_xhci.port_regs[i].portsc;
 
         if (portsc & PORTSC_CCS) {
+            active_port_num = i + 1;
+            active_port_speed = (portsc >> 10) & 0x0F;
+
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf), "[xHCI-PORT] USB Device Connected on Root Hub Port %u! Speed ID: %u | PORTSC: 0x%08x\n",
+                     (unsigned int)active_port_num, (unsigned int)active_port_speed, (unsigned int)portsc);
+            serial_puts(COM1, log_buf);
+
             serial_puts(COM1, "[xHCI-PORT] Resetting Connected USB Device Port...\n");
             g_xhci.port_regs[i].portsc = (portsc & ~PORTSC_PED) | PORTSC_PR;
             while (g_xhci.port_regs[i].portsc & PORTSC_PR) {}
@@ -232,7 +324,6 @@ static int xhci_probe(pci_device_t *dev) {
     g_xhci.max_slots = g_xhci.cap_regs->hcsparams1 & 0xFF;
     g_xhci.max_ports = (g_xhci.cap_regs->hcsparams1 >> 24) & 0xFF;
 
-    // Pre-allocate DCBAA
     void *dcbaa_phys = pmm_alloc();
     g_xhci.dcbaa_phys = (uint64_t)dcbaa_phys;
     g_xhci.dcbaa_virt = (uint64_t *)VIRT(dcbaa_phys);
@@ -241,7 +332,6 @@ static int xhci_probe(pci_device_t *dev) {
     g_xhci.op_regs->config = g_xhci.max_slots;
     g_xhci.op_regs->dcbaap = g_xhci.dcbaa_phys;
 
-    // Pre-allocate Command Ring
     void *cmd_phys = pmm_alloc();
     g_xhci.cmd_ring_phys = (uint64_t)cmd_phys;
     g_xhci.cmd_ring_virt = (xhci_trb_t *)VIRT(cmd_phys);
@@ -251,7 +341,6 @@ static int xhci_probe(pci_device_t *dev) {
 
     g_xhci.op_regs->crcr = g_xhci.cmd_ring_phys | 1U;
 
-    // Pre-allocate Event Ring
     void *event_phys = pmm_alloc();
     g_xhci.event_ring_phys = (uint64_t)event_phys;
     g_xhci.event_ring_virt = (xhci_trb_t *)VIRT(event_phys);
@@ -272,7 +361,6 @@ static int xhci_probe(pci_device_t *dev) {
     g_xhci.rt_regs->ir[0].erstba = g_xhci.erst_phys;
     g_xhci.rt_regs->ir[0].iman  |= 2U;
 
-    // Pre-allocate Input & Output Contexts
     void *in_phys = pmm_alloc();
     input_ctx_phys = (uint64_t)in_phys;
     input_ctx_virt = (xhci_input_ctx_t *)VIRT(in_phys);
@@ -281,7 +369,11 @@ static int xhci_probe(pci_device_t *dev) {
     output_ctx_phys = (uint64_t)out_phys;
     output_ctx_virt = (void *)VIRT(out_phys);
 
-    // Pre-allocate EP1 Transfer Ring & DMA HID Buffer
+    void *ep0_phys = pmm_alloc();
+    ep0_transfer_ring_phys = (uint64_t)ep0_phys;
+    ep0_transfer_ring_virt = (xhci_trb_t *)VIRT(ep0_phys);
+    memset(ep0_transfer_ring_virt, 0, PAGE_SIZE);
+
     void *tr_phys = pmm_alloc();
     ep1_transfer_ring_phys = (uint64_t)tr_phys;
     ep1_transfer_ring_virt = (xhci_trb_t *)VIRT(tr_phys);
@@ -292,17 +384,15 @@ static int xhci_probe(pci_device_t *dev) {
     hid_report_buffer_virt = (uint8_t *)VIRT(buf_phys);
     memset(hid_report_buffer_virt, 0, PAGE_SIZE);
 
-    // Start Controller
     g_xhci.op_regs->usbcmd |= 1U;
     while (g_xhci.op_regs->usbsts & 1U) {}
 
-    // Set State Machine to ENABLING
     slot_cmd_state = XHCI_SLOT_STATE_ENABLING;
 
     xhci_scan_ports();
     xhci_post_command(0, 0, (TRB_TYPE_ENABLE_SLOT << 10));
 
-    serial_puts(COM1, "[xHCI] Layer 2 Controller Active & State Machine Armed.\n");
+    serial_puts(COM1, "[xHCI] Exact Offset 0x08 TR Dequeue Pointer Fix Applied.\n");
     return 0;
 }
 

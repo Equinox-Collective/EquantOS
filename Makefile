@@ -32,7 +32,9 @@ QEMUFLAGS := -boot d \
              -device nvme,drive=nvme0,serial=deadbeef \
              -drive file=disk_mbr_fat32.img,format=raw,if=none,id=fat0 \
              -device ide-hd,drive=fat0 \
-             -serial stdio
+             -serial stdio \
+			 -d trace:usb_* -D qemu_usb.log
+
 
 # ==============================================================================
 # Environment & Shell Detection

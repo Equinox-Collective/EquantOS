@@ -1,8 +1,9 @@
-// src/kernel/drivers/pci/pci.c - Dynamic PCI Device Cache & Driver Matching Engine
+// src/kernel/drivers/pci/pci.c - Fully Documented PCI Bus Core
 #include "pci.h"
 #include "../../core/mem/vmm.h"
 #include "../serial/serial.h"
 #include "../../core/initcall.h"
+#include "stdio.h"
 #include <stddef.h>
 
 #define PCI_CONFIG_ADDRESS 0xCF8
@@ -50,6 +51,11 @@ void *pci_map_mmio(uint64_t phys_addr, uint32_t size) {
                 PTE_PRESENT | PTE_WRITABLE | PTE_PCD | PTE_PWT);
     }
 
+    char log_buf[128];
+    snprintf(log_buf, sizeof(log_buf), "[PCI-MMIO] Mapped Phys 0x%lx -> Virt 0x%lx (Size: %u bytes)\n",
+             phys_addr, virt_start, size);
+    serial_puts(COM1, log_buf);
+
     return (void *)(virt_start + (phys_addr & 0xFFF));
 }
 
@@ -64,9 +70,12 @@ static void pci_match_device_against_driver(pci_device_t *dev, pci_driver_t *drv
         bool match_sub    = (id->subclass == 0 || id->subclass == dev->subclass);
 
         if (match_vendor && match_device && match_class && match_sub) {
-            serial_puts(COM1, "[PCI] Driver match found: ");
-            serial_puts(COM1, drv->name);
-            serial_puts(COM1, "\n");
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf), 
+                     "[PCI-MATCH] Device %02x:%02x.%d matched Driver: '%s'\n",
+                     dev->bus, dev->slot, dev->func, drv->name);
+            serial_puts(COM1, log_buf);
+
             if (drv->probe) {
                 drv->probe(dev);
             }
@@ -82,7 +91,10 @@ void pci_register_driver(pci_driver_t *driver) {
     driver->next = registered_drivers;
     registered_drivers = driver;
 
-    // If PCI bus has already been scanned, match new driver against cached devices immediately
+    char log_buf[128];
+    snprintf(log_buf, sizeof(log_buf), "[PCI-CORE] Registered Driver: '%s'\n", driver->name);
+    serial_puts(COM1, log_buf);
+
     if (pci_bus_scanned) {
         for (size_t i = 0; i < pci_device_count; i++) {
             pci_match_device_against_driver(&pci_devices[i], driver);
@@ -111,7 +123,12 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
         dev->prog_if    = (class_rev >> 8)  & 0xFF;
         dev->revision   = class_rev & 0xFF;
 
-        // Match device against all drivers registered so far
+        char log_buf[128];
+        snprintf(log_buf, sizeof(log_buf), 
+                 "[PCI-DEV] Found %02x:%02x.%d | Vendor: 0x%04x | Device: 0x%04x | Class: 0x%02x Sub: 0x%02x ProgIF: 0x%02x\n",
+                 bus, slot, func, vendor, device, dev->class_code, dev->subclass, dev->prog_if);
+        serial_puts(COM1, log_buf);
+
         pci_driver_t *drv = registered_drivers;
         while (drv) {
             pci_match_device_against_driver(dev, drv);
@@ -139,7 +156,7 @@ static void pci_check_device(uint8_t bus, uint8_t slot) {
 void pci_init(void) {
     if (pci_bus_scanned) return;
     
-    serial_puts(COM1, "[PCI] Scanning PCI bus topology and caching devices...\n");
+    serial_puts(COM1, "[PCI-CORE] Enumerating PCI bus topology...\n");
     pci_device_count = 0;
 
     for (uint16_t bus = 0; bus < 256; bus++) {
@@ -149,10 +166,11 @@ void pci_init(void) {
     }
 
     pci_bus_scanned = true;
-    serial_puts(COM1, "[PCI] Scan complete.\n");
+    char log_buf[128];
+    snprintf(log_buf, sizeof(log_buf), "[PCI-CORE] Scan complete. Total cached devices: %u\n", (unsigned int)pci_device_count);
+    serial_puts(COM1, log_buf);
 }
 
-// Automatically execute PCI scanning on Subsystem Initcall level
 static int __init pci_subsys_init(void) {
     pci_init();
     return 0;

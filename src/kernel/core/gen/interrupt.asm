@@ -119,7 +119,6 @@ irq_ignore_handler:
 [global keyboard_handler]
 keyboard_handler:
     SAVE_REGS
-    sub rsp, 8          ; Align RSP to 16-byte boundary
     call keyboard_callback
     add rsp, 8
     mov al, 0x20

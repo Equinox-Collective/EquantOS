@@ -1,4 +1,4 @@
-// src/kernel/drivers/usb/xhci.h - Extended xHCI Specification with Doorbells & Contexts
+// src/kernel/drivers/usb/xhci.h - Corrected xHCI 1.0 Endpoint Context Layout
 #ifndef XHCI_H
 #define XHCI_H
 
@@ -23,15 +23,10 @@
 #define TRB_TYPE_PORT_STATUS_CHG  34
 
 // PORTSC Register Bits
-#define PORTSC_CCS        (1U << 0)  // Current Connect Status
-#define PORTSC_PED        (1U << 1)  // Port Enabled/Disabled
-#define PORTSC_OCA        (1U << 3)  // Over-Current Active
-#define PORTSC_PR         (1U << 4)  // Port Reset
-#define PORTSC_PLS_MASK   (0x0FU << 5)
-#define PORTSC_PP         (1U << 9)  // Port Power
-#define PORTSC_SPEED_MASK (0x0FU << 10)
-#define PORTSC_CSC        (1U << 17) // Connect Status Change
-#define PORTSC_PRC        (1U << 21) // Port Reset Change
+#define PORTSC_CCS        (1U << 0)
+#define PORTSC_PED        (1U << 1)
+#define PORTSC_OCA        (1U << 3)
+#define PORTSC_PR         (1U << 4)
 
 // xHCI Transfer Request Block (16 Bytes)
 typedef struct {
@@ -56,7 +51,7 @@ typedef struct {
     uint32_t portlpm;
 } __attribute__((packed)) xhci_port_regs_t;
 
-// Capability Registers (Read-Only)
+// Capability Registers
 typedef struct {
     uint8_t  caplength;
     uint8_t  reserved;
@@ -83,7 +78,7 @@ typedef struct {
     uint32_t config;
 } __attribute__((packed)) xhci_op_regs_t;
 
-// Interrupter Register Set (Runtime Registers)
+// Interrupter Register Set
 typedef struct {
     uint32_t iman;
     uint32_t imod;
@@ -108,13 +103,13 @@ typedef struct {
     uint32_t reserved[4];
 } __attribute__((packed)) xhci_slot_ctx_t;
 
-// Endpoint Context (32 Bytes)
+// Endpoint Context Structure (32 Bytes) - Exact Intel xHCI 1.0 Spec Alignment
 typedef struct {
-    uint32_t info1;
-    uint32_t info2;
-    uint64_t tr_dequeue_ptr;
-    uint32_t avg_trb_len;
-    uint32_t reserved[3];
+    uint32_t info0;          // Dword 0 (0x00): Interval (bits 23..16)
+    uint32_t info1;          // Dword 1 (0x04): EP Type (bits 5..3), MaxPacketSize (bits 31..16), CErr (bits 2..1)
+    uint64_t tr_dequeue_ptr; // Dwords 2 & 3 (0x08): Physical Ring Dequeue Pointer + DCS
+    uint32_t avg_trb_len;    // Dword 4 (0x10): Average TRB Length
+    uint32_t reserved[3];    // Dwords 5..7 (0x14..0x1F): Reserved
 } __attribute__((packed)) xhci_ep_ctx_t;
 
 // Controller State
@@ -128,23 +123,20 @@ typedef struct {
     uint32_t max_slots;
     uint32_t max_ports;
 
-    // Device Context Base Address Array (DCBAA)
     uint64_t *dcbaa_virt;
     uint64_t  dcbaa_phys;
 
-    // Command Ring
     xhci_trb_t *cmd_ring_virt;
     uint64_t    cmd_ring_phys;
     uint32_t    cmd_enqueue_idx;
-    uint8_t     cmd_pcs; // Producer Cycle State
+    uint8_t     cmd_pcs;
 
-    // Event Ring
     xhci_trb_t        *event_ring_virt;
     uint64_t           event_ring_phys;
     xhci_erst_entry_t *erst_virt;
     uint64_t           erst_phys;
     uint32_t           event_dequeue_idx;
-    uint8_t            event_ccs; // Consumer Cycle State
+    uint8_t            event_ccs;
 } xhci_t;
 
 void xhci_ring_doorbell(uint32_t slot, uint32_t target);

@@ -1,13 +1,14 @@
-// src/kernel/drivers/keyboard/keyboard.c - Complete PS/2 Driver with E0 State Machine
+// src/kernel/drivers/keyboard/keyboard.c - Documented PS/2 Driver
 #include "keyboard.h"
 #include "../input.h"
 #include "../../core/gen/io.h"
+#include "../serial/serial.h"
+#include "stdio.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 static bool e0_prefix = false;
 
-// PS/2 Set 1 Normal Scancodes (0x01 .. 0x58)
 static const uint16_t ps2_normal_map[128] = {
     [0x01] = KEY_ESC,        [0x02] = KEY_1,          [0x03] = KEY_2,          [0x04] = KEY_3,
     [0x05] = KEY_4,          [0x06] = KEY_5,          [0x07] = KEY_6,          [0x08] = KEY_7,
@@ -33,7 +34,6 @@ static const uint16_t ps2_normal_map[128] = {
     [0x58] = KEY_F12
 };
 
-// PS/2 Set 1 Extended Scancodes (After 0xE0 Byte)
 static const uint16_t ps2_ext_map[128] = {
     [0x1C] = KEY_KPENTER,   [0x1D] = KEY_RIGHTCTRL,  [0x35] = KEY_KPSLASH,    [0x37] = KEY_SYSRQ,
     [0x38] = KEY_RIGHTALT,  [0x47] = KEY_HOME,       [0x48] = KEY_UP,         [0x49] = KEY_PAGEUP,
@@ -47,7 +47,10 @@ void keyboard_callback(void) {
 
     uint8_t scancode = inb(0x60);
 
-    // Check for E0 Extended Scancode prefix
+    char log_buf[64];
+    snprintf(log_buf, sizeof(log_buf), "[PS2-HW] Read Scancode: 0x%02X\n", scancode);
+    serial_puts(COM1, log_buf);
+
     if (scancode == 0xE0) {
         e0_prefix = true;
         return;
@@ -66,6 +69,10 @@ void keyboard_callback(void) {
     }
 
     if (keycode != KEY_RESERVED) {
+        snprintf(log_buf, sizeof(log_buf), "[PS2-HW] Mapped Keycode: %u | Action: %s\n", 
+                 keycode, is_release ? "RELEASE" : "PRESS");
+        serial_puts(COM1, log_buf);
+
         input_push_event(EV_KEY, keycode, is_release ? KEY_RELEASE : KEY_PRESS);
     }
 }
@@ -75,4 +82,5 @@ void keyboard_init(void) {
         inb(0x60);
     }
     e0_prefix = false;
+    serial_puts(COM1, "[PS2-HW] Controller Hardware Initialized.\n");
 }
