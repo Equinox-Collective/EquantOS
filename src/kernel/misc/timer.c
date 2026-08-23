@@ -2,6 +2,7 @@
 #include "../core/gen/io.h"
 #include "../core/initcall.h"
 #include "../drivers/usb/usb_hid.h"
+#include "../drivers/input.h"
 
 volatile uint32_t tick = 0;
 
@@ -9,6 +10,7 @@ void timer_callback() {
     tick++;
 
     xhci_timer_tick();
+    input_timer_tick();
 }
 
 void init_timer(uint32_t freq) {

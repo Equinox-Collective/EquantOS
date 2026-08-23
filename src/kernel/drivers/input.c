@@ -1,8 +1,7 @@
-// src/kernel/drivers/input.c - Clean Production Input Subsystem
+// src/kernel/drivers/input.c - Clean Production Input Subsystem with Typematic Repeat
 #include "input.h"
 #include "../core/initcall.h"
 #include "serial/serial.h"
-#include "stdio.h"
 
 #define INPUT_BUFFER_SIZE 256
 
@@ -10,9 +9,18 @@ static input_event_t event_ring_buffer[INPUT_BUFFER_SIZE];
 static int ring_head = 0;
 static int ring_tail = 0;
 
+// Software Typematic Key Repeat State
+static uint16_t repeating_key = 0;
+static uint32_t repeat_delay_timer = 0;
+static uint32_t repeat_rate_timer = 0;
+
+#define REPEAT_DELAY_TICKS 30  // 300 ms задержка перед началом повтора
+#define REPEAT_RATE_TICKS  4   // 40 ms интервал между повторами (25 символов/сек)
+
 void input_init(void) {
     ring_head = 0;
     ring_tail = 0;
+    repeating_key = 0;
     serial_puts(COM1, "[INPUT-CORE] Unified Input Event Subsystem Initialized.\n");
 }
 
@@ -24,6 +32,44 @@ void input_push_event(uint16_t type, uint16_t code, int32_t value) {
         event_ring_buffer[ring_head].code = code;
         event_ring_buffer[ring_head].value = value;
         ring_head = next;
+    }
+
+    // Менеджмент программного автоповтора клавиш
+    if (type == EV_KEY && code < BTN_LEFT) {
+        if (value == KEY_PRESS) {
+            repeating_key = code;
+            repeat_delay_timer = REPEAT_DELAY_TICKS;
+            repeat_rate_timer = REPEAT_RATE_TICKS;
+        } else if (value == KEY_RELEASE) {
+            if (code == repeating_key) {
+                repeating_key = 0;
+            }
+        }
+    }
+}
+
+void input_timer_tick(void) {
+    if (repeating_key == 0) return;
+
+    if (repeat_delay_timer > 0) {
+        repeat_delay_timer--;
+        return;
+    }
+
+    if (repeat_rate_timer > 0) {
+        repeat_rate_timer--;
+    }
+
+    if (repeat_rate_timer == 0) {
+        repeat_rate_timer = REPEAT_RATE_TICKS;
+
+        int next = (ring_head + 1) % INPUT_BUFFER_SIZE;
+        if (next != ring_tail) {
+            event_ring_buffer[ring_head].type = EV_KEY;
+            event_ring_buffer[ring_head].code = repeating_key;
+            event_ring_buffer[ring_head].value = KEY_PRESS;
+            ring_head = next;
+        }
     }
 }
 
