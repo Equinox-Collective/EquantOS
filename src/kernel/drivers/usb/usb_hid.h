@@ -5,11 +5,13 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Parse raw 8-byte USB Boot Protocol HID Keyboard Report and push events to Layer 4
-void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len);
+// Universal HID Report Parser
+void usb_hid_parse_report(const uint8_t *report, size_t len);
 
-// Parse USB HID Mouse Report and push EV_REL events to Layer 4
+// Individual Protocol Parsers
+void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len);
 void usb_hid_parse_mouse_report(const uint8_t *report, size_t len);
+
 void xhci_timer_tick(void);
 
 #endif // USB_HID_H

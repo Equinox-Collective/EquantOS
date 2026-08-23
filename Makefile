@@ -28,6 +28,7 @@ QEMU      := qemu-system-x86_64
 QEMUFLAGS := -boot d \
              -device qemu-xhci,id=xhci \
              -device usb-kbd,bus=xhci.0 \
+             -device usb-mouse,bus=xhci.0 \
              -drive file=disk_gpt_ext2.img,format=raw,if=none,id=nvme0 \
              -device nvme,drive=nvme0,serial=deadbeef \
              -drive file=disk_mbr_fat32.img,format=raw,if=none,id=fat0 \

@@ -1,9 +1,8 @@
-// src/kernel/drivers/keyboard/keyboard.c - Documented PS/2 Driver
+// src/kernel/drivers/keyboard/keyboard.c - Clean PS/2 Driver
 #include "keyboard.h"
 #include "../input.h"
 #include "../../core/gen/io.h"
 #include "../serial/serial.h"
-#include "stdio.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -47,10 +46,6 @@ void keyboard_callback(void) {
 
     uint8_t scancode = inb(0x60);
 
-    char log_buf[64];
-    snprintf(log_buf, sizeof(log_buf), "[PS2-HW] Read Scancode: 0x%02X\n", scancode);
-    serial_puts(COM1, log_buf);
-
     if (scancode == 0xE0) {
         e0_prefix = true;
         return;
@@ -69,10 +64,6 @@ void keyboard_callback(void) {
     }
 
     if (keycode != KEY_RESERVED) {
-        snprintf(log_buf, sizeof(log_buf), "[PS2-HW] Mapped Keycode: %u | Action: %s\n", 
-                 keycode, is_release ? "RELEASE" : "PRESS");
-        serial_puts(COM1, log_buf);
-
         input_push_event(EV_KEY, keycode, is_release ? KEY_RELEASE : KEY_PRESS);
     }
 }

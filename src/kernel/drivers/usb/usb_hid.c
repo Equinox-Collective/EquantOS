@@ -1,10 +1,11 @@
-// src/kernel/drivers/usb/usb_hid.c - Fully Traceable USB HID Driver
+// src/kernel/drivers/usb/usb_hid.c - Production Layer 3 USB HID Driver
 #include "usb_hid.h"
 #include "../input.h"
-#include "../serial/serial.h"
-#include "stdio.h"
+#include <stdbool.h>
 
 static uint8_t prev_keycodes[6] = {0};
+static uint8_t prev_modifiers = 0;
+static uint8_t prev_mouse_buttons = 0;
 
 static const uint16_t hid_to_system_keymap[256] = {
     [0x04] = KEY_A, [0x05] = KEY_B, [0x06] = KEY_C, [0x07] = KEY_D,
@@ -26,20 +27,24 @@ static const uint16_t hid_to_system_keymap[256] = {
 void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len) {
     if (!report || len < 8) return;
 
-    // Log Raw 8-Byte HID Report
-    char raw_log[128];
-    snprintf(raw_log, sizeof(raw_log), 
-             "[USB-HID-RAW] Bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-             report[0], report[1], report[2], report[3], report[4], report[5], report[6], report[7]);
-    serial_puts(COM1, raw_log);
-
     uint8_t modifiers = report[0];
-    
-    input_push_event(EV_KEY, KEY_LEFTSHIFT, (modifiers & (1 << 1)) ? KEY_PRESS : KEY_RELEASE);
-    input_push_event(EV_KEY, KEY_LEFTCTRL,  (modifiers & (1 << 0)) ? KEY_PRESS : KEY_RELEASE);
-    input_push_event(EV_KEY, KEY_LEFTALT,   (modifiers & (1 << 2)) ? KEY_PRESS : KEY_RELEASE);
+    uint8_t changed_mods = modifiers ^ prev_modifiers;
 
-    // Released Keys
+    if (changed_mods & (1 << 1)) {
+        input_push_event(EV_KEY, KEY_LEFTSHIFT, (modifiers & (1 << 1)) ? KEY_PRESS : KEY_RELEASE);
+    }
+    if (changed_mods & (1 << 0)) {
+        input_push_event(EV_KEY, KEY_LEFTCTRL, (modifiers & (1 << 0)) ? KEY_PRESS : KEY_RELEASE);
+    }
+    if (changed_mods & (1 << 2)) {
+        input_push_event(EV_KEY, KEY_LEFTALT, (modifiers & (1 << 2)) ? KEY_PRESS : KEY_RELEASE);
+    }
+    if (changed_mods & (1 << 3)) {
+        input_push_event(EV_KEY, KEY_LEFTMETA, (modifiers & (1 << 3)) ? KEY_PRESS : KEY_RELEASE);
+    }
+    prev_modifiers = modifiers;
+
+    // Process Released Keys
     for (int i = 0; i < 6; i++) {
         uint8_t old_code = prev_keycodes[i];
         if (old_code == 0) continue;
@@ -55,16 +60,12 @@ void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len) {
         if (!still_pressed) {
             uint16_t sys_key = hid_to_system_keymap[old_code];
             if (sys_key != KEY_RESERVED) {
-                char log_buf[64];
-                snprintf(log_buf, sizeof(log_buf), "[USB-HID] Released Usage ID: 0x%02x -> SysKey: %u\n", old_code, sys_key);
-                serial_puts(COM1, log_buf);
-
                 input_push_event(EV_KEY, sys_key, KEY_RELEASE);
             }
         }
     }
 
-    // Pressed Keys
+    // Process Pressed Keys
     for (int i = 0; i < 6; i++) {
         uint8_t new_code = report[2 + i];
         if (new_code == 0) continue;
@@ -80,14 +81,56 @@ void usb_hid_parse_keyboard_report(const uint8_t *report, size_t len) {
         if (!was_pressed) {
             uint16_t sys_key = hid_to_system_keymap[new_code];
             if (sys_key != KEY_RESERVED) {
-                char log_buf[64];
-                snprintf(log_buf, sizeof(log_buf), "[USB-HID] Pressed Usage ID: 0x%02x -> SysKey: %u\n", new_code, sys_key);
-                serial_puts(COM1, log_buf);
-
                 input_push_event(EV_KEY, sys_key, KEY_PRESS);
             }
         }
 
         prev_keycodes[i] = new_code;
+    }
+}
+
+void usb_hid_parse_mouse_report(const uint8_t *report, size_t len) {
+    if (!report || len < 3) return;
+
+    uint8_t buttons = report[0];
+    int8_t dx = (int8_t)report[1];
+    int8_t dy = (int8_t)report[2];
+    int8_t wheel = (len >= 4) ? (int8_t)report[3] : 0;
+
+    uint8_t changed = buttons ^ prev_mouse_buttons;
+    if (changed & 0x01) {
+        input_push_event(EV_KEY, BTN_LEFT, (buttons & 0x01) ? KEY_PRESS : KEY_RELEASE);
+    }
+    if (changed & 0x02) {
+        input_push_event(EV_KEY, BTN_RIGHT, (buttons & 0x02) ? KEY_PRESS : KEY_RELEASE);
+    }
+    if (changed & 0x04) {
+        input_push_event(EV_KEY, BTN_MIDDLE, (buttons & 0x04) ? KEY_PRESS : KEY_RELEASE);
+    }
+    prev_mouse_buttons = buttons;
+
+    if (dx != 0) {
+        input_push_event(EV_REL, REL_X, dx);
+    }
+    if (dy != 0) {
+        input_push_event(EV_REL, REL_Y, dy);
+    }
+    if (wheel != 0) {
+        input_push_event(EV_REL, REL_WHEEL, wheel);
+    }
+}
+
+void usb_hid_parse_report(const uint8_t *report, size_t len) {
+    if (!report || len == 0) return;
+
+    // Distinguish USB HID Boot Mouse (3 or 4 bytes) vs Boot Keyboard (8 bytes)
+    if (len == 3 || len == 4) {
+        usb_hid_parse_mouse_report(report, len);
+    } else if (len >= 8) {
+        if (report[1] == 0) {
+            usb_hid_parse_keyboard_report(report, len);
+        } else {
+            usb_hid_parse_mouse_report(report, len);
+        }
     }
 }

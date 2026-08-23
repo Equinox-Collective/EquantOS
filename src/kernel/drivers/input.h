@@ -11,6 +11,16 @@
 #define EV_REL 0x02 // Mouse movement
 #define EV_ABS 0x03 // Touchscreen / Absolute axis
 
+// Relative Axes (Mouse)
+#define REL_X          0x00
+#define REL_Y          0x01
+#define REL_WHEEL      0x08
+
+// Mouse Buttons
+#define BTN_LEFT       0x110
+#define BTN_RIGHT      0x111
+#define BTN_MIDDLE     0x112
+
 // Key State Values
 #define KEY_RELEASE 0
 #define KEY_PRESS   1
@@ -134,8 +144,8 @@
 
 typedef struct {
     uint16_t type;  // EV_KEY, EV_REL, EV_ABS
-    uint16_t code;  // KEY_A, KEY_ENTER, KEY_UP, etc.
-    int32_t  value; // KEY_PRESS (1), KEY_RELEASE (0)
+    uint16_t code;  // KEY_A, BTN_LEFT, REL_X, etc.
+    int32_t  value; // KEY_PRESS (1), KEY_RELEASE (0), relative delta
 } input_event_t;
 
 void input_init(void);
