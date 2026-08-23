@@ -2,6 +2,7 @@
 #include "input.h"
 #include "../core/initcall.h"
 #include "serial/serial.h"
+#include "stdio.h"
 
 #define INPUT_BUFFER_SIZE 256
 
@@ -16,6 +17,11 @@ void input_init(void) {
 }
 
 void input_push_event(uint16_t type, uint16_t code, int32_t value) {
+    if (type == EV_KEY && value == KEY_PRESS) {
+        char debug_buf[64];
+        snprintf(debug_buf, sizeof(debug_buf), "[INPUT-EVENT] Key Pressed! Code: %u\n", (unsigned int)code);
+        serial_puts(COM1, debug_buf);
+    }
     int next = (ring_head + 1) % INPUT_BUFFER_SIZE;
     if (next != ring_tail) {
         event_ring_buffer[ring_head].type = type;
