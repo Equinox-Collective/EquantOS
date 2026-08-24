@@ -119,10 +119,11 @@ irq_ignore_handler:
 [global keyboard_handler]
 keyboard_handler:
     SAVE_REGS
+    sub rsp, 8          ; Align RSP for System V ABI C function call
     call keyboard_callback
-    add rsp, 8
+    add rsp, 8          ; Restore RSP alignment
     mov al, 0x20
-    out 0x20, al
+    out 0x20, al        ; Send EOI to Master PIC
     RESTORE_REGS
     iretq 
 
@@ -230,33 +231,28 @@ linux_syscall_interrupt_asm:
 
 [global page_fault_asm]
 page_fault_asm:
-    push qword 14       ; Номер прерывания (Vector 14)
-    SAVE_REGS           ; Сохраняем все регистры RAX..R15 на стек
-    mov rdi, rsp        ; Передаем ЧЕСТНЫЙ указатель на cpu_state_t в RDI для C
-    sub rsp, 8          ; Выравниваем стек по 16 байт
+    push qword 14       ; Vector 14
+    SAVE_REGS           
+    mov rdi, rsp        
+    sub rsp, 8          
     call vmm_page_fault_handler
     add rsp, 8
-    RESTORE_REGS        ; Восстанавливаем регистры
-    add rsp, 16         ; Сбрасываем номер прерывания и error_code от CPU
+    RESTORE_REGS        
+    add rsp, 16         
     iretq
 
 [global syscall_entry_asm]
 syscall_entry_asm:
-    ; 1. Сохраняем User RSP во временную переменную в BSS, НЕ ТРОГАЯ регистры R12-R15!
     mov [rel user_rsp_temp], rsp
-
-    ; 2. Переключаемся на стек ядра из структуры current_task
     mov rsp, [rel current_task]
-    mov rsp, [rsp + 8]          ; Смещение kstack_at_bottom (8)
+    mov rsp, [rsp + 8]
 
-    ; 3. Формируем фрейм прерывания на стеке ядра
-    push qword 0x23             ; Селектор User SS
-    push qword [rel user_rsp_temp] ; User RSP (сохранен без порчи R12!)
-    push r11                    ; User RFLAGS (сохранен процессором в R11)
-    push qword 0x1B             ; Селектор User CS
-    push rcx                    ; User RIP (сохранен процессором в RCX)
+    push qword 0x23             ; User SS
+    push qword [rel user_rsp_temp] ; User RSP
+    push r11                    ; User RFLAGS
+    push qword 0x1B             ; User CS
+    push rcx                    ; User RIP
 
-    ; 4. Сохраняем ВСЕ регистры общего назначения (от RAX до R15)
     push rax
     push rbx
     push rcx
@@ -268,22 +264,20 @@ syscall_entry_asm:
     push r9
     push r10
     push r11
-    push r12                    ; Сохраняет ОРИГИНАЛЬНЫЙ R12 юзерленда!
+    push r12
     push r13
     push r14
     push r15
 
-    ; 5. Передаем указатель на регистры (RSP) в C-обработчик
     mov rdi, rsp
-    sub rsp, 8                  ; Выравнивание RSP по 16 байт для System V ABI
+    sub rsp, 8                  ; Align RSP for C function call
     call syscall_handler
     add rsp, 8
 
-    ; 6. Восстанавливаем ВСЕ регистры общего назначения
     pop r15
     pop r14
     pop r13
-    pop r12                     ; Восстанавливает ОРИГИНАЛЬНЫЙ R12 юзерленда!
+    pop r12
     pop r11
     pop r10
     pop r9
@@ -296,13 +290,12 @@ syscall_entry_asm:
     pop rbx
     pop rax
 
-    ; 7. Восстанавливаем User RIP, RFLAGS и User RSP для инструкции sysret
-    pop rcx                     ; User RIP для sysret
-    add rsp, 8                  ; Пропускаем User CS
+    pop rcx                     ; User RIP
+    add rsp, 8                  ; Skip User CS
     pop r11                     ; User RFLAGS
-    pop rsp                     ; Восстанавливаем User RSP
+    pop rsp                     ; User RSP
 
-    db 0x48                     ; REX.W префикс для 64-битного sysretq
+    db 0x48                     ; REX.W prefix for 64-bit sysretq
     sysret
 
 section .bss
