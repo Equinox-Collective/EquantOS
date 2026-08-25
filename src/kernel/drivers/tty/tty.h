@@ -1,4 +1,3 @@
-// src/kernel/drivers/tty/tty.h - Line Editor TTY Header
 #ifndef TTY_H
 #define TTY_H
 
@@ -18,7 +17,7 @@ typedef struct {
 
     char line_buf[TTY_BUF_SIZE];
     int line_len;
-    int cursor_pos; // Mid-line cursor index (0 <= cursor_pos <= line_len)
+    int cursor_pos;
 
     size_t prompt_x;
     size_t prompt_y;
@@ -38,7 +37,11 @@ tty_t *tty_get_current(void);
 void tty_putchar(char c);
 void tty_print(const char *str);
 void tty_set_color(uint32_t color);
+void tty_set_colors(uint32_t fg_color, uint32_t bg_color);
 void tty_clear(void);
 void tty_poll_input(void);
+
+// Raw Input API for TUI
+uint16_t tty_getchar_raw(void);
 
 #endif // TTY_H
