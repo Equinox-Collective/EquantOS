@@ -28,9 +28,8 @@ typedef struct psf2_font {
 bool psf2_load(psf2_font_t *out, const void *data, uint32_t size);
 
 // FIX: Parameter fb_pitch_pixels uses hardware stride instead of screen width
-int psf2_draw_char(const psf2_font_t *font,
-                   uint32_t *fb, int fb_pitch_pixels, int fb_h,
-                   int x, int y, uint32_t codepoint, uint32_t color);
+int psf2_draw_char(const psf2_font_t *f, uint32_t *fb, int fb_pitch_pixels, int fb_h,
+                   int x, int y, uint32_t cp, uint32_t color, uint32_t bg_color);
 
 int psf2_draw_string(const psf2_font_t *font,
                      uint32_t *fb, int fb_pitch_pixels, int fb_h,
