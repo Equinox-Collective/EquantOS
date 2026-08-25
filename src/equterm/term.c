@@ -1,4 +1,4 @@
-// src/equterm/term.c - Pure Display Driver with Mid-Line Redraw Support
+// src/equterm/term.c - Pure Display Driver with Mid-Line Redraw & Extended Escapes
 #include "term.h"
 #include "../kernel/drivers/tty/tty.h"
 #include "string.h"
@@ -72,10 +72,8 @@ void term_redraw_input_line(size_t start_x, size_t start_y, const char *line, si
     int gw = get_glyph_width();
     int gh = get_glyph_height();
 
-    // Гарантируем, что цвет текста НЕ чёрный!
     uint32_t fg = (term_fg_color == 0) ? 0x00FFFFFF : term_fg_color;
 
-    // Erase active command line pixels
     size_t erase_width = (strlen(line) + 20) * gw;
     for (size_t y = 0; y < (size_t)gh; y++) {
         for (size_t x = 0; x < erase_width; x++) {
@@ -90,7 +88,6 @@ void term_redraw_input_line(size_t start_x, size_t start_y, const char *line, si
     cursor_x = start_x;
     cursor_y = start_y;
 
-    // Draw updated command string
     const char *ptr = line;
     while (*ptr) {
         if (kernel_psf2_font.loaded && kernel_psf2_font.hdr) {
@@ -120,7 +117,6 @@ void term_redraw_input_line(size_t start_x, size_t start_y, const char *line, si
         ptr++;
     }
 
-    // Set cursor to exact character index
     cursor_x = start_x + (cursor_idx * gw);
     term_draw_cursor(true);
 }
@@ -209,6 +205,11 @@ void term_putchar_raw(char c) {
         return;
     }
 
+    if (c == '\r') {
+        cursor_x = 0;
+        return;
+    }
+
     if (c == '\n') {
         term_advance_line();
         return;
@@ -216,6 +217,13 @@ void term_putchar_raw(char c) {
 
     int gw = get_glyph_width();
     int gh = get_glyph_height();
+
+    // Tab handling
+    if (c == '\t') {
+        cursor_x += gw * 4;
+        if (cursor_x >= term_width) term_advance_line();
+        return;
+    }
 
     term_draw_cursor(false);
 
