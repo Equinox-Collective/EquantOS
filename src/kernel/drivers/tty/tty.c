@@ -333,3 +333,19 @@ void tty_poll_input(void) {
         }
     }
 }
+
+uint16_t tty_getchar_raw(void) {
+    input_event_t ev;
+    while (1) {
+        if (input_pop_event(&ev)) {
+            if (ev.type == EV_KEY && ev.value == KEY_PRESS) {
+                return ev.code;
+            }
+        }
+        __asm__ volatile("hlt");
+    }
+}
+
+void tty_set_colors(uint32_t fg_color, uint32_t bg_color) {
+    term_set_custom_colors(fg_color, bg_color);
+}
