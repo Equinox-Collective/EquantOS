@@ -17,6 +17,7 @@ static size_t cursor_y = 0;
 
 static uint32_t term_fg_color = 0x00FFFFFF;
 static uint32_t term_bg_color = 0x00000000;
+static uint32_t default_fg_color = 0x00FFFFFF;
 
 size_t term_get_cursor_x(void) { return cursor_x; }
 size_t term_get_cursor_y(void) { return cursor_y; }
@@ -93,13 +94,13 @@ void term_redraw_input_line(size_t start_x, size_t start_y, const char *line, si
     while (*ptr) {
         if (kernel_psf2_font.loaded && kernel_psf2_font.hdr) {
             int drawn_width = psf2_draw_char(&kernel_psf2_font, term_fb_address, 
-                                             (int)term_width, (int)term_height, 
+                                             (int)term_pitch, (int)term_height, 
                                              (int)cursor_x, (int)cursor_y, 
                                              (uint32_t)(unsigned char)*ptr, fg);
             cursor_x += drawn_width;
         } else {
             if ((unsigned char)*ptr < 128) {
-                const uint8_t *glyph = font8x8_basic[(unsigned char)*ptr];
+                const uint8_t *glyph = (const uint8_t *)font8x8_basic[(unsigned char)*ptr];
                 for (size_t y = 0; y < 8; y++) {
                     uint8_t row = glyph[y];
                     for (size_t x = 0; x < 8; x++) {
@@ -123,26 +124,21 @@ void term_redraw_input_line(size_t start_x, size_t start_y, const char *line, si
 }
 
 void term_clear_screen(void) {
-    if (!term_fb_address) return;
-    for (size_t y = 0; y < term_height; y++) {
-        for (size_t x = 0; x < term_width; x++) {
-            term_fb_address[y * term_pitch + x] = term_bg_color;
-        }
-    }
+    term_clear_rect(0, term_height);
     cursor_x = 0;
     cursor_y = 0;
 }
-
 
 void term_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch) {
     term_fb_address = (uint32_t *)fb_addr;
     term_width = width;
     term_height = height;
-    term_pitch = pitch / 4; // Stride in uint32_t pixels
+    term_pitch = pitch / 4;
     term_fg_color = 0x00FFFFFF;
-    term_bg_color = 0x00000000;
+    default_fg_color = 0x00FFFFFF;
 
     term_clear_screen();
+    term_draw_cursor(true);
 }
 
 static void term_scroll(void) {
@@ -224,7 +220,6 @@ void term_putchar_raw(char c) {
     int gw = get_glyph_width();
     int gh = get_glyph_height();
 
-    // Tab handling
     if (c == '\t') {
         cursor_x += gw * 4;
         if (cursor_x >= term_width) term_advance_line();
@@ -256,13 +251,13 @@ void term_putchar_raw(char c) {
 
     if (kernel_psf2_font.loaded && kernel_psf2_font.hdr) {
         int drawn_width = psf2_draw_char(&kernel_psf2_font, term_fb_address, 
-                                         (int)term_width, (int)term_height, 
+                                         (int)term_pitch, (int)term_height, 
                                          (int)cursor_x, (int)cursor_y, 
                                          (uint32_t)(unsigned char)c, term_fg_color);
         cursor_x += drawn_width;
     } else {
         if ((unsigned char)c < 128) {
-            const uint8_t *glyph = font8x8_basic[(unsigned char)c];
+            const uint8_t *glyph = (const uint8_t *)font8x8_basic[(unsigned char)c];
             for (size_t y = 0; y < 8; y++) {
                 uint8_t row = glyph[y];
                 for (size_t x = 0; x < 8; x++) {

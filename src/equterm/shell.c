@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "../kernel/misc/installer.h"
+#include "../kernel/drivers/display/psf2.h"
 
 extern uint64_t free_memory;
 extern uint64_t total_pages;
@@ -62,6 +63,9 @@ static void cmd_pwd(int argc, char **argv);
 static void cmd_cd(int argc, char **argv);
 static void cmd_run(int argc, char **argv);
 static void cmd_cp(int argc, char **argv);
+static void cmd_ttytest(int argc, char **argv);
+static void cmd_fonttest(int argc, char **argv);
+static void cmd_colortest(int argc, char **argv);
 
 static const shell_command_t commands[] = {
     { "help",       "List all diagnostic & stress commands", cmd_help },
@@ -87,7 +91,9 @@ static const shell_command_t commands[] = {
     { "cd",     "Change working directory",                  cmd_cd },
     { "run",    "Load and execute an ELF binary",            cmd_run },
     { "cp",     "Copy source file to destination",           cmd_cp },
-
+    { "colortest", "Test ANSI color palette output",          cmd_colortest },
+    { "fonttest",  "Check active font details and glyph map", cmd_fonttest },
+    { "ttytest",   "Test TAB, backspace and control codes",   cmd_ttytest },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -744,4 +750,52 @@ static void cmd_cp(int argc, char **argv) {
     }
 
     kfree(buf);
+}
+
+static void cmd_colortest(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== EquantOS ANSI Color Palette Test ===\n");
+    term_print("\033[31m[RED]\033[0m     Red color test (ANSI \\033[31m)\n");
+    term_print("\033[32m[GREEN]\033[0m   Green color test (ANSI \\033[32m)\n");
+    term_print("\033[33m[YELLOW]\033[0m  Yellow color test (ANSI \\033[33m)\n");
+    term_print("\033[34m[BLUE]\033[0m    Blue color test (ANSI \\033[34m)\n");
+    term_print("\033[36m[CYAN]\033[0m    Cyan color test (ANSI \\033[36m)\n");
+    term_print("\033[0m[DEFAULT] Reset to default foreground color\n");
+    term_print("=======================================\n");
+}
+
+static void cmd_fonttest(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== EquantOS Font Subsystem Diagnostic ===\n");
+    
+    if (kernel_psf2_font.loaded && kernel_psf2_font.hdr) {
+        term_print("Active Engine : PSF2 High-Resolution Font Renderer\n");
+        char buf[32];
+        itoa((int64_t)kernel_psf2_font.hdr->width, 10, buf);
+        term_print("Glyph Width   : "); term_print(buf); term_print(" px\n");
+        itoa((int64_t)kernel_psf2_font.hdr->height, 10, buf);
+        term_print("Glyph Height  : "); term_print(buf); term_print(" px\n");
+        itoa((int64_t)kernel_psf2_font.hdr->numglyph, 10, buf);
+        term_print("Total Glyphs  : "); term_print(buf); term_print("\n");
+    } else {
+        term_print("Active Engine : 8x8 Legacy Bitmap Fallback\n");
+    }
+
+    term_print("\nAlphabet Test : ABCDEFGHIJKLMNOPQRSTUVWXYZ\n");
+    term_print("Lowercase Test: abcdefghijklmnopqrstuvwxyz\n");
+    term_print("Numeric Test  : 0123456789\n");
+    term_print("Symbols Test  : !@#$%^&*()_+-=[]{}|;:'\",.<>/?`~\n");
+    term_print("===========================================\n");
+}
+
+static void cmd_ttytest(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== EquantOS TTY Control Characters Test ===\n");
+    term_print("Testing Tabulation (\\t):\n");
+    term_print("COL1\tCOL2\tCOL3\tCOL4\n");
+    term_print("100\t200\t300\t400\n");
+    
+    term_print("\nTesting Carriage Return (\\r) and Backspace (\\b):\n");
+    term_print("Loading [====      ] 40%\b\b\b\b\b\b\b\b\b\b80% [========  ]\n");
+    term_print("============================================\n");
 }

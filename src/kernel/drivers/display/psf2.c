@@ -96,7 +96,7 @@ static uint32_t glyph_index(const psf2_font_t *f, uint32_t cp) {
 }
 
 int psf2_draw_char(const psf2_font_t *f, uint32_t *fb, int fb_pitch_pixels, int fb_h,
-                   int x, int y, uint32_t cp, uint32_t color, uint32_t bg_color) {
+                   int x, int y, uint32_t cp, uint32_t color) {
     if (!f || !f->loaded || !fb || fb_pitch_pixels <= 0) return 0;
 
     uint32_t gi = glyph_index(f, cp);
@@ -115,12 +115,8 @@ int psf2_draw_char(const psf2_font_t *f, uint32_t *fb, int fb_pitch_pixels, int 
             if (px < 0 || px >= fb_pitch_pixels) continue;
 
             uint8_t byte = glyph[col / 8];
-            bool bit = (byte & (0x80 >> (col & 7))) != 0;
-
-            if (bit) {
+            if (byte & (0x80 >> (col & 7))) {
                 fb[py * fb_pitch_pixels + px] = color;
-            } else if (bg_color != 0x00000000) {
-                fb[py * fb_pitch_pixels + px] = bg_color;
             }
         }
         glyph += bpr;
