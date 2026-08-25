@@ -604,64 +604,6 @@ void fat32_init(void) {
 }
 
 
-int fat32_format_region(block_device_t dev, uint32_t start_lba, uint32_t sector_count, const char *label) {
-    if (sector_count < 2048) return -1; // Не менее 1 МБ пространства
-
-    uint8_t vbr[512];
-    memset(vbr, 0, 512);
-
-    vbr[0] = 0xEB; vbr[1] = 0x58; vbr[2] = 0x90; // JMP instruction
-    memcpy(&vbr[3], "MSWIN4.1", 8);
-
-    fat32_bpb_t *bpb = (fat32_bpb_t *)vbr;
-    bpb->bytes_per_sector = 512;
-    bpb->sectors_per_cluster = 8; // 4KB кластер
-    bpb->reserved_sectors = 32;
-    bpb->num_fats = 2;
-    bpb->media_type = 0xF8;
-    bpb->hidden_sectors = start_lba;
-    bpb->total_sectors_32 = sector_count;
-
-    uint32_t data_sectors = sector_count - 32;
-    uint32_t fat_size = (data_sectors / 8 * 4 + 511) / 512;
-    bpb->table_size_32 = fat_size;
-    bpb->root_cluster = 2;
-    bpb->boot_signature = 0x29;
-    bpb->volume_id = 0x45515541; // "EQUA"
-    
-    memset(bpb->volume_label, ' ', 11);
-    size_t lbl_len = strlen(label);
-    if (lbl_len > 11) lbl_len = 11;
-    memcpy(bpb->volume_label, label, lbl_len);
-    memcpy(bpb->file_system_type, "FAT32   ", 8);
-
-    vbr[510] = 0x55;
-    vbr[511] = 0xAA;
-
-    // 1. Запись VBR (LBA Start)
-    if (dev.write(start_lba, 1, vbr) != 0) return -1;
-
-    // 2. Инициализация FAT таблицы
-    uint8_t fat_sec[512];
-    memset(fat_sec, 0, 512);
-    uint32_t *fat_entries = (uint32_t *)fat_sec;
-    fat_entries[0] = 0x0FFFFFF8;
-    fat_entries[1] = 0xFFFFFFFF;
-    fat_entries[2] = 0x0FFFFFFF; // Конец корневого каталога
-
-    dev.write(start_lba + 32, 1, fat_sec);
-    dev.write(start_lba + 32 + fat_size, 1, fat_sec);
-
-    // 3. Очистка секторов корневого каталога
-    memset(fat_sec, 0, 512);
-    uint32_t root_lba = start_lba + 32 + (2 * fat_size);
-    for (int i = 0; i < 8; i++) {
-        dev.write(root_lba + i, 1, fat_sec);
-    }
-
-    return 0;
-}
-
 // // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
 
 static int __init fat32_fs_initcall(void) {

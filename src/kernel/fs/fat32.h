@@ -63,6 +63,5 @@ typedef struct {
 
 void fat32_init(void);
 vfs_node_t *fat32_mount_partition(block_device_t dev, uint32_t partition_lba, uint32_t partition_sectors);
-int fat32_format_region(block_device_t dev, uint32_t start_lba, uint32_t sector_count, const char *label);
 
 #endif // FAT32_H
