@@ -12,9 +12,12 @@
 #include "../kernel/misc/power.h"
 #include "../kernel/proc/loader.h"
 #include "../kernel/proc/sched.h"
+#include "../kernel/drivers/disk/ata.h"
+#include "../kernel/drivers/disk/nvme.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "../kernel/misc/installer.h"
 
 extern uint64_t free_memory;
 extern uint64_t total_pages;
@@ -59,6 +62,8 @@ static void cmd_pwd(int argc, char **argv);
 static void cmd_cd(int argc, char **argv);
 static void cmd_run(int argc, char **argv);
 static void cmd_cp(int argc, char **argv);
+static void cmd_installer(int argc, char **argv);
+static void cmd_partscan(int argc, char **argv);
 
 static const shell_command_t commands[] = {
     { "help",       "List all diagnostic & stress commands", cmd_help },
@@ -84,6 +89,8 @@ static const shell_command_t commands[] = {
     { "cd",     "Change working directory",                  cmd_cd },
     { "run",    "Load and execute an ELF binary",            cmd_run },
     { "cp",     "Copy source file to destination",           cmd_cp },
+    { "installer", "Run interactive TUI OS Installer (Archinstall)", cmd_installer },
+    { "partscan",  "Scan and detail hardware disk partitions",       cmd_partscan },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -740,4 +747,50 @@ static void cmd_cp(int argc, char **argv) {
     }
 
     kfree(buf);
+}
+
+static void cmd_installer(int argc, char **argv) {
+    (void)argc; (void)argv;
+    installer_run();
+}
+
+static void cmd_partscan(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("Scanning Storage Media Partitions...\n");
+
+    block_device_t dev;
+    if (nvme_init() == NVME_SUCCESS) {
+        dev = nvme_get_block_device();
+    } else {
+        block_device_t ata_dev = {
+            .read = (block_read_fn)read_sectors_ata_pio,
+            .write = (block_write_fn)write_sectors_ata_pio,
+            .sector_size = 512
+        };
+        dev = ata_dev;
+    }
+
+    disk_partition_scan_device(dev);
+    int count = disk_get_partition_count();
+
+    char buf[16];
+    itoa(count, 10, buf);
+    term_print("Partitions Detected: ");
+    term_print(buf);
+    term_print("\n");
+
+    for (int i = 0; i < count; i++) {
+        partition_info_t *p = disk_get_partition(i);
+        if (p) {
+            term_print("  Part #");
+            itoa(p->index, 10, buf);
+            term_print(buf);
+            term_print(" | Type: ");
+            term_print(p->fs_name);
+            term_print(" | Start LBA: ");
+            itoa(p->start_lba, 10, buf);
+            term_print(buf);
+            term_print("\n");
+        }
+    }
 }
