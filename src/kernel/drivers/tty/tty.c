@@ -1,4 +1,4 @@
-// src/kernel/drivers/tty/tty.c - Mid-Line Editor & Full Arrow Navigation
+// src/kernel/drivers/tty/tty.c - Extended Mid-Line Editor & Synchronous Input
 #include "tty.h"
 #include "../../core/globalkeybinds.h"
 #include "../serial/serial.h"
@@ -44,7 +44,6 @@ void tty_putchar(char c) {
 
     if (tty->active) {
         term_putchar_raw(c);
-        // Track screen position right after prompt
         tty->prompt_x = term_get_cursor_x();
         tty->prompt_y = term_get_cursor_y();
     }
@@ -104,7 +103,7 @@ void tty_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch) {
     current_tty_id = 0;
     ttys[0].initialized = true;
 
-    serial_puts(COM1, "[TTY] Line Editor & Arrow Subsystem initialized.\n");
+    serial_puts(COM1, "[TTY] Line Editor & Synchronous Input Subsystem initialized.\n");
 }
 
 void tty_switch(int index) {
@@ -169,6 +168,62 @@ static char input_code_to_ascii(uint16_t code, bool shift) {
         case KEY_N: return 'n'; case KEY_M: return 'm'; case KEY_SPACE: return ' ';
         case KEY_DOT: return '.'; case KEY_SLASH: return '/'; case KEY_COMMA: return ',';
         default: return 0;
+    }
+}
+
+/* Synchronous blocking readline for installer & CLI prompts */
+void tty_readline(char *out_buf, size_t max_len) {
+    if (!out_buf || max_len == 0) return;
+
+    tty_t *tty = &ttys[current_tty_id];
+    tty->line_len = 0;
+    tty->cursor_pos = 0;
+    tty->line_buf[0] = '\0';
+
+    while (1) {
+        input_event_t ev;
+        while (input_pop_event(&ev)) {
+            if (globalkeybinds_process(&ev)) continue;
+            if (ev.type != EV_KEY) continue;
+
+            if (ev.code == KEY_LEFTSHIFT || ev.code == KEY_RIGHTSHIFT) {
+                shift_pressed = (ev.value == KEY_PRESS);
+                continue;
+            }
+
+            if (ev.value != KEY_PRESS) continue;
+
+            if (ev.code == KEY_ENTER) {
+                term_putchar_raw('\n');
+                tty->line_buf[tty->line_len] = '\0';
+                strncpy(out_buf, tty->line_buf, max_len - 1);
+                out_buf[max_len - 1] = '\0';
+                tty->line_len = 0;
+                tty->cursor_pos = 0;
+                tty->line_buf[0] = '\0';
+                return;
+            }
+
+            if (ev.code == KEY_BACKSPACE) {
+                if (tty->cursor_pos > 0) {
+                    tty->line_len--;
+                    tty->cursor_pos--;
+                    tty->line_buf[tty->cursor_pos] = '\0';
+                    term_putchar_raw('\b');
+                }
+                continue;
+            }
+
+            char c = input_code_to_ascii(ev.code, shift_pressed);
+            if (c != 0 && tty->line_len < max_len - 1 && tty->line_len < TTY_BUF_SIZE - 1) {
+                tty->line_buf[tty->cursor_pos] = c;
+                tty->line_len++;
+                tty->cursor_pos++;
+                tty->line_buf[tty->line_len] = '\0';
+                term_putchar_raw(c);
+            }
+        }
+        __asm__ volatile ("hlt"); // Halt CPU until next hardware interrupt
     }
 }
 
@@ -313,7 +368,6 @@ void tty_poll_input(void) {
         char c = input_code_to_ascii(ev.code, shift_pressed);
         if (c != 0 && tty->line_len < TTY_BUF_SIZE - 1) {
             if (tty->cursor_pos < tty->line_len) {
-                // Вставка в середину
                 memmove(&tty->line_buf[tty->cursor_pos + 1],
                         &tty->line_buf[tty->cursor_pos],
                         tty->line_len - tty->cursor_pos + 1);
@@ -323,7 +377,6 @@ void tty_poll_input(void) {
                 tty->line_buf[tty->line_len] = '\0';
                 tty_refresh_line(tty);
             } else {
-                // Обычная печать в конец строки — мгновенный видимый вывод!
                 tty->line_buf[tty->cursor_pos] = c;
                 tty->line_len++;
                 tty->cursor_pos++;
