@@ -4,6 +4,7 @@
 #include "string.h"
 #include "../kernel/drivers/display/font8x8.h"
 #include "../kernel/drivers/display/psf2.h"
+#include "term.h"
 #include <stdbool.h>
 
 static uint32_t *term_fb_address = NULL;
@@ -15,7 +16,10 @@ static size_t cursor_x = 0;
 static size_t cursor_y = 0;
 
 static uint32_t term_fg_color = 0x00FFFFFF;
-static uint32_t default_fg_color = 0x00FFFFFF;
+static uint32_t term_bg_color = 0x00000000;
+
+size_t term_get_cursor_x(void) { return cursor_x; }
+size_t term_get_cursor_y(void) { return cursor_y; }
 
 static bool in_escape = false;
 static char esc_buf[16];
@@ -62,9 +66,6 @@ static void term_draw_cursor(bool visible) {
         }
     }
 }
-
-size_t term_get_cursor_x(void) { return cursor_x; }
-size_t term_get_cursor_y(void) { return cursor_y; }
 
 void term_redraw_input_line(size_t start_x, size_t start_y, const char *line, size_t cursor_idx) {
     term_draw_cursor(false);
@@ -122,21 +123,26 @@ void term_redraw_input_line(size_t start_x, size_t start_y, const char *line, si
 }
 
 void term_clear_screen(void) {
-    term_clear_rect(0, term_height);
+    if (!term_fb_address) return;
+    for (size_t y = 0; y < term_height; y++) {
+        for (size_t x = 0; x < term_width; x++) {
+            term_fb_address[y * term_pitch + x] = term_bg_color;
+        }
+    }
     cursor_x = 0;
     cursor_y = 0;
 }
+
 
 void term_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch) {
     term_fb_address = (uint32_t *)fb_addr;
     term_width = width;
     term_height = height;
-    term_pitch = pitch / 4;
+    term_pitch = pitch / 4; // Stride in uint32_t pixels
     term_fg_color = 0x00FFFFFF;
-    default_fg_color = 0x00FFFFFF;
+    term_bg_color = 0x00000000;
 
     term_clear_screen();
-    term_draw_cursor(true);
 }
 
 static void term_scroll(void) {
@@ -294,4 +300,14 @@ void term_set_color(uint32_t color) {
 
 uint32_t term_get_color(void) {
     return term_fg_color;
+}
+
+void term_set_cursor(size_t x, size_t y) {
+    cursor_x = x;
+    cursor_y = y;
+}
+
+void term_set_custom_colors(uint32_t fg, uint32_t bg) {
+    term_fg_color = fg;
+    term_bg_color = bg;
 }
