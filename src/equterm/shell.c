@@ -12,7 +12,6 @@
 #include "../kernel/misc/power.h"
 #include "../kernel/proc/loader.h"
 #include "../kernel/proc/sched.h"
-#include "../kernel/misc/installer.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -60,7 +59,6 @@ static void cmd_pwd(int argc, char **argv);
 static void cmd_cd(int argc, char **argv);
 static void cmd_run(int argc, char **argv);
 static void cmd_cp(int argc, char **argv);
-static void cmd_installer(int argc, char **argv);
 
 static const shell_command_t commands[] = {
     { "help",       "List all diagnostic & stress commands", cmd_help },
@@ -86,7 +84,6 @@ static const shell_command_t commands[] = {
     { "cd",     "Change working directory",                  cmd_cd },
     { "run",    "Load and execute an ELF binary",            cmd_run },
     { "cp",     "Copy source file to destination",           cmd_cp },
-    { "installer", "Run interactive EquantOS installation wizard", cmd_installer },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -743,9 +740,4 @@ static void cmd_cp(int argc, char **argv) {
     }
 
     kfree(buf);
-}
-
-static void cmd_installer(int argc, char **argv) {
-    (void)argc; (void)argv;
-    run_installer();
 }
