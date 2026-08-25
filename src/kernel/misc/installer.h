@@ -1,11 +1,7 @@
-// src/kernel/misc/installer.h - Arch-style Interactive EquantOS Installer
+// installer.h - Archinstall-style Interactive TUI OS Installer
 #ifndef INSTALLER_H
 #define INSTALLER_H
 
-#include <stdint.h>
-#include <stdbool.h>
-
-// Launches the interactive kernel installation wizard
-int run_installer(void);
+void installer_run(void);
 
 #endif // INSTALLER_H
