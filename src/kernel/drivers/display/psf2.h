@@ -18,24 +18,17 @@ typedef struct __attribute__((packed)) psf2_header {
 } psf2_header_t;
 
 typedef struct psf2_font {
-    bool                  loaded;
-    const psf2_header_t  *hdr;
-    const uint8_t        *bitmaps;
-    uint16_t              codepoint_to_glyph[0x10000];
-    bool                  has_unicode;
+    bool loaded;
+    const psf2_header_t *hdr;
+    const uint8_t *bitmaps;
+    uint16_t codepoint_to_glyph[0x10000];
+    bool has_unicode;
 } psf2_font_t;
 
-bool psf2_load(psf2_font_t *out, const void *data, uint32_t size);
+extern psf2_font_t kernel_psf2_font;
 
-// FIX: Parameter fb_pitch_pixels uses hardware stride instead of screen width
+bool psf2_load(psf2_font_t *out, const void *data, uint32_t size);
 int psf2_draw_char(const psf2_font_t *f, uint32_t *fb, int fb_pitch_pixels, int fb_h,
                    int x, int y, uint32_t cp, uint32_t color, uint32_t bg_color);
 
-int psf2_draw_string(const psf2_font_t *font,
-                     uint32_t *fb, int fb_pitch_pixels, int fb_h,
-                     int x, int y, const char *utf8, uint32_t color);
-
-extern psf2_font_t kernel_psf2_font;
-bool psf2_init_default(const void *data, uint32_t size);
-
-#endif /* PSF2_H */
+#endif // PSF2_H
