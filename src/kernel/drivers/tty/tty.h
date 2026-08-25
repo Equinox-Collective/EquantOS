@@ -1,4 +1,4 @@
-// src/kernel/drivers/tty/tty.h - Line Editor TTY Header
+// src/kernel/drivers/tty/tty.h - Extended TTY & Interactive Readline Engine
 #ifndef TTY_H
 #define TTY_H
 
@@ -18,7 +18,7 @@ typedef struct {
 
     char line_buf[TTY_BUF_SIZE];
     int line_len;
-    int cursor_pos; // Mid-line cursor index (0 <= cursor_pos <= line_len)
+    int cursor_pos;
 
     size_t prompt_x;
     size_t prompt_y;
@@ -40,5 +40,8 @@ void tty_print(const char *str);
 void tty_set_color(uint32_t color);
 void tty_clear(void);
 void tty_poll_input(void);
+
+// Interactive blocking input API for installers and CLI wizards
+void tty_readline(char *out_buf, size_t max_len);
 
 #endif // TTY_H
