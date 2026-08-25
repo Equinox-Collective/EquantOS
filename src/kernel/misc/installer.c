@@ -1,4 +1,4 @@
-// src/kernel/misc/installer.c - Rock-Solid OS Installer for Real Hardware
+// src/kernel/misc/installer.c - Fully Interactive Real-Hardware Installer
 #include "installer.h"
 #include "../fs/partition.h"
 #include "../fs/vfs.h"
@@ -6,6 +6,7 @@
 #include "../fs/ext2.h"
 #include "../drivers/disk/nvme.h"
 #include "../drivers/disk/ata.h"
+#include "../drivers/tty/tty.h"
 #include "../../equterm/term.h"
 #include "../drivers/serial/serial.h"
 #include "../core/mem/memory.h"
@@ -93,44 +94,64 @@ int run_installer(void) {
         }
     }
 
-    // 3. Target Installation Strategy Selection
+    // 3. Interactive Target Selection Prompt
     term_print_color("\n=== Select Installation Target ===\n", 0x0055FFFF);
     term_print(" 1. Install EquantOS to Existing FAT32 / ESP Partition (Non-Destructive Coexistence)\n");
-    term_print(" 2. Install EquantOS to Dedicated Partition (EXT2 / FAT32 Target)\n");
+    term_print(" 2. Install EquantOS to Dedicated Partition / Free Space\n");
     term_print(" 3. Abort Installation\n\n");
     term_print("Selection [1-3]: ");
 
-    term_print("1 (Auto-selected Safe ESP Integration Mode)\n\n");
+    char input_buf[64] = {0};
+    tty_readline(input_buf, sizeof(input_buf));
 
-    // Locate ESP Partition (Fixed: p->type instead of p->type_code)
-    partition_info_t *esp_part = NULL;
-    for (int i = 0; i < p_count; i++) {
-        partition_info_t *p = disk_get_partition(i);
-        if (p && (p->kind == PART_TYPE_ESP || p->type == 0x0C || p->type == 0x0B)) {
-            esp_part = p;
-            break;
+    if (input_buf[0] == '3' || strcmp(input_buf, "abort") == 0) {
+        term_print_color("\nInstallation aborted by user.\n", 0x00FFFF55);
+        return 0;
+    }
+
+    // Locate Target Partition
+    partition_info_t *target_part = NULL;
+
+    if (input_buf[0] == '2' && gap_count > 0) {
+        target_part = &gaps[0];
+    } else {
+        // Option 1: Locate ESP Partition
+        for (int i = 0; i < p_count; i++) {
+            partition_info_t *p = disk_get_partition(i);
+            if (p) {
+                target_part = p;
+                break;
+            }
         }
     }
 
-    if (!esp_part) {
-        term_print_color("[CRITICAL ERROR] No valid FAT32 / ESP target partition found for boot installation.\n", 0x00FF5555);
+    if (!target_part) {
+        term_print_color("\n[CRITICAL ERROR] Target partition selection failed.\n", 0x00FF5555);
         return -1;
     }
 
-    // 4. Double Safety Confirmation Window
-    term_print_color("----------------------------------------------------------------------\n", 0x00FF5555);
+    // 4. Double Safety Confirmation Window with YES Prompt
+    term_print_color("\n----------------------------------------------------------------------\n", 0x00FF5555);
     term_print_color("                    FINAL SAFETY CONFIRMATION                         \n", 0x00FF5555);
     term_print_color("----------------------------------------------------------------------\n", 0x00FF5555);
     term_print("Target Partition : Partition #");
-    itoa(esp_part->index, 10, buf); term_print(buf);
+    itoa(target_part->index, 10, buf); term_print(buf);
     term_print(" (Start LBA: ");
-    itoa(esp_part->start_lba, 10, buf); term_print(buf);
+    itoa(target_part->start_lba, 10, buf); term_print(buf);
     term_print(")\nTarget Action    : Copy EquantOS Payload to '/EFI/equantos/' & '/boot/'\n");
     term_print_color("EXISTING OS FILE PRESERVATION: GUARANTEED (Windows Boot Manager untouched)\n\n", 0x0055FF55);
 
+    term_print("Type 'YES' (in capital letters) to confirm installation: ");
+    tty_readline(input_buf, sizeof(input_buf));
+
+    if (strcmp(input_buf, "YES") != 0) {
+        term_print_color("\nSafety check failed. Installation cancelled.\n", 0x00FFFF55);
+        return 0;
+    }
+
     // 5. Execute Installation Payload Copying
-    term_print_color("[2/4] Mounting Target FAT32 Partition...\n", 0x0000FF00);
-    vfs_node_t *target_root = fat32_mount_partition(dev, esp_part->start_lba, esp_part->sector_count);
+    term_print_color("\n[2/4] Mounting Target FAT32 Partition...\n", 0x0000FF00);
+    vfs_node_t *target_root = fat32_mount_partition(dev, target_part->start_lba, target_part->sector_count);
 
     if (!target_root) {
         term_print_color("[ERROR] Failed to mount target partition file system.\n", 0x00FF5555);
