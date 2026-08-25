@@ -24,7 +24,6 @@ static partition_kind_t classify_mbr_type(uint8_t type) {
 }
 
 void disk_partition_scan_device(block_device_t dev) {
-    char buf[32];
     serial_puts(COM1, "[PARTITION] Scanning physical storage topology...\n");
     
     unified_partition_count = 0;
@@ -42,10 +41,10 @@ void disk_partition_scan_device(block_device_t dev) {
                 unified_partitions[unified_partition_count].is_free_space = false;
                 
                 // Categorize GPT Partition
-                if (p->type_code == 0xEF) {
+                if (p->type == 0xEF) {
                     unified_partitions[unified_partition_count].kind = PART_TYPE_ESP;
                     strcpy(unified_partitions[unified_partition_count].description, "EFI System Partition (ESP)");
-                } else if (p->type_code == 0x83) {
+                } else if (p->type == 0x83) {
                     unified_partitions[unified_partition_count].kind = PART_TYPE_LINUX;
                     strcpy(unified_partitions[unified_partition_count].description, "Linux Filesystem Data");
                 } else {
@@ -134,7 +133,7 @@ int disk_get_free_space_gaps(partition_info_t *out_gaps, int max_gaps, uint64_t 
             out_gaps[gap_count].index = 0xFF;
             out_gaps[gap_count].start_lba = current_lba;
             out_gaps[gap_count].sector_count = sorted[i].start_lba - current_lba;
-            out_gaps[gap_count].type_code = 0x00;
+            out_gaps[gap_count].type = 0x00;
             out_gaps[gap_count].kind = PART_TYPE_UNALLOCATED;
             out_gaps[gap_count].is_free_space = true;
             strcpy(out_gaps[gap_count].description, "Unallocated Free Disk Space");
@@ -148,7 +147,7 @@ int disk_get_free_space_gaps(partition_info_t *out_gaps, int max_gaps, uint64_t 
         out_gaps[gap_count].index = 0xFF;
         out_gaps[gap_count].start_lba = current_lba;
         out_gaps[gap_count].sector_count = (uint32_t)(total_disk_sectors - current_lba);
-        out_gaps[gap_count].type_code = 0x00;
+        out_gaps[gap_count].type = 0x00;
         out_gaps[gap_count].kind = PART_TYPE_UNALLOCATED;
         out_gaps[gap_count].is_free_space = true;
         strcpy(out_gaps[gap_count].description, "Unallocated Free Disk Space (Disk Tail)");

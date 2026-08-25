@@ -17,10 +17,10 @@ typedef enum {
 } partition_kind_t;
 
 typedef struct {
-    uint8_t  index;
     uint32_t start_lba;
     uint32_t sector_count;
-    uint8_t  type_code;        // MBR type byte
+    uint8_t  type;             // Reverted to 'type' for shell.c compatibility
+    uint8_t  index;
     partition_kind_t kind;
     bool     is_free_space;    // True if this is an unallocated gap
     char     description[64];  // Human readable description
