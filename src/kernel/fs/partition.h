@@ -21,6 +21,7 @@ typedef struct {
     uint32_t start_lba;
     uint32_t sector_count;
     uint8_t raw_type;
+    uint8_t type;
     partition_kind_t kind;
     char fs_name[32];
     bool is_esp;             // Critical Hardware Protection Guard
@@ -38,8 +39,7 @@ typedef struct {
 void disk_partition_scan_device(block_device_t dev);
 int disk_get_partition_count(void);
 partition_info_t *disk_get_partition(int index);
-
-// Free Space Analysis
+void disk_partition_scan(uint8_t drive);
 void disk_find_unallocated_space(disk_device_info_t *disk);
 
 #endif // PARTITION_H
