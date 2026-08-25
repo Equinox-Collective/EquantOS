@@ -15,8 +15,8 @@
 ~~+ Run on your real OS~~
 ~~Musl/mlibc, LABI (POSIX syscalls)~~
 ~~Busybox / Bash~~
-USB <
-Installer
+~~USB~~
+Installer <
 
 # ENTERING THE LONG TERM ZONE (OS DONE AS USABLE)
 
