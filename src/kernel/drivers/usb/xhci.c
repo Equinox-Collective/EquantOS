@@ -222,6 +222,7 @@ void xhci_handle_events(void) {
                 if (completion_code != 1) {
                     printf("[XHCI-ERROR] Slot %u Command Type %u FAILED with Completion Code %u!\n",
                            slot_id, trb_type, completion_code);
+                    slot->state = XHCI_SLOT_STATE_DISABLED; // <-- Отключаем слот, чтобы не читать мусор
                 } else {
                     if (slot->state == XHCI_SLOT_STATE_ENABLING) {
                         slot->state = XHCI_SLOT_STATE_ADDRESSING;
@@ -240,6 +241,21 @@ void xhci_handle_events(void) {
                 }
             }
         } 
+        else if (trb_type == TRB_TYPE_TRANSFER_EVENT) {
+            if (slot_id < XHCI_MAX_SLOTS_SUPPORTED) {
+                xhci_slot_device_t *slot = &g_slots[slot_id];
+
+                // Обрабатываем отчет ТОЛЬКО если слот успешно сконфигурирован
+                if (slot->state == XHCI_SLOT_STATE_ADDRESSED && slot->report_buf_virt) {
+                    uint32_t residual = event->status & 0x00FFFFFF;
+                    size_t bytes_transferred = (residual < 8) ? (8 - residual) : 8;
+                    if (bytes_transferred == 0) bytes_transferred = 8;
+
+                    usb_hid_parse_report(slot->report_buf_virt, bytes_transferred);
+                    xhci_arm_hid_endpoint(slot);
+                }
+            }
+        }
         else if (trb_type == TRB_TYPE_TRANSFER_EVENT) {
             if (slot_id < XHCI_MAX_SLOTS_SUPPORTED) {
                 xhci_slot_device_t *slot = &g_slots[slot_id];
