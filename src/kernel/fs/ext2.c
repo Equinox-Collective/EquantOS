@@ -387,30 +387,66 @@ static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index) {
 }
 
 static vfs_node_t *ext2_create(vfs_node_t *dir, const char *name, uint32_t flags) {
-    (void)flags;
     uint32_t dir_inode_num = (uint32_t)(uintptr_t)dir->ptr;
 
     uint32_t new_inode_num = ext2_alloc_inode();
     if (new_inode_num == 0) return NULL;
 
+    bool is_dir = (flags & FS_DIRECTORY) != 0;
     ext2_inode_t new_inode;
     memset(&new_inode, 0, sizeof(ext2_inode_t));
-    new_inode.i_mode = EXT2_S_IFREG | 0644;
-    new_inode.i_size = 0;
-    new_inode.i_links_count = 1;
-    new_inode.i_blocks = 0;
+
+    if (is_dir) {
+        uint32_t dir_block = ext2_alloc_block();
+        if (dir_block == 0) return NULL;
+
+        new_inode.i_mode = EXT2_S_IFDIR | 0755;
+        new_inode.i_size = ext2_vol.block_size;
+        new_inode.i_links_count = 2; // '.' and parent
+        new_inode.i_blocks = ext2_vol.sectors_per_block;
+        new_inode.i_block[0] = dir_block;
+
+        // Инициализируем блок директории записями '.' и '..'
+        uint8_t *blk = (uint8_t *)kzalloc(ext2_vol.block_size);
+        if (blk) {
+            ext2_dir_entry_t *dot = (ext2_dir_entry_t *)blk;
+            dot->inode = new_inode_num;
+            dot->rec_len = 12;
+            dot->name_len = 1;
+            dot->file_type = EXT2_FT_DIR;
+            dot->name[0] = '.';
+
+            ext2_dir_entry_t *dotdot = (ext2_dir_entry_t *)(blk + 12);
+            dotdot->inode = dir_inode_num;
+            dotdot->rec_len = ext2_vol.block_size - 12;
+            dotdot->name_len = 2;
+            dotdot->file_type = EXT2_FT_DIR;
+            dotdot->name[0] = '.'; dotdot->name[1] = '.';
+
+            ext2_vol.dev.write(ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block, blk);
+            kfree(blk);
+        }
+    } else {
+        new_inode.i_mode = EXT2_S_IFREG | 0644;
+        new_inode.i_size = 0;
+        new_inode.i_links_count = 1;
+        new_inode.i_blocks = 0;
+    }
+
     ext2_write_inode(new_inode_num, &new_inode);
 
-    if (!ext2_add_dir_entry(dir_inode_num, new_inode_num, name, EXT2_FT_REG_FILE)) {
+    uint8_t ft = is_dir ? EXT2_FT_DIR : EXT2_FT_REG_FILE;
+    if (!ext2_add_dir_entry(dir_inode_num, new_inode_num, name, ft)) {
         return NULL;
     }
 
     vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strncpy(vnode->name, name, sizeof(vnode->name) - 1);
-    vnode->flags = FS_FILE;
-    vnode->length = 0;
+    vnode->flags = is_dir ? FS_DIRECTORY : FS_FILE;
+    vnode->length = new_inode.i_size;
     vnode->inode = new_inode_num;
     vnode->ptr = (vfs_node_t *)(uintptr_t)new_inode_num;
+    vnode->parent = dir;
     vnode->ops = &ext2_fops;
 
     return vnode;
