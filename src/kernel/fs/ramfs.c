@@ -65,10 +65,11 @@ static vfs_node_t *ramfs_finddir(vfs_node_t *node, const char *name) {
 }
 
 static vfs_node_t *ramfs_vfs_create(vfs_node_t *dir, const char *name, uint32_t flags) {
-    (void)flags;
+    if (flags & FS_DIRECTORY) {
+        return ramfs_create_directory(dir, name);
+    }
     return ramfs_create_file(dir, name, NULL, 0);
 }
-
 static vfs_file_operations_t ramfs_fops = {
     .read = ramfs_read,
     .write = ramfs_write,
