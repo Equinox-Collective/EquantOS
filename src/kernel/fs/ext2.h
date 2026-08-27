@@ -1,4 +1,4 @@
-// src/kernel/fs/ext2.h - Extended EXT2 Header with mkfs capability
+// src/kernel/fs/ext2.h - Updated with File System State Defines
 #ifndef EXT2_H
 #define EXT2_H
 
@@ -9,6 +9,19 @@
 #include "../drivers/disk/block.h"
 
 #define EXT2_SUPER_MAGIC 0xEF53
+
+// File System States
+#define EXT2_VALID_FS 1
+#define EXT2_ERROR_FS 2
+
+// File Types
+#define EXT2_FT_REG_FILE 1
+#define EXT2_FT_DIR      2
+#define EXT2_FT_SYMLINK  7
+
+// Inode Modes
+#define EXT2_S_IFREG 0x8000
+#define EXT2_S_IFDIR 0x4000
 
 // EXT2 Superblock structure
 typedef struct {
@@ -92,23 +105,8 @@ typedef struct {
     char     name[];
 } __attribute__((packed)) ext2_dir_entry_t;
 
-#define EXT2_FT_REG_FILE 1
-#define EXT2_FT_DIR      2
-
-#define EXT2_S_IFREG 0x8000
-#define EXT2_S_IFDIR 0x4000
-
 void ext2_init(void);
 vfs_node_t *ext2_mount_partition(block_device_t dev, uint32_t partition_lba);
-
-/**
- * @brief Format a partition or block device with a clean EXT2 filesystem.
- * @param dev Target block device interface
- * @param start_lba Partition start sector
- * @param sector_count Total sectors on the target partition
- * @param vol_label Optional volume name string (max 16 chars)
- * @return 0 on success, negative error code on failure.
- */
 int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, const char *vol_label);
 
 #endif // EXT2_H
