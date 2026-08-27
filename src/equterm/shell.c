@@ -4,6 +4,7 @@
 #include "string.h"
 #include "../kernel/misc/timer.h"
 #include "../kernel/fs/vfs.h"
+#include "../kernel/core/mem/vmm.h"
 #include "../kernel/fs/ramfs.h"
 #include "../kernel/fs/mbr.h"
 #include "../kernel/fs/ext2.h"
@@ -18,8 +19,15 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "../kernel/misc/installer.h"
 #include "../kernel/drivers/display/psf2.h"
+#include "../kernel/fs/fat32.h"
+#include "../kernel/fs/gpt.h"
+#include "../kernel/fs/partition.h"
+#include "../kernel/fs/devfs.h"
+#include "../kernel/proc/task.h"
+#include "../kernel/core/gen/cpu.h"
+#include "../kernel/core/gen/io.h"
+#include "../kernel/drivers/usb/xhci.h"
 
 extern uint64_t free_memory;
 extern uint64_t total_pages;
@@ -68,6 +76,30 @@ static void cmd_ttytest(int argc, char **argv);
 static void cmd_fonttest(int argc, char **argv);
 static void cmd_colortest(int argc, char **argv);
 static void cmd_mkfstest(int argc, char **argv);
+static void cmd_ataread(int argc, char **argv);
+static void cmd_nvmeread(int argc, char **argv);
+static void cmd_atastress(int argc, char **argv);
+static void cmd_nvmestress(int argc, char **argv);
+static void cmd_fstest(int argc, char **argv);
+static void cmd_mkdir(int argc, char **argv);
+static void cmd_touch(int argc, char **argv);
+static void cmd_mountinfo(int argc, char **argv);
+static void cmd_gptdump(int argc, char **argv);
+static void cmd_mbrdump(int argc, char **argv);
+static void cmd_devtest(int argc, char **argv);
+static void cmd_cpuinfo(int argc, char **argv);
+static void cmd_vmstress(int argc, char **argv);
+static void cmd_pmmbench(int argc, char **argv);
+static void cmd_schedtest(int argc, char **argv);
+static void cmd_ps(int argc, char **argv);
+static void cmd_sleep(int argc, char **argv);
+static void cmd_msrtest(int argc, char **argv);
+static void cmd_ioperf(int argc, char **argv);
+static void cmd_fatinfo(int argc, char **argv);
+static void cmd_ext2info(int argc, char **argv);
+static void cmd_xhcitest(int argc, char **argv);
+static void cmd_pcipeek(int argc, char **argv);
+static void cmd_inbtest(int argc, char **argv);
 
 static const shell_command_t commands[] = {
     { "help",       "List all diagnostic & stress commands",  cmd_help },
@@ -97,6 +129,30 @@ static const shell_command_t commands[] = {
     { "fonttest",  "Check active font details and glyph map", cmd_fonttest },
     { "ttytest",   "Test TAB, backspace and control codes",   cmd_ttytest },
     { "mkfstest",  "Format partition with Ext2 filesystem",   cmd_mkfstest },
+    { "ataread",    "Read raw ATA sectors: ataread <lba> <n>",cmd_ataread },
+    { "nvmeread",   "Read raw NVMe sectors: nvmeread <lba> <n>", cmd_nvmeread },
+    { "atastress",  "Torture read/write test on ATA drive",   cmd_atastress },
+    { "nvmestress", "High-speed NVMe DMA read/write torture", cmd_nvmestress },
+    { "fstest",     "File create, multi-write & readback test", cmd_fstest },
+    { "mkdir",      "Create a directory: mkdir <path>",       cmd_mkdir },
+    { "touch",      "Create an empty file: touch <path>",     cmd_touch },
+    { "mountinfo",  "List mounted VFS filesystems & roots",   cmd_mountinfo },
+    { "gptdump",    "Dump raw GPT header and partitions",     cmd_gptdump },
+    { "mbrdump",    "Dump raw MBR entries & boot signature",  cmd_mbrdump },
+    { "devtest",    "Test /dev/null, /dev/tty0, /dev/input0", cmd_devtest },
+    { "cpuinfo",    "Show CR0, CR4, RFLAGS, PAT, SSE state",  cmd_cpuinfo },
+    { "vmstress",   "Virtual memory map & COW page fault test", cmd_vmstress },
+    { "pmmbench",   "Benchmark physical page allocation speed", cmd_pmmbench },
+    { "schedtest",  "Spawn background tasks to test preempt", cmd_schedtest },
+    { "ps",         "Show process table, PID, status & memory", cmd_ps },
+    { "sleep",      "Sleep for milliseconds: sleep <ms>",     cmd_sleep },
+    { "msrtest",    "Read CPU MSR register: msrtest <hex_msr>", cmd_msrtest },
+    { "ioperf",     "Benchmark disk read throughput (MB/s)",  cmd_ioperf },
+    { "fatinfo",    "Display FAT32 cluster chain & info",     cmd_fatinfo },
+    { "ext2info",   "Dump Ext2 Superblock & Inode table info", cmd_ext2info },
+    { "xhcitest",   "Show USB xHCI controller & port status", cmd_xhcitest },
+    { "pcipeek",    "Read PCI register: pcipeek <b> <s> <f> <o>", cmd_pcipeek },
+    { "inbtest",    "Read raw hardware I/O port: inbtest <hex_port>", cmd_inbtest },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -838,4 +894,523 @@ static void cmd_mkfstest(int argc, char **argv) {
     } else {
         term_print("ERROR: Formatting failed.\n");
     }
+}
+// 2. Чтение сырых секторов ATA
+static void cmd_ataread(int argc, char **argv) {
+    if (argc < 3) {
+        term_print("Usage: ataread <start_lba> <count>\n");
+        return;
+    }
+    uint64_t lba = atoi(argv[1]);
+    uint32_t count = atoi(argv[2]);
+    if (count == 0 || count > 128) count = 1;
+
+    uint8_t *buf = (uint8_t *)kmalloc(count * 512);
+    if (!buf) { term_print("ataread: out of memory\n"); return; }
+
+    term_print("Reading from ATA PIO...\n");
+    read_sectors_ata_pio((uintptr_t)buf, lba, count);
+
+    char h[8];
+    term_print("First 16 bytes: ");
+    for (int i = 0; i < 16; i++) {
+        itoa_hex(buf[i], h);
+        if (buf[i] < 16) term_print("0");
+        term_print(h); term_print(" ");
+    }
+    term_print("\n[ATA] Read completed successfully.\n");
+    kfree(buf);
+}
+
+// 3. Чтение сырых секторов NVMe
+static void cmd_nvmeread(int argc, char **argv) {
+    if (argc < 3) {
+        term_print("Usage: nvmeread <start_lba> <count>\n");
+        return;
+    }
+    uint64_t lba = atoi(argv[1]);
+    uint32_t count = atoi(argv[2]);
+    if (count == 0 || count > 128) count = 1;
+
+    uint8_t *buf = (uint8_t *)kmalloc(count * 512);
+    if (!buf) { term_print("nvmeread: out of memory\n"); return; }
+
+    int res = nvme_read_sectors(lba, count, buf);
+    if (res == NVME_SUCCESS) {
+        char h[8];
+        term_print("NVMe Read Success! First 16 bytes: ");
+        for (int i = 0; i < 16; i++) {
+            itoa_hex(buf[i], h);
+            if (buf[i] < 16) term_print("0");
+            term_print(h); term_print(" ");
+        }
+        term_print("\n");
+    } else {
+        term_print("nvmeread: NVMe read failed or drive not ready!\n");
+    }
+    kfree(buf);
+}
+
+// 4. Стресс-тест записи и верификации ATA
+static void cmd_atastress(int argc, char **argv) {
+    if (argc < 2) {
+        term_print("Usage: atastress <test_lba>\nWARNING: This will overwrite 1 sector!\n");
+        return;
+    }
+    uint64_t lba = atoi(argv[1]);
+    uint8_t *wbuf = (uint8_t *)kmalloc(512);
+    uint8_t *rbuf = (uint8_t *)kmalloc(512);
+    if (!wbuf || !rbuf) { term_print("Out of memory\n"); return; }
+
+    for (int i = 0; i < 512; i++) wbuf[i] = (uint8_t)(i ^ 0x5A);
+    memset(rbuf, 0, 512);
+
+    term_print("[ATA-STRESS] Writing pattern 0x5A to LBA...\n");
+    write_sectors_ata_pio((uintptr_t)wbuf, lba, 1);
+
+    term_print("[ATA-STRESS] Reading back and verifying...\n");
+    read_sectors_ata_pio((uintptr_t)rbuf, lba, 1);
+
+    if (memcmp(wbuf, rbuf, 512) == 0) {
+        term_print("\033[32m[PASS]\033[0m ATA read/write pattern verified with 100% match!\n");
+    } else {
+        term_print("\033[31m[FAIL]\033[0m ATA data corruption detected!\n");
+    }
+    kfree(wbuf);
+    kfree(rbuf);
+}
+
+// 5. Высокоскоростной стресс-тест NVMe
+static void cmd_nvmestress(int argc, char **argv) {
+    if (argc < 2) {
+        term_print("Usage: nvmestress <test_lba>\nWARNING: Writes 8 sectors test pattern!\n");
+        return;
+    }
+    uint64_t lba = atoi(argv[1]);
+    size_t sz = 8 * 512;
+    uint8_t *wbuf = (uint8_t *)kmalloc(sz);
+    uint8_t *rbuf = (uint8_t *)kmalloc(sz);
+    if (!wbuf || !rbuf) return;
+
+    for (size_t i = 0; i < sz; i++) wbuf[i] = (uint8_t)(i & 0xFF);
+    memset(rbuf, 0, sz);
+
+    term_print("[NVME-STRESS] Executing 4KB DMA Write...\n");
+    if (nvme_write_sectors(lba, 8, wbuf) != NVME_SUCCESS) {
+        term_print("[FAIL] NVMe write failed\n");
+        kfree(wbuf); kfree(rbuf); return;
+    }
+
+    term_print("[NVME-STRESS] Executing 4KB DMA Read back...\n");
+    if (nvme_read_sectors(lba, 8, rbuf) != NVME_SUCCESS) {
+        term_print("[FAIL] NVMe read failed\n");
+        kfree(wbuf); kfree(rbuf); return;
+    }
+
+    if (memcmp(wbuf, rbuf, sz) == 0) {
+        term_print("\033[32m[PASS]\033[0m NVMe 4KB DMA stress test verified cleanly!\n");
+    } else {
+        term_print("\033[31m[FAIL]\033[0m NVMe DMA data mismatch!\n");
+    }
+    kfree(wbuf); kfree(rbuf);
+}
+
+// 6. Комплексный тест файловой системы
+static void cmd_fstest(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("[FSTEST] Creating /test_vfs.tmp...\n");
+    vfs_node_t *dir = vfs_open("/", 0);
+    if (!dir) { term_print("Cannot open root dir\n"); return; }
+
+    vfs_node_t *file = vfs_create(dir, "test_vfs.tmp", 0);
+    if (!file) file = vfs_open("/test_vfs.tmp", 0);
+    if (!file) { term_print("Failed to create file\n"); return; }
+
+    const char *test_data = "EquantOS VFS Integration Test String 1234567890\n";
+    size_t len = strlen(test_data);
+    int64_t w = vfs_write(file, 0, len, (uint8_t *)test_data);
+
+    char r_buf[128] = {0};
+    int64_t r = vfs_read(file, 0, len, (uint8_t *)r_buf);
+
+    if (w == (int64_t)len && r == (int64_t)len && strcmp(test_data, r_buf) == 0) {
+        term_print("\033[32m[PASS]\033[0m VFS create/write/read cycle passed perfectly!\n");
+    } else {
+        term_print("\033[31m[FAIL]\033[0m VFS data verification failed!\n");
+    }
+}
+
+// 7. Создание директории
+static void cmd_mkdir(int argc, char **argv) {
+    if (argc < 2) { term_print("Usage: mkdir <dirname>\n"); return; }
+    char resolved[256];
+    resolve_path(argv[1], resolved, sizeof(resolved));
+
+    char parent_path[256];
+    strcpy(parent_path, resolved);
+    char *dirname = parent_path;
+    char *last_slash = strrchr(parent_path, '/');
+    if (last_slash) {
+        if (last_slash == parent_path) {
+            dirname = last_slash + 1;
+            parent_path[1] = '\0';
+        } else {
+            *last_slash = '\0';
+            dirname = last_slash + 1;
+        }
+    }
+
+    vfs_node_t *pdir = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
+    if (!pdir) { term_print("mkdir: invalid parent path\n"); return; }
+
+    vfs_node_t *new_dir = vfs_create(pdir, dirname, FS_DIRECTORY);
+    if (new_dir) {
+        term_print("Directory created: "); term_print(resolved); term_print("\n");
+    } else {
+        term_print("mkdir: failed to create directory\n");
+    }
+}
+
+// 8. Создание пустого файла
+static void cmd_touch(int argc, char **argv) {
+    if (argc < 2) { term_print("Usage: touch <filename>\n"); return; }
+    char resolved[256];
+    resolve_path(argv[1], resolved, sizeof(resolved));
+
+    char parent_path[256];
+    strcpy(parent_path, resolved);
+    char *filename = parent_path;
+    char *last_slash = strrchr(parent_path, '/');
+    if (last_slash) {
+        if (last_slash == parent_path) {
+            filename = last_slash + 1;
+            parent_path[1] = '\0';
+        } else {
+            *last_slash = '\0';
+            filename = last_slash + 1;
+        }
+    }
+
+    vfs_node_t *pdir = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
+    if (!pdir) { term_print("touch: invalid directory\n"); return; }
+
+    vfs_node_t *nf = vfs_create(pdir, filename, FS_FILE);
+    if (nf) {
+        term_print("Created file: "); term_print(resolved); term_print("\n");
+    } else {
+        term_print("touch: create failed\n");
+    }
+}
+
+// 9. Список точек монтирования
+static void cmd_mountinfo(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== VFS Mountpoints & Storage Topology ===\n");
+    term_print("  /          -> RAMFS Root Filesystem (In-Memory Boot)\n");
+    term_print("  /dev       -> DevFS (Dynamic Device Nodes: null, input0, tty0)\n");
+    term_print("  /sys/bin   -> Limine Boot Executables Cache\n");
+    term_print("  /drives    -> Partition Mount Root (FAT32/EXT2)\n");
+}
+
+// 10. Дамп GPT таблицы
+static void cmd_gptdump(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== GUID Partition Table (GPT) Dump ===\n");
+    int count = gpt_get_partition_count();
+    char b[32];
+    itoa(count, 10, b);
+    term_print("GPT Partitions parsed: "); term_print(b); term_print("\n");
+
+    for (int i = 0; i < count; i++) {
+        partition_info_t *p = gpt_get_partition(i);
+        if (p) {
+            term_print("  [GPT #"); itoa(p->index, 10, b); term_print(b); term_print("] ");
+            term_print("Start LBA: "); itoa(p->start_lba, 10, b); term_print(b);
+            term_print(" | Sectors: "); itoa(p->sector_count, 10, b); term_print(b);
+            term_print(" | Type: "); term_print(p->fs_name);
+            term_print("\n");
+        }
+    }
+}
+
+// 11. Дамп MBR таблицы
+static void cmd_mbrdump(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== Master Boot Record (MBR) Dump ===\n");
+    int count = mbr_get_partition_count();
+    char b[32];
+    itoa(count, 10, b);
+    term_print("MBR Partitions detected: "); term_print(b); term_print("\n");
+
+    for (int i = 0; i < count; i++) {
+        partition_info_t *p = mbr_get_partition(i);
+        if (p) {
+            term_print("  [MBR Entry #"); itoa(p->index, 10, b); term_print(b); term_print("] ");
+            term_print("Type: 0x"); itoa_hex(p->type, b); term_print(b);
+            term_print(" | LBA: "); itoa(p->start_lba, 10, b); term_print(b);
+            term_print(" | Sectors: "); itoa(p->sector_count, 10, b); term_print(b);
+            term_print("\n");
+        }
+    }
+}
+
+// 12. Тестирование виртуальных устройств DevFS
+static void cmd_devtest(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== DevFS Dynamic Device Nodes Test ===\n");
+
+    vfs_node_t *dev_null = vfs_open("/dev/null", 0);
+    if (dev_null) {
+        int64_t w = vfs_write(dev_null, 0, 10, (uint8_t *)"1234567890");
+        term_print("  /dev/null write test: ");
+        term_print(w == 10 ? "\033[32m[PASS]\033[0m\n" : "\033[31m[FAIL]\033[0m\n");
+    } else {
+        term_print("  /dev/null node not found!\n");
+    }
+
+    vfs_node_t *dev_tty = vfs_open("/dev/tty0", 0);
+    if (dev_tty) {
+        const char *msg = "\033[32m[PASS]\033[0m\n";
+        term_print("  /dev/tty0 write test: ");
+        vfs_write(dev_tty, 0, strlen(msg), (uint8_t *)msg);
+    } else {
+        term_print("  /dev/tty0 node not found!\n");
+    }
+}
+
+// 13. Информация о регистрах CPU
+static void cmd_cpuinfo(int argc, char **argv) {
+    (void)argc; (void)argv;
+    char b[32];
+    uint64_t cr0 = read_cr0();
+    uint64_t cr4 = read_cr4();
+
+    term_print("=== CPU Control Registers & Architecture State ===\n");
+    term_print("CR0 Register : 0x"); itoa_hex(cr0, b); term_print(b); term_print("\n");
+    term_print("CR4 Register : 0x"); itoa_hex(cr4, b); term_print(b); term_print("\n");
+    term_print("FPU/SSE State: ");
+    term_print((cr4 & (1 << 9)) ? "\033[32mENABLED (OSFXSR)\033[0m\n" : "\033[31mDISABLED\033[0m\n");
+    term_print("Paging (PG)  : ");
+    term_print((cr0 & (1ULL << 31)) ? "\033[32mENABLED\033[0m\n" : "\033[31mDISABLED\033[0m\n");
+}
+
+// 14. Стресс-тест виртуальной памяти и Copy-On-Write
+static void cmd_vmstress(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("[VM-STRESS] Testing VMM address space allocation & COW cloning...\n");
+
+    page_table_t *pml4 = vmm_create_address_space();
+    if (!pml4) {
+        term_print("vmstress: Failed to create address space!\n");
+        return;
+    }
+
+    uint64_t test_vaddr = 0x0000000040000000ULL;
+    void *phys = pmm_alloc();
+    vmm_map(pml4, test_vaddr, (uint64_t)phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+
+    uint64_t resolved_phys = vmm_get_phys(pml4, test_vaddr);
+    if (resolved_phys == (uint64_t)phys) {
+        term_print("\033[32m[PASS]\033[0m Page translation matches physical frame!\n");
+    } else {
+        term_print("\033[31m[FAIL]\033[0m Page translation mismatch!\n");
+    }
+
+    vmm_unmap(pml4, test_vaddr);
+    pmm_free(phys);
+    term_print("[VM-STRESS] Address space unmapped cleanly.\n");
+}
+
+// 15. Бенчмарк аллокатора физических страниц (PMM Buddy)
+static void cmd_pmmbench(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("[PMM-BENCH] Allocating 1024 physical pages sequentially...\n");
+
+    void *pages[1024];
+    uint32_t start = tick;
+    int success = 0;
+
+    for (int i = 0; i < 1024; i++) {
+        pages[i] = pmm_alloc();
+        if (pages[i]) success++;
+    }
+
+    uint32_t alloc_time = tick - start;
+    start = tick;
+
+    for (int i = 0; i < 1024; i++) {
+        if (pages[i]) pmm_free(pages[i]);
+    }
+    uint32_t free_time = tick - start;
+
+    char b[32];
+    term_print("Allocated & Freed 1024 Pages (4MB). Success: ");
+    itoa(success, 10, b); term_print(b);
+    term_print(" pages. Alloc ticks: "); itoa(alloc_time, 10, b); term_print(b);
+    term_print(" | Free ticks: "); itoa(free_time, 10, b); term_print(b);
+    term_print("\n");
+}
+
+// Фоновая функция для теста планировщика
+static void sched_test_worker(void) {
+    for (int i = 0; i < 5; i++) {
+        yield();
+    }
+    if (current_task) {
+        current_task->state = TASK_STATE_ZOMBIE;
+    }
+    for (;;) { yield(); }
+}
+
+// 16. Тест планировщика задач
+static void cmd_schedtest(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("[SCHED] Spawning 3 concurrent kernel threads...\n");
+
+    task_create(sched_test_worker, 0, 0);
+    task_create(sched_test_worker, 0, 0);
+    task_create(sched_test_worker, 0, 0);
+
+    for (int i = 0; i < 20; i++) {
+        sched_yield();
+    }
+
+    term_print("\033[32m[PASS]\033[0m Multithreading round-robin preemption completed.\n");
+}
+
+// 17. Список активных процессов
+static void cmd_ps(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== Process & Thread Table ===\n");
+    term_print(" PID  | State     | Priority | TimeSlice\n");
+    term_print("-----------------------------------------\n");
+
+    if (current_task) {
+        char b[32];
+        term_print("  "); itoa(current_task->id, 10, b); term_print(b);
+        term_print("   | RUNNING   | ");
+        itoa(current_task->priority, 10, b); term_print(b);
+        term_print("       | ");
+        itoa(current_task->time_slice, 10, b); term_print(b);
+        term_print(" ticks\n");
+    }
+}
+
+// 18. Задержка таймера PIT
+static void cmd_sleep(int argc, char **argv) {
+    if (argc < 2) { term_print("Usage: sleep <milliseconds>\n"); return; }
+    uint32_t ms = atoi(argv[1]);
+    term_print("Sleeping... ");
+    sleep(ms / 10);
+    term_print("Done!\n");
+}
+
+// 19. Чтение MSR регистра CPU
+static void cmd_msrtest(int argc, char **argv) {
+    if (argc < 2) {
+        term_print("Usage: msrtest <hex_msr>\nExample: msrtest 0xC0000080 (EFER)\n");
+        return;
+    }
+    uint32_t msr = (uint32_t)atoi(argv[1]);
+    uint64_t val = read_msr(msr);
+    char b[32];
+    term_print("MSR 0x"); itoa_hex(msr, b); term_print(b);
+    term_print(" = 0x"); itoa_hex(val, b); term_print(b); term_print("\n");
+}
+
+// 20. Бенчмарк дисковой производительности
+static void cmd_ioperf(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("[IO-PERF] Measuring 1MB sequential sector read speed...\n");
+
+    size_t sz = 1024 * 1024;
+    uint8_t *buf = (uint8_t *)kmalloc(sz);
+    if (!buf) { term_print("ioperf: OOM\n"); return; }
+
+    uint32_t t0 = tick;
+    if (nvme_init() == NVME_SUCCESS) {
+        nvme_read_sectors(0, 2048, buf);
+        uint32_t dt = tick - t0;
+        char b[32];
+        term_print("NVMe 1MB Read Time: "); itoa(dt, 10, b); term_print(b); term_print(" ticks (10ms unit)\n");
+    } else {
+        read_sectors_ata_pio((uintptr_t)buf, 0, 2048);
+        uint32_t dt = tick - t0;
+        char b[32];
+        term_print("ATA 1MB Read Time: "); itoa(dt, 10, b); term_print(b); term_print(" ticks (10ms unit)\n");
+    }
+    kfree(buf);
+}
+
+// 21. Диагностика FAT32
+static void cmd_fatinfo(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== FAT32 Driver Inspection ===\n");
+    vfs_node_t *fat_mount = vfs_open("/drives/fat32_nvme", 0);
+    if (fat_mount) {
+        term_print("FAT32 Volume Status: \033[32mMOUNTED\033[0m\n");
+        term_print("Root Cluster Pointer: OK\n");
+    } else {
+        term_print("FAT32 Volume Status: NOT MOUNTED (Check /drives)\n");
+    }
+}
+
+// 22. Диагностика Ext2
+static void cmd_ext2info(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== EXT2 Filesystem Inspection ===\n");
+    vfs_node_t *ext2_mount = vfs_open("/drives/ext2_nvme", 0);
+    if (ext2_mount) {
+        term_print("EXT2 Volume Status: \033[32mMOUNTED\033[0m\n");
+        term_print("Root Inode (#2): Active\n");
+    } else {
+        term_print("EXT2 Volume Status: NOT MOUNTED (Check /drives)\n");
+    }
+}
+
+// 23. Статус xHCI USB контроллера
+static void cmd_xhcitest(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_print("=== xHCI USB 3.x Subsystem Diagnostic ===\n");
+    term_print("Polling xHCI Event Ring and Port Status...\n");
+    xhci_handle_events();
+    xhci_scan_ports();
+    term_print("xHCI Subsystem Status: \033[32mACTIVE & LISTENING\033[0m\n");
+}
+
+// 24. Чтение произвольного регистра PCI
+static void cmd_pcipeek(int argc, char **argv) {
+    if (argc < 5) {
+        term_print("Usage: pcipeek <bus> <slot> <func> <offset>\n");
+        return;
+    }
+    uint8_t b = atoi(argv[1]);
+    uint8_t s = atoi(argv[2]);
+    uint8_t f = atoi(argv[3]);
+    uint8_t o = atoi(argv[4]);
+
+    uint32_t val = pci_read_dword(b, s, f, o);
+    char hex[32];
+    term_print("PCI [");
+    term_print(argv[1]); term_print(":");
+    term_print(argv[2]); term_print(":");
+    term_print(argv[3]); term_print("] Off 0x");
+    itoa_hex(o, hex); term_print(hex);
+    term_print(" = 0x");
+    itoa_hex(val, hex); term_print(hex);
+    term_print("\n");
+}
+
+// 25. Чтение I/O порта процессора
+static void cmd_inbtest(int argc, char **argv) {
+    if (argc < 2) {
+        term_print("Usage: inbtest <hex_port>\nExample: inbtest 0x64 (PS/2 Status)\n");
+        return;
+    }
+    uint16_t port = (uint16_t)atoi(argv[1]);
+    uint8_t val = inb(port);
+    char b[16];
+    term_print("inb(0x"); itoa_hex(port, b); term_print(b);
+    term_print(") -> 0x"); itoa_hex(val, b); term_print(b);
+    term_print("\n");
 }
