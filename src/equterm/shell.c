@@ -6,6 +6,7 @@
 #include "../kernel/fs/vfs.h"
 #include "../kernel/fs/ramfs.h"
 #include "../kernel/fs/mbr.h"
+#include "../kernel/fs/ext2.h"
 #include "../kernel/core/mem/pmm.h"
 #include "../kernel/core/mem/memory.h"
 #include "../kernel/drivers/pci/pci.h"
@@ -66,34 +67,36 @@ static void cmd_cp(int argc, char **argv);
 static void cmd_ttytest(int argc, char **argv);
 static void cmd_fonttest(int argc, char **argv);
 static void cmd_colortest(int argc, char **argv);
+static void cmd_mkfstest(int argc, char **argv);
 
 static const shell_command_t commands[] = {
-    { "help",       "List all diagnostic & stress commands", cmd_help },
-    { "clear",      "Clear the terminal screen",             cmd_clear },
-    { "echo",       "Print text back to terminal",           cmd_echo },
-    { "uptime",     "Show system uptime since boot",         cmd_uptime },
-    { "eqfetch",    "Show EquantOS system banner",           cmd_eqfetch },
-    { "ver",        "Show OS version details",               cmd_ver },
-    { "ls",         "List files in VFS root directory",      cmd_ls },
-    { "cat",        "Read and display file contents",        cmd_cat },
-    { "mem",        "Show RAM and heap usage overview",      cmd_mem },
-    { "memstress",  "Torture test kernel heap allocation",   cmd_memstress },
-    { "heapdump",   "Dump internal kernel heap block map",   cmd_heapdump },
-    { "diskinfo",   "Show ATA drive info and MBR partitions",cmd_diskinfo },
-    { "hexdump",    "Dump raw file contents in Hex format",  cmd_hexdump },
-    { "writefile",  "Create/write text file to RAMFS/FAT32", cmd_writefile },
+    { "help",       "List all diagnostic & stress commands",  cmd_help },
+    { "clear",      "Clear the terminal screen",              cmd_clear },
+    { "echo",       "Print text back to terminal",            cmd_echo },
+    { "uptime",     "Show system uptime since boot",          cmd_uptime },
+    { "eqfetch",    "Show EquantOS system banner",            cmd_eqfetch },
+    { "ver",        "Show OS version details",                cmd_ver },
+    { "ls",         "List files in VFS root directory",       cmd_ls },
+    { "cat",        "Read and display file contents",         cmd_cat },
+    { "mem",        "Show RAM and heap usage overview",       cmd_mem },
+    { "memstress",  "Torture test kernel heap allocation",    cmd_memstress },
+    { "heapdump",   "Dump internal kernel heap block map",    cmd_heapdump },
+    { "diskinfo",   "Show ATA drive info and MBR partitions", cmd_diskinfo },
+    { "hexdump",    "Dump raw file contents in Hex format",   cmd_hexdump },
+    { "writefile",  "Create/write text file to RAMFS/FAT32",  cmd_writefile },
     { "pciscan",    "Restore and print all PCI devices",      cmd_pciscan },
-    { "sysinfo",    "Show detailed memory metrics struct",   cmd_sysinfo },
-    { "panic_test", "Trigger Ring 0 #UD exception (panic)",  cmd_panic_test },
-    { "reboot",   "Reboot the system hardware",              cmd_reboot },
-    { "shutdown", "Power off the system hardware",           cmd_shutdown },
-    { "pwd",    "Print current working directory",           cmd_pwd },
-    { "cd",     "Change working directory",                  cmd_cd },
-    { "run",    "Load and execute an ELF binary",            cmd_run },
-    { "cp",     "Copy source file to destination",           cmd_cp },
+    { "sysinfo",    "Show detailed memory metrics struct",    cmd_sysinfo },
+    { "panic_test", "Trigger Ring 0 #UD exception (panic)",   cmd_panic_test },
+    { "reboot",   "Reboot the system hardware",               cmd_reboot },
+    { "shutdown", "Power off the system hardware",            cmd_shutdown },
+    { "pwd",    "Print current working directory",            cmd_pwd },
+    { "cd",     "Change working directory",                   cmd_cd },
+    { "run",    "Load and execute an ELF binary",             cmd_run },
+    { "cp",     "Copy source file to destination",            cmd_cp },
     { "colortest", "Test ANSI color palette output",          cmd_colortest },
     { "fonttest",  "Check active font details and glyph map", cmd_fonttest },
     { "ttytest",   "Test TAB, backspace and control codes",   cmd_ttytest },
+    { "mkfstest",  "Format partition with Ext2 filesystem",   cmd_mkfstest },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -798,4 +801,41 @@ static void cmd_ttytest(int argc, char **argv) {
     term_print("\nTesting Carriage Return (\\r) and Backspace (\\b):\n");
     term_print("Loading [====      ] 40%\b\b\b\b\b\b\b\b\b\b80% [========  ]\n");
     term_print("============================================\n");
+}
+
+static void cmd_mkfstest(int argc, char **argv) {
+    if (argc < 2) {
+        term_print("Usage: mkfstest <partition_num>\nExample: mkfstest 0\n");
+        return;
+    }
+
+    int part_num = atoi(argv[1]);
+    partition_info_t *p = disk_get_partition(part_num);
+    if (!p) {
+        term_print("mkfstest: Invalid partition index!\n");
+        return;
+    }
+
+    block_device_t dev;
+    if (nvme_init() == NVME_SUCCESS) {
+        dev = nvme_get_block_device();
+    } else {
+        block_device_t ata_dev = {
+            .read = (block_read_fn)read_sectors_ata_pio,
+            .write = (block_write_fn)write_sectors_ata_pio,
+            .sector_size = 512
+        };
+        dev = ata_dev;
+    }
+
+    term_print("Formatting partition #");
+    term_print(argv[1]);
+    term_print(" with EXT2 Filesystem...\n");
+
+    int err = mkfs_ext2(dev, p->start_lba, p->sector_count, "EQUANT_TEST");
+    if (err == 0) {
+        term_print("SUCCESS: Partition formatted to EXT2!\n");
+    } else {
+        term_print("ERROR: Formatting failed.\n");
+    }
 }
