@@ -1,3 +1,4 @@
+// src/libs/string.h - String and Integer Parsing Declarations
 #ifndef LIBC_STRING_H
 #define LIBC_STRING_H
 
@@ -5,11 +6,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Базовые функции памяти
+// Memory Functions
 void *memcpy(void *dest, const void *src, size_t n);
 void *memset(void *s, int c, size_t n);
 
-// Функции строк
+// String Functions
 size_t strlen(const char *s);
 int strcmp(const char *s1, const char *s2);
 int strncmp(const char *s1, const char *s2, size_t n);
@@ -26,9 +27,11 @@ size_t strcspn(const char *s1, const char *s2);
 char *strrchr(const char *s, int c);
 char *strchr(const char *s, int c);
 
-// Конвертация чисел в строки (супер-важно для будущего printf!)
+// Number <-> String Conversion
 void itoa(int64_t num, int base, char *buffer);
 void itoa_hex(uint64_t num, char *buffer);
+int atoi(const char *str);
+int64_t atoll(const char *str);
 char *strsep(char **stringp, const char *delim);
 
-#endif
+#endif // LIBC_STRING_H

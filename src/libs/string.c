@@ -296,3 +296,61 @@ void *memmove(void *dest, const void *src, size_t n) {
 
     return dest;
 }
+
+int atoi(const char *str) {
+    if (!str) return 0;
+
+    int res = 0;
+    int sign = 1;
+
+    // Skip leading whitespaces
+    while (*str == ' ' || *str == '\t' || *str == '\n' || 
+           *str == '\r' || *str == '\f' || *str == '\v') {
+        str++;
+    }
+
+    // Handle sign
+    if (*str == '-') {
+        sign = -1;
+        str++;
+    } else if (*str == '+') {
+        str++;
+    }
+
+    // Calculate integer value
+    while (*str >= '0' && *str <= '9') {
+        res = res * 10 + (*str - '0');
+        str++;
+    }
+
+    return sign * res;
+}
+
+int64_t atoll(const char *str) {
+    if (!str) return 0;
+
+    int64_t res = 0;
+    int sign = 1;
+
+    // Skip leading whitespaces
+    while (*str == ' ' || *str == '\t' || *str == '\n' || 
+           *str == '\r' || *str == '\f' || *str == '\v') {
+        str++;
+    }
+
+    // Handle sign
+    if (*str == '-') {
+        sign = -1;
+        str++;
+    } else if (*str == '+') {
+        str++;
+    }
+
+    // Calculate 64-bit integer value
+    while (*str >= '0' && *str <= '9') {
+        res = res * 10 + (*str - '0');
+        str++;
+    }
+
+    return (int64_t)sign * res;
+}
