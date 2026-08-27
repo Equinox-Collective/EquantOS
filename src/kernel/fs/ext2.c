@@ -503,6 +503,163 @@ void ext2_init(void) {
     serial_puts(COM1, "[EXT2] Initializing EXT2 file system driver...\n");
 }
 
+int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, const char *vol_label) {
+    if (!dev.write || sector_count < 2048) { // Require at least ~1MB size
+        serial_puts(COM1, "[MKFS-EXT2 ERROR] Invalid device or sector count too small!\n");
+        return -1;
+    }
+
+    uint32_t block_size = 1024; // Standard 1KB block size
+    uint32_t sectors_per_block = block_size / 512; // 2 sectors per block
+    uint32_t total_blocks = sector_count / sectors_per_block;
+
+    if (total_blocks < 100) {
+        serial_puts(COM1, "[MKFS-EXT2 ERROR] Total block count too low for Ext2 layout!\n");
+        return -1;
+    }
+
+    uint32_t blocks_per_group = 8192;
+    uint32_t inodes_per_group = 1024;
+    uint32_t num_groups = (total_blocks + blocks_per_group - 1) / blocks_per_group;
+
+    if (num_groups > 1) {
+        // Keep single block group for simplicity during installation target
+        num_groups = 1;
+        total_blocks = blocks_per_group;
+    }
+
+    uint32_t total_inodes = inodes_per_group * num_groups;
+    uint32_t inode_size = 128;
+    uint32_t inode_table_blocks = (inodes_per_group * inode_size) / block_size; // 128 blocks for inodes
+
+    // Layout for Group 0:
+    // Block 0: Reserved for MBR / Bootloader (LBA start_lba .. start_lba+1)
+    // Block 1: Superblock (LBA start_lba + 2)
+    // Block 2: Block Group Descriptor Table (LBA start_lba + 4)
+    // Block 3: Block Bitmap
+    // Block 4: Inode Bitmap
+    // Block 5..(5 + inode_table_blocks - 1): Inode Table (Blocks 5..132)
+    // Block (5 + inode_table_blocks): Root Directory Data Block (#2)
+
+    uint32_t block_bitmap_blk = 3;
+    uint32_t inode_bitmap_blk = 4;
+    uint32_t inode_table_blk  = 5;
+    uint32_t root_dir_blk     = 5 + inode_table_blocks;
+
+    uint32_t reserved_system_blocks = root_dir_blk + 1; // All blks up to & including root dir data
+
+    // 1. Prepare Superblock
+    ext2_superblock_t sb;
+    memset(&sb, 0, sizeof(ext2_superblock_t));
+
+    sb.s_inodes_count       = total_inodes;
+    sb.s_blocks_count       = total_blocks;
+    sb.s_r_blocks_count     = 0;
+    sb.s_free_blocks_count  = total_blocks - reserved_system_blocks;
+    sb.s_free_inodes_count  = total_inodes - 11; // Reserved inodes 1..10 used, 11 free
+    sb.s_first_data_block   = 1; // 1KB block size offset
+    sb.s_log_block_size     = 0; // 1024 << 0 = 1024
+    sb.s_log_frag_size      = 0;
+    sb.s_blocks_per_group   = blocks_per_group;
+    sb.s_frags_per_group    = blocks_per_group;
+    sb.s_inodes_per_group   = inodes_per_group;
+    sb.s_magic              = EXT2_SUPER_MAGIC; // 0xEF53
+    sb.s_state              = EXT2_VALID_FS;
+    sb.s_errors             = 1; // Continue on errors
+    sb.s_minor_rev_level    = 0;
+    sb.s_rev_level          = 0; // Revision 0
+    sb.s_first_ino          = 11;
+    sb.s_inode_size         = 128;
+    sb.s_block_group_nr     = 0;
+
+    if (vol_label) {
+        strncpy(sb.s_volume_name, vol_label, 15);
+    } else {
+        strcpy(sb.s_volume_name, "EQUANT_EXT2");
+    }
+
+    // Write Superblock to Block 1 (LBA start_lba + 2)
+    uint8_t *block_buf = (uint8_t *)kzalloc(block_size);
+    if (!block_buf) return -1;
+
+    memcpy(block_buf, &sb, sizeof(ext2_superblock_t));
+    dev.write(start_lba + (1 * sectors_per_block), sectors_per_block, block_buf);
+
+    // 2. Prepare Block Group Descriptor Table (BGD)
+    ext2_bgd_t bgd;
+    memset(&bgd, 0, sizeof(ext2_bgd_t));
+
+    bgd.bg_block_bitmap      = block_bitmap_blk;
+    bgd.bg_inode_bitmap      = inode_bitmap_blk;
+    bgd.bg_inode_table       = inode_table_blk;
+    bgd.bg_free_blocks_count = (uint16_t)sb.s_free_blocks_count;
+    bgd.bg_free_inodes_count = (uint16_t)sb.s_free_inodes_count;
+    bgd.bg_used_dirs_count   = 1; // Root directory
+
+    memset(block_buf, 0, block_size);
+    memcpy(block_buf, &bgd, sizeof(ext2_bgd_t));
+    dev.write(start_lba + (2 * sectors_per_block), sectors_per_block, block_buf);
+
+    // 3. Write Block Bitmap
+    memset(block_buf, 0, block_size);
+    for (uint32_t i = 0; i < reserved_system_blocks; i++) {
+        block_buf[i / 8] |= (1 << (i % 8));
+    }
+    dev.write(start_lba + (block_bitmap_blk * sectors_per_block), sectors_per_block, block_buf);
+
+    // 4. Write Inode Bitmap
+    memset(block_buf, 0, block_size);
+    // Mark inodes 1..10 as used
+    for (uint32_t i = 0; i < 10; i++) {
+        block_buf[i / 8] |= (1 << (i % 8));
+    }
+    dev.write(start_lba + (inode_bitmap_blk * sectors_per_block), sectors_per_block, block_buf);
+
+    // 5. Zero out Inode Table
+    memset(block_buf, 0, block_size);
+    for (uint32_t i = 0; i < inode_table_blocks; i++) {
+        dev.write(start_lba + ((inode_table_blk + i) * sectors_per_block), sectors_per_block, block_buf);
+    }
+
+    // 6. Write Root Inode (#2) into Inode Table Block 5 (Offset 128 bytes)
+    ext2_inode_t root_inode;
+    memset(&root_inode, 0, sizeof(ext2_inode_t));
+
+    root_inode.i_mode        = EXT2_S_IFDIR | 0755;
+    root_inode.i_size        = block_size;
+    root_inode.i_links_count = 2; // '.' and '..'
+    root_inode.i_blocks      = sectors_per_block;
+    root_inode.i_block[0]    = root_dir_blk;
+
+    dev.read(start_lba + (inode_table_blk * sectors_per_block), sectors_per_block, block_buf);
+    memcpy(block_buf + inode_size, &root_inode, sizeof(ext2_inode_t)); // Inode 2 is index 1 -> offset 128
+    dev.write(start_lba + (inode_table_blk * sectors_per_block), sectors_per_block, block_buf);
+
+    // 7. Initialize Root Directory Data Block
+    memset(block_buf, 0, block_size);
+
+    ext2_dir_entry_t *entry_dot = (ext2_dir_entry_t *)block_buf;
+    entry_dot->inode     = 2;
+    entry_dot->rec_len   = 12;
+    entry_dot->name_len = 1;
+    entry_dot->file_type = EXT2_FT_DIR;
+    entry_dot->name[0]   = '.';
+
+    ext2_dir_entry_t *entry_dotdot = (ext2_dir_entry_t *)(block_buf + 12);
+    entry_dotdot->inode     = 2;
+    entry_dotdot->rec_len   = block_size - 12; // Occupies remaining block space
+    entry_dotdot->name_len = 2;
+    entry_dotdot->file_type = EXT2_FT_DIR;
+    entry_dotdot->name[0]   = '.';
+    entry_dotdot->name[1]   = '.';
+
+    dev.write(start_lba + (root_dir_blk * sectors_per_block), sectors_per_block, block_buf);
+
+    kfree(block_buf);
+    serial_puts(COM1, "[MKFS-EXT2 SUCCESS] Formatted target partition with Ext2 File System!\n");
+    return 0;
+}
+
 // // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
 
 static int __init ext2_fs_initcall(void) {
