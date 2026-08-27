@@ -34,8 +34,15 @@ void input_push_event(uint16_t type, uint16_t code, int32_t value) {
         ring_head = next;
     }
 
-    // Менеджмент программного автоповтора клавиш
-    if (type == EV_KEY && code < BTN_LEFT) {
+    // Автоповтор ТОЛЬКО для печатных символов, стрелок и Backspace.
+    // ENTER, ESC, TAB и модификаторы НИКОГДА не должны автоповторяться!
+    bool can_repeat = (code != KEY_ENTER && code != KEY_KPENTER && 
+                       code != KEY_ESC && code != KEY_TAB &&
+                       code != KEY_LEFTCTRL && code != KEY_RIGHTCTRL &&
+                       code != KEY_LEFTALT && code != KEY_RIGHTALT &&
+                       code != KEY_LEFTSHIFT && code != KEY_RIGHTSHIFT);
+
+    if (type == EV_KEY && code < BTN_LEFT && can_repeat) {
         if (value == KEY_PRESS) {
             repeating_key = code;
             repeat_delay_timer = REPEAT_DELAY_TICKS;
@@ -44,6 +51,10 @@ void input_push_event(uint16_t type, uint16_t code, int32_t value) {
             if (code == repeating_key) {
                 repeating_key = 0;
             }
+        }
+    } else if (type == EV_KEY && (value == KEY_RELEASE || !can_repeat)) {
+        if (code == repeating_key || !can_repeat) {
+            repeating_key = 0;
         }
     }
 }

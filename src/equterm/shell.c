@@ -5,7 +5,6 @@
 #include "../kernel/misc/timer.h"
 #include "../kernel/fs/vfs.h"
 #include "../kernel/core/mem/vmm.h"
-#include "../kernel/fs/ramfs.h"
 #include "../kernel/fs/mbr.h"
 #include "../kernel/fs/ext2.h"
 #include "../kernel/core/mem/pmm.h"
@@ -20,10 +19,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "../kernel/drivers/display/psf2.h"
-#include "../kernel/fs/fat32.h"
 #include "../kernel/fs/gpt.h"
 #include "../kernel/fs/partition.h"
-#include "../kernel/fs/devfs.h"
 #include "../kernel/proc/task.h"
 #include "../kernel/core/gen/cpu.h"
 #include "../kernel/core/gen/io.h"
@@ -1372,10 +1369,9 @@ static void cmd_ext2info(int argc, char **argv) {
 static void cmd_xhcitest(int argc, char **argv) {
     (void)argc; (void)argv;
     term_print("=== xHCI USB 3.x Subsystem Diagnostic ===\n");
-    term_print("Polling xHCI Event Ring and Port Status...\n");
+    term_print("Flushing pending events from xHCI Event Ring...\n");
     xhci_handle_events();
-    xhci_scan_ports();
-    term_print("xHCI Subsystem Status: \033[32mACTIVE & LISTENING\033[0m\n");
+    term_print("xHCI Subsystem Status: \033[32mACTIVE & READY\033[0m\n");
 }
 
 // 24. Чтение произвольного регистра PCI

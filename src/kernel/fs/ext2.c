@@ -145,9 +145,11 @@ static uint32_t ext2_alloc_inode(void) {
     ext2_vol.dev.read(ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block, bitmap);
 
     uint32_t total_inodes = ext2_vol.sb.s_inodes_per_group;
+    uint32_t start_ino = ext2_vol.sb.s_first_ino ? (ext2_vol.sb.s_first_ino - 1) : 10;
     uint32_t allocated_inode = 0;
 
-    for (uint32_t i = 0; i < total_inodes; i++) {
+    // Начинаем поиск строго со свободных пользовательских инодов (11+)
+    for (uint32_t i = start_ino; i < total_inodes; i++) {
         uint32_t byte_idx = i / 8;
         uint8_t bit_idx = i % 8;
         if (!(bitmap[byte_idx] & (1 << bit_idx))) {
@@ -256,7 +258,6 @@ static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint
     node->length = inode.i_size;
     return bytes_written;
 }
-
 static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, const char *name, uint8_t file_type) {
     ext2_inode_t dir_inode;
     ext2_read_inode(dir_inode_num, &dir_inode);
@@ -266,7 +267,7 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
     if (!blk_buf) return 0;
 
     uint8_t name_len = strlen(name);
-    uint16_t required_len = (sizeof(ext2_dir_entry_t) + name_len + 3) & ~3;
+    uint16_t required_len = (8 + name_len + 3) & ~3; // 8 bytes header + name aligned to 4
     int added = 0;
 
     for (int b = 0; b < 12; b++) {
@@ -282,8 +283,14 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
             
             memset(blk_buf, 0, bs);
             ext2_dir_entry_t *first_entry = (ext2_dir_entry_t *)blk_buf;
-            first_entry->inode = 0;
+            first_entry->inode = new_inode_num;
             first_entry->rec_len = bs;
+            first_entry->name_len = name_len;
+            first_entry->file_type = file_type;
+            memcpy(first_entry->name, name, name_len);
+            added = 1;
+            ext2_vol.dev.write(ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block, blk_buf);
+            break;
         } else {
             ext2_vol.dev.read(ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block, blk_buf);
         }
@@ -293,19 +300,19 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
             ext2_dir_entry_t *entry = (ext2_dir_entry_t *)(blk_buf + offset);
             if (entry->rec_len == 0) break;
 
-            uint16_t min_entry_len = (sizeof(ext2_dir_entry_t) + entry->name_len + 3) & ~3;
+            uint16_t actual_entry_len = (8 + entry->name_len + 3) & ~3;
             if (entry->inode == 0) {
-                min_entry_len = sizeof(ext2_dir_entry_t);
+                actual_entry_len = 8;
             }
 
-            if (entry->rec_len - min_entry_len >= required_len) {
+            if (entry->rec_len >= actual_entry_len + required_len) {
                 uint16_t old_rec_len = entry->rec_len;
-                entry->rec_len = min_entry_len;
+                entry->rec_len = actual_entry_len;
 
-                uint32_t new_entry_offset = offset + min_entry_len;
+                uint32_t new_entry_offset = offset + actual_entry_len;
                 ext2_dir_entry_t *new_entry = (ext2_dir_entry_t *)(blk_buf + new_entry_offset);
                 new_entry->inode = new_inode_num;
-                new_entry->rec_len = old_rec_len - min_entry_len;
+                new_entry->rec_len = old_rec_len - actual_entry_len;
                 new_entry->name_len = name_len;
                 new_entry->file_type = file_type;
                 memcpy(new_entry->name, name, name_len);
@@ -348,12 +355,14 @@ static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index) {
         uint32_t offset = 0;
         while (offset < bs) {
             ext2_dir_entry_t *entry = (ext2_dir_entry_t *)(blk_buf + offset);
-            if (entry->rec_len == 0) break;
+            if (entry->rec_len == 0 || offset + entry->rec_len > bs) break;
 
-            if (entry->inode != 0) {
-                if (!(entry->name_len == 1 && entry->name[0] == '.') && 
-                    !(entry->name_len == 2 && entry->name[0] == '.' && entry->name[1] == '.')) {
-                    
+            if (entry->inode != 0 && entry->name_len > 0) {
+                // Пропускаем '.' и '..'
+                bool is_dot = (entry->name_len == 1 && entry->name[0] == '.');
+                bool is_dotdot = (entry->name_len == 2 && entry->name[0] == '.' && entry->name[1] == '.');
+
+                if (!is_dot && !is_dotdot) {
                     if (current_index == index) {
                         vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
                         memcpy(vnode->name, entry->name, entry->name_len);
@@ -376,6 +385,61 @@ static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index) {
                         return vnode;
                     }
                     current_index++;
+                }
+            }
+            offset += entry->rec_len;
+        }
+    }
+
+    kfree(blk_buf);
+    return NULL;
+}
+
+static vfs_node_t *ext2_finddir(vfs_node_t *node, const char *name) {
+    uint32_t inode_num = (uint32_t)(uintptr_t)node->ptr;
+    ext2_inode_t inode;
+    ext2_read_inode(inode_num, &inode);
+
+    if (!(inode.i_mode & EXT2_S_IFDIR)) return NULL;
+
+    uint32_t bs = ext2_vol.block_size;
+    uint8_t *blk_buf = (uint8_t *)kmalloc(bs);
+    if (!blk_buf) return NULL;
+
+    size_t target_len = strlen(name);
+
+    for (int b = 0; b < 12; b++) {
+        uint32_t dir_block = inode.i_block[b];
+        if (dir_block == 0) break;
+
+        ext2_vol.dev.read(ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block, blk_buf);
+
+        uint32_t offset = 0;
+        while (offset < bs) {
+            ext2_dir_entry_t *entry = (ext2_dir_entry_t *)(blk_buf + offset);
+            if (entry->rec_len == 0 || offset + entry->rec_len > bs) break;
+
+            if (entry->inode != 0 && entry->name_len == target_len) {
+                if (memcmp(entry->name, name, target_len) == 0) {
+                    vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                    memcpy(vnode->name, entry->name, entry->name_len);
+                    vnode->name[entry->name_len] = '\0';
+                    vnode->inode = entry->inode;
+                    vnode->ptr = (vfs_node_t *)(uintptr_t)entry->inode;
+
+                    if (entry->file_type == EXT2_FT_DIR) {
+                        vnode->flags = FS_DIRECTORY;
+                    } else {
+                        vnode->flags = FS_FILE;
+                    }
+
+                    ext2_inode_t child_ino;
+                    ext2_read_inode(entry->inode, &child_ino);
+                    vnode->length = child_ino.i_size;
+                    vnode->ops = &ext2_fops;
+
+                    kfree(blk_buf);
+                    return vnode;
                 }
             }
             offset += entry->rec_len;
@@ -450,59 +514,6 @@ static vfs_node_t *ext2_create(vfs_node_t *dir, const char *name, uint32_t flags
     vnode->ops = &ext2_fops;
 
     return vnode;
-}
-
-static vfs_node_t *ext2_finddir(vfs_node_t *node, const char *name) {
-    uint32_t inode_num = (uint32_t)(uintptr_t)node->ptr;
-    ext2_inode_t inode;
-    ext2_read_inode(inode_num, &inode);
-
-    if (!(inode.i_mode & EXT2_S_IFDIR)) return NULL;
-
-    uint32_t bs = ext2_vol.block_size;
-    uint8_t *blk_buf = (uint8_t *)kmalloc(bs);
-    if (!blk_buf) return NULL;
-
-    for (int b = 0; b < 12; b++) {
-        uint32_t dir_block = inode.i_block[b];
-        if (dir_block == 0) break;
-
-        ext2_vol.dev.read(ext2_block_to_lba(dir_block), ext2_vol.sectors_per_block, blk_buf);
-
-        uint32_t offset = 0;
-        while (offset < bs) {
-            ext2_dir_entry_t *entry = (ext2_dir_entry_t *)(blk_buf + offset);
-            if (entry->rec_len == 0) break;
-
-            if (entry->inode != 0) {
-                if (entry->name_len == strlen(name) && memcmp(entry->name, name, entry->name_len) == 0) {
-                    vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-                    memcpy(vnode->name, entry->name, entry->name_len);
-                    vnode->name[entry->name_len] = '\0';
-                    vnode->inode = entry->inode;
-                    vnode->ptr = (vfs_node_t *)(uintptr_t)entry->inode;
-
-                    if (entry->file_type == EXT2_FT_DIR) {
-                        vnode->flags = FS_DIRECTORY;
-                    } else {
-                        vnode->flags = FS_FILE;
-                    }
-
-                    ext2_inode_t child_ino;
-                    ext2_read_inode(entry->inode, &child_ino);
-                    vnode->length = child_ino.i_size;
-                    vnode->ops = &ext2_fops;
-
-                    kfree(blk_buf);
-                    return vnode;
-                }
-            }
-            offset += entry->rec_len;
-        }
-    }
-
-    kfree(blk_buf);
-    return NULL;
 }
 
 vfs_node_t *ext2_mount_partition(block_device_t dev, uint32_t partition_lba) {
