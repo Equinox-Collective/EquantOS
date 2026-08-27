@@ -755,11 +755,11 @@ static void cmd_cp(int argc, char **argv) {
 static void cmd_colortest(int argc, char **argv) {
     (void)argc; (void)argv;
     term_print("=== EquantOS ANSI Color Palette Test ===\n");
-    term_print("\033[31m[RED]\033[0m     Red color test (ANSI \\033[31m)\n");
-    term_print("\033[32m[GREEN]\033[0m   Green color test (ANSI \\033[32m)\n");
-    term_print("\033[33m[YELLOW]\033[0m  Yellow color test (ANSI \\033[33m)\n");
-    term_print("\033[34m[BLUE]\033[0m    Blue color test (ANSI \\033[34m)\n");
-    term_print("\033[36m[CYAN]\033[0m    Cyan color test (ANSI \\033[36m)\n");
+    term_print("\033[31m[RED]\033[0m     Red color text\n");
+    term_print("\033[32m[GREEN]\033[0m   Green color text\n");
+    term_print("\033[33m[YELLOW]\033[0m  Yellow color text\n");
+    term_print("\033[34m[BLUE]\033[0m    Blue color text\n");
+    term_print("\033[36m[CYAN]\033[0m    Cyan color text\n");
     term_print("\033[0m[DEFAULT] Reset to default foreground color\n");
     term_print("=======================================\n");
 }

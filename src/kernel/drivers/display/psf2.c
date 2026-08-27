@@ -1,6 +1,8 @@
-// src/kernel/drivers/display/psf2.c - Hardware-Safe PSF2 Font Engine
+// src/kernel/drivers/display/psf2.c - Full Production PSF2 Font Driver
 #include "psf2.h"
 #include "../../../libs/string.h"
+
+extern void term_print(const char *str);
 
 psf2_font_t kernel_psf2_font = {0};
 
@@ -8,8 +10,8 @@ static uint32_t utf8_next(const char **src) {
     if (!src || !*src) return 0xFFFD;
     const uint8_t *s = (const uint8_t *)*src;
     uint32_t c = *s++;
-    uint32_t cp = 0;
-    int extra = 0;
+    uint32_t cp;
+    int extra;
 
     if (c < 0x80) { 
         cp = c; 
@@ -85,6 +87,14 @@ bool psf2_load(psf2_font_t *out, const void *data, uint32_t size) {
     return true;
 }
 
+bool psf2_init_default(const void *data, uint32_t size) {
+    bool ok = psf2_load(&kernel_psf2_font, data, size);
+    if (ok) {
+        term_print("[PSF2] Default kernel font loaded successfully.\n");
+    }
+    return ok;
+}
+
 static uint32_t glyph_index(const psf2_font_t *f, uint32_t cp) {
     if (f->has_unicode) {
         if (cp >= 0x10000) return 0;
@@ -122,4 +132,17 @@ int psf2_draw_char(const psf2_font_t *f, uint32_t *fb, int fb_pitch_pixels, int 
         glyph += bpr;
     }
     return (int)f->hdr->width;
+}
+
+int psf2_draw_string(const psf2_font_t *f, uint32_t *fb, int fb_pitch_pixels, int fb_h,
+                     int x, int y, const char *utf8, uint32_t color) {
+    if (!f || !f->loaded) return 0;
+    int x0 = x;
+    while (*utf8) {
+        const char *cur = utf8;
+        uint32_t cp = utf8_next(&cur);
+        utf8 = cur;
+        x += psf2_draw_char(f, fb, fb_pitch_pixels, fb_h, x, y, cp, color);
+    }
+    return x - x0;
 }

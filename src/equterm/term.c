@@ -171,18 +171,25 @@ static void term_advance_line(void) {
 }
 
 static void parse_ansi_color(const char *code) {
+    if (!code) return;
+    
+    // Skip leading '[' character if present in escape buffer (e.g. "[31" -> "31")
+    if (code[0] == '[') {
+        code++;
+    }
+
     if (strcmp(code, "0") == 0 || strcmp(code, "37") == 0) {
         term_fg_color = default_fg_color;
     } else if (strcmp(code, "31") == 0) {
-        term_fg_color = 0x00FF5555;
+        term_fg_color = 0x00FF5555; // Red
     } else if (strcmp(code, "32") == 0) {
-        term_fg_color = 0x0055FF55;
+        term_fg_color = 0x0055FF55; // Green
     } else if (strcmp(code, "33") == 0) {
-        term_fg_color = 0x00FFFF55;
+        term_fg_color = 0x00FFFF55; // Yellow
     } else if (strcmp(code, "34") == 0) {
-        term_fg_color = 0x005555FF;
+        term_fg_color = 0x005555FF; // Blue
     } else if (strcmp(code, "36") == 0) {
-        term_fg_color = 0x0055FFFF;
+        term_fg_color = 0x0055FFFF; // Cyan
     }
 }
 

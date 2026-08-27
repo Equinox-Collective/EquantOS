@@ -14,6 +14,8 @@
 #include "kernel/core/initcall.h"
 #include "kernel/drivers/tty/tty.h"
 #include "equterm/shell.h"
+#include "kernel/drivers/display/psf2.h"
+#include "string.h"
 
 __attribute__((used, section(".requests")))
 volatile uint64_t base_revision[3] = LIMINE_BASE_REVISION(3);
@@ -74,9 +76,15 @@ void _start(void) {
             serial_puts(COM1, "[KERNEL] Boot Module detected: ");
             serial_puts(COM1, mod->path);
             serial_puts(COM1, "\n");
+
+            // Auto-detect and initialize PSF2 font module
+            if (strstr(mod->path, "font.psf") || strstr(mod->path, ".psf")) {
+                if (psf2_init_default(mod->address, mod->size)) {
+                    serial_puts(COM1, "[KERNEL] PSF2 Font loaded successfully from Limine module.\n");
+                }
+            }
         }
     }
-
     // 5. Execute all Initcalls (Syscalls, Timer, Tasking, VFS, Storage)
     serial_puts(COM1, "[KERNEL] Executing Initcalls...\n");
     do_initcalls();
