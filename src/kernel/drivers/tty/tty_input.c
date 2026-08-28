@@ -1,4 +1,7 @@
+#include "tty.h"
 #include "../input.h"
+#include "../serial/serial.h"
+#include "../../proc/sched.h"
 #include <stdbool.h>
 
 static bool shift_held = false;
@@ -56,4 +59,28 @@ char input_event_to_ascii(input_event_t ev) {
         return c;
     }
     return 0;
+}
+
+// Блокирующее чтение символа (Keyboard + Serial)
+char tty_getchar(void) {
+    input_event_t ev;
+    for (;;) {
+        // 1. Проверяем Serial порт (COM1)
+        if (serial_received(COM1)) {
+            char c = serial_getchar(COM1);
+            if (c == '\r') c = '\n';
+            return c;
+        }
+
+        // 2. Проверяем очередь клавиатуры (PS/2 + USB)
+        if (input_pop_event(&ev)) {
+            char c = input_event_to_ascii(ev);
+            if (c != 0) {
+                return c;
+            }
+        }
+
+        // 3. Отдаем квант шедулеру
+        sched_yield();
+    }
 }

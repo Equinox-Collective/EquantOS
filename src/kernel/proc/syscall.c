@@ -12,6 +12,7 @@
 #include "string.h"
 #include "../fs/vfs.h"
 #include "../core/initcall.h"
+#include "../drivers/tty/tty.h"
 
 __attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
 
@@ -142,7 +143,32 @@ static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, in
     return alloc_fd(node);
 }
 
+#include "../drivers/tty/tty.h"
+
+// Обработчик сисколла read (sys_read)
 static int64_t sys_read_handler(int fd, void *buf, size_t count) {
+    if (count == 0) return 0;
+    if (!buf) return -EINVAL;
+
+    // === STDIN (Клавиатура / Serial) ===
+    if (fd == 0) {
+        char *out = (char *)buf;
+        size_t read_bytes = 0;
+
+        while (read_bytes < count) {
+            char c = tty_getchar();
+
+            out[read_bytes++] = c;
+
+            // Если нажат Enter — возвращаем накопленную строку
+            if (c == '\n' || c == '\r') {
+                break;
+            }
+        }
+        return (int64_t)read_bytes;
+    }
+
+    // === Обычные файлы VFS ===
     if (!current_task || !current_task->process) return -EBADF;
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
@@ -319,6 +345,35 @@ static int64_t sys_writev_handler(int fd, const struct iovec *iov, int iovcnt) {
         }
     }
     return total;
+}
+
+#define TCGETS      0x5401
+#define TCSETS      0x5402
+#define TIOCGWINSZ  0x5413
+
+struct winsize {
+    unsigned short ws_row;
+    unsigned short ws_col;
+    unsigned short ws_xpixel;
+    unsigned short ws_ypixel;
+};
+
+static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
+    if (fd >= 0 && fd <= 2) {
+        if (req == TIOCGWINSZ && arg) {
+            struct winsize *ws = (struct winsize *)arg;
+            ws->ws_row = 25;
+            ws->ws_col = 80;
+            ws->ws_xpixel = 640;
+            ws->ws_ypixel = 480;
+            return 0;
+        }
+        if (req == TCGETS || req == TCSETS) {
+            return 0;
+        }
+        return 0;
+    }
+    return -EINVAL;
 }
 
 static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {

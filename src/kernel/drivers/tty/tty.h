@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "../input.h"
 
 #define MAX_TTYS 6
 #define TTY_BUF_SIZE 256
@@ -40,6 +41,8 @@ void tty_set_color(uint32_t color);
 void tty_set_colors(uint32_t fg_color, uint32_t bg_color);
 void tty_clear(void);
 void tty_poll_input(void);
+char input_event_to_ascii(input_event_t ev);
+char tty_getchar(void);
 
 // Raw Input API for TUI
 uint16_t tty_getchar_raw(void);
