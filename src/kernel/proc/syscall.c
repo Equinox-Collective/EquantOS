@@ -400,6 +400,28 @@ static int64_t sys_rt_sigaction_handler(int signum, const void *act, void *oldac
     return 0;
 }
 
+extern uint64_t pmm_get_total_memory(void);
+extern uint64_t pmm_get_used_memory(void);
+extern uint64_t total_pages;
+extern size_t used_memory;
+
+static int64_t sys_sysinfo_handler(equant_sysinfo_t *info) {
+    if (!info) return -EINVAL;
+
+    equant_sysinfo_t kinfo;
+    memset(&kinfo, 0, sizeof(equant_sysinfo_t));
+
+    kinfo.total_ram = pmm_get_total_memory();
+    kinfo.used_ram = pmm_get_used_memory();
+    kinfo.free_ram = (kinfo.total_ram > kinfo.used_ram) ? (kinfo.total_ram - kinfo.used_ram) : 0;
+    kinfo.pmm_total_pages = total_pages;
+    kinfo.pmm_used_pages = kinfo.used_ram / PAGE_SIZE;
+    kinfo.kernel_heap_used = used_memory;
+
+    memcpy(info, &kinfo, sizeof(equant_sysinfo_t));
+    return 0;
+}
+
 void syscall_handler(void *regs_ptr) {
     syscall_regs_t *regs = (syscall_regs_t *)regs_ptr;
     uint64_t syscall_no = regs->rax;
@@ -500,6 +522,9 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_IOCTL:
             ret = 0;
+            break;
+        case SYS_SYSINFO:
+            ret = sys_sysinfo_handler((equant_sysinfo_t *)regs->rdi);
             break;
         default:
             serial_puts(COM1, "[KERNEL] Unknown Syscall: 0x");
