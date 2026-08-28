@@ -243,16 +243,23 @@ page_fault_asm:
 
 [global syscall_entry_asm]
 syscall_entry_asm:
-    mov [rel user_rsp_temp], rsp
+    ; 1. При входе по syscall:
+    ; RCX = User RIP, R11 = User RFLAGS, RSP = User RSP
+    ; Прерывания замаскированы через IA32_FMASK (0x200)
+
+    ; Меняем стек на верх ядра текущей задачи
+    mov [rel k_scratch_rsp], rsp         ; Временный бэкап только на 2 инструкции
     mov rsp, [rel current_task]
-    mov rsp, [rsp + 8]
+    mov rsp, [rsp + 8]                   ; kstack_at_bottom
 
-    push qword 0x23             ; User SS
-    push qword [rel user_rsp_temp] ; User RSP
-    push r11                    ; User RFLAGS
-    push qword 0x1B             ; User CS
-    push rcx                    ; User RIP
+    ; 2. Формируем аппаратный IRET/SYSRET фрейм на стеке ядра:
+    push qword 0x1B                      ; User SS (User Data Selector 0x18 | 3)
+    push qword [rel k_scratch_rsp]       ; User RSP
+    push r11                             ; User RFLAGS
+    push qword 0x23                      ; User CS (User Code Selector 0x20 | 3)
+    push rcx                             ; User RIP
 
+    ; 3. Сохраняем все регистры общего назначения
     push rax
     push rbx
     push rcx
@@ -269,11 +276,13 @@ syscall_entry_asm:
     push r14
     push r15
 
+    ; 4. Вызываем C-обработчик
     mov rdi, rsp
-    sub rsp, 8                  ; Align RSP for C function call
+    sub rsp, 8                           ; Выравнивание стека по 16 байт для System V ABI
     call syscall_handler
     add rsp, 8
 
+    ; 5. Восстанавливаем регистры
     pop r15
     pop r14
     pop r13
@@ -290,14 +299,16 @@ syscall_entry_asm:
     pop rbx
     pop rax
 
-    pop rcx                     ; User RIP
-    add rsp, 8                  ; Skip User CS
-    pop r11                     ; User RFLAGS
-    pop rsp                     ; User RSP
+    ; 6. Восстанавливаем контекст пользователя для SYSRETQ
+    pop rcx                              ; RIP
+    add rsp, 8                           ; Пропускаем CS
+    pop r11                              ; RFLAGS
+    pop rsp                              ; Восстанавливаем настоящий User RSP прямо из стека ядра!
 
-    db 0x48                     ; REX.W prefix for 64-bit sysretq
+    db 0x48                              ; REX.W префикс для 64-битного SYSRET
     sysret
 
+k_scratch_rsp: resq 1
 section .bss
 user_rsp_temp: resq 1
 

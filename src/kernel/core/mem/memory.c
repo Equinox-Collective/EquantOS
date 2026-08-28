@@ -145,7 +145,6 @@ void *kzalloc(size_t size) {
 void kfree(void *ptr) {
     if (!ptr) return;
 
-    // Check if pointer belongs to a Large Allocation (> 2048 bytes)
     uint64_t addr = (uint64_t)ptr;
     uint64_t page_base = addr & ~0xFFFULL;
 
@@ -155,15 +154,20 @@ void kfree(void *ptr) {
         
         size_t pages = header->page_count;
         used_memory -= (pages * PAGE_SIZE);
-        pmm_free_pages((void *)PHYS(page_base), 0); // Return pages to Buddy Allocator
+
+        size_t order = 0;
+        while ((1ULL << order) < pages) {
+            order++;
+        }
+
+        pmm_free_pages((void *)PHYS(page_base), order); // Освобождаем правильный Buddy-порядок!
         return;
     }
 
-    // Otherwise, pointer belongs to a Slab Page
+    // Обработка Slab...
     slab_page_t *slab = (slab_page_t *)page_base;
     slab_object_t *obj = (slab_object_t *)ptr;
 
-    // Push object back onto slab free list (O(1) Constant Time)
     obj->next = slab->free_list;
     slab->free_list = obj;
     slab->free_count++;
