@@ -307,8 +307,6 @@ syscall_entry_asm:
 
     db 0x48, 0x0F, 0x07                  ; sysretq (64-bit SYSRET)
 
-k_scratch_rsp: resq 1
-
 section .data
 [global isr_stub_table]
 isr_stub_table:

@@ -153,19 +153,12 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
     // === STDIN (Клавиатура / Serial) ===
     if (fd == 0) {
         char *out = (char *)buf;
-        size_t read_bytes = 0;
-
-        while (read_bytes < count) {
-            char c = tty_getchar();
-
-            out[read_bytes++] = c;
-
-            // Если нажат Enter — возвращаем накопленную строку
-            if (c == '\n' || c == '\r') {
-                break;
-            }
-        }
-        return (int64_t)read_bytes;
+        
+        // Читаем первый символ (блокируемся, пока не нажмут)
+        char c = tty_getchar();
+        out[0] = c;
+        
+        return 1; // Возвращаем 1 прочитанный байт сразу шеллу BusyBox!
     }
 
     // === Обычные файлы VFS ===
