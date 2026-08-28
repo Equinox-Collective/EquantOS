@@ -693,8 +693,8 @@ static void cmd_run(int argc, char **argv) {
 
     if (elf_load(elf_buf, file->length)) {
         // СИНХРОННОЕ ОЖИДАНИЕ: Шелл передает кванты времени и ждет, пока процесс станет ZOMBIE
-        while (last_spawned_task && last_spawned_task->state != TASK_STATE_ZOMBIE) {
-            sched_yield();
+         while (last_spawned_task && last_spawned_task->state != TASK_STATE_ZOMBIE) {
+            sched_yield(); // Отдаем процессор BusyBox'у
         }
 
         term_print("\nProcess execution finished.\n");

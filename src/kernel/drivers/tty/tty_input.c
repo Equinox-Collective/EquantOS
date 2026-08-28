@@ -66,27 +66,26 @@ char tty_getchar(void) {
     input_event_t ev;
 
     for (;;) {
-        // КРИТИЧЕСКИ ВАЖНО: Разрешаем прерывания CPU, чтобы летели IRQ1 (PS/2) и IRQ0 (Таймер/USB)!
         __asm__ volatile("sti");
 
-        // 1. Проверяем Serial порт (COM1)
+        // 1. Проверка ввода из Serial терминала (COM1)
         if (serial_received(COM1)) {
             char c = serial_getchar(COM1);
             if (c == '\r') c = '\n';
+            tty_putchar(c); // Эхо на экран и в serial
             return c;
         }
 
-        // 2. Проверяем очередь клавиатуры (PS/2 + USB xHCI)
+        // 2. Проверка событий физической клавиатуры
         if (input_pop_event(&ev)) {
             char c = input_event_to_ascii(ev);
             if (c != 0) {
-                // Если пришел Enter со сканеров
                 if (c == '\r') c = '\n';
+                tty_putchar(c); // Мгновенно отображаем символ на мониторе!
                 return c;
             }
         }
 
-        // 3. Даем процессору передохнуть и отдаем квант шедулеру
         __asm__ volatile("pause");
         sched_yield();
     }
