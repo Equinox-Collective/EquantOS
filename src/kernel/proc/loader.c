@@ -124,7 +124,8 @@ bool elf_load(void *elf_data, uint64_t size) {
     *--k_sp = PAGE_SIZE;           *--k_sp = 6;  // AT_PAGESZ (6) = 4096
     *--k_sp = ehdr->e_phnum;       *--k_sp = 5;  // AT_PHNUM (5)
     *--k_sp = ehdr->e_phentsize;   *--k_sp = 4;  // AT_PHENT (4)
-    *--k_sp = 0x400000 + ehdr->e_phoff; *--k_sp = 3; // AT_PHDR (3) = Точный адрес PHDR в памяти!
+    uint64_t phdr_vaddr = phdr[0].p_vaddr + ehdr->e_phoff;
+    *--k_sp = phdr_vaddr;          *--k_sp = 3;  // AT_PHDR (3)
 
     // 5. Передаем envp, argv и argc
     *--k_sp = 0;              // envp[0] = NULL

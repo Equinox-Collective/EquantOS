@@ -13,6 +13,8 @@
 #include "../fs/vfs.h"
 #include "../core/initcall.h"
 
+__attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
+
 #define IA32_EFER        0xC0000080
 #define IA32_STAR        0xC0000081
 #define IA32_LSTAR       0xC0000082

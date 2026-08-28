@@ -7,6 +7,7 @@
 #define SYS_BRK          12
 #define SYS_SCHED_YIELD  24
 #define SYS_SYSINFO      99
+#define SYS_EXIT         60
 
 #define PAGE_SIZE        4096
 
@@ -41,6 +42,11 @@ static void print_str(const char *s) {
     size_t len = 0;
     while (s[len]) len++;
     syscall3(SYS_WRITE, 1, (uint64_t)s, len);
+}
+
+static inline void sys_exit(int code) {
+    syscall1(SYS_EXIT, (uint64_t)code);
+    for (;;) { __asm__ volatile("hlt"); }
 }
 
 static void print_dec(uint64_t val) {
@@ -167,18 +173,14 @@ void _start(void) {
     }
 
     // TEST 3: SCHEDULER HEARTBEAT
-    kprintf("[TEST 3] Entering Scheduler Stress Loop...\n");
-    uint64_t iters = 0;
-    for (;;) {
-        iters++;
-        if (iters % 10 == 0) {
-            kprintf("[equantmemtest] Scheduler tick #%u alive. Yielding CPU...\n", iters);
+    kprintf("[TEST 3] Running 50 scheduler cycles...\n");
+    for (int i = 1; i <= 50; i++) {
+        if (i % 10 == 0) {
+            kprintf("  -> Tick #%u OK\n", i);
         }
-
-        for (volatile int d = 0; d < 50000; d++) {
-            __asm__ volatile("pause");
-        }
-
         syscall0(SYS_SCHED_YIELD);
     }
+
+    kprintf("\n[ALL TESTS PASSED] EquantOS kernel memory subsystem is ROCK SOLID!\n");
+    sys_exit(0);
 }

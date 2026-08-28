@@ -3,11 +3,12 @@
 [extern keyboard_callback]
 [extern timer_callback]
 [extern schedule]
-[extern current_task]
 [extern tasks]
-[extern syscall_handler]
 [extern linux_syscall_handler]
 [extern vmm_page_fault_handler]
+[extern syscall_handler]
+[extern current_task]
+[extern syscall_user_rsp]
 
 %macro SAVE_REGS 0
     push rax
@@ -243,23 +244,22 @@ page_fault_asm:
 
 [global syscall_entry_asm]
 syscall_entry_asm:
-    ; 1. При входе по syscall:
-    ; RCX = User RIP, R11 = User RFLAGS, RSP = User RSP
-    ; Прерывания замаскированы через IA32_FMASK (0x200)
+    ; 1. При входе CPU сохраняет User RIP в RCX, User RFLAGS в R11.
+    ; Сохраняем User RSP в переменную в секции .data ядра
+    mov [rel syscall_user_rsp], rsp
 
-    ; Меняем стек на верх ядра текущей задачи
-    mov [rel k_scratch_rsp], rsp         ; Временный бэкап только на 2 инструкции
+    ; 2. Переключаемся на верхушку ядерного стека текущей задачи
     mov rsp, [rel current_task]
-    mov rsp, [rsp + 8]                   ; kstack_at_bottom
+    mov rsp, [rsp + 8]                   ; current_task->kstack_at_bottom
 
-    ; 2. Формируем аппаратный IRET/SYSRET фрейм на стеке ядра:
-    push qword 0x1B                      ; User SS (User Data Selector 0x18 | 3)
-    push qword [rel k_scratch_rsp]       ; User RSP
+    ; 3. Формируем контекст вызова на стеке ядра
+    push qword 0x1B                      ; User SS
+    push qword [rel syscall_user_rsp]    ; User RSP
     push r11                             ; User RFLAGS
-    push qword 0x23                      ; User CS (User Code Selector 0x20 | 3)
+    push qword 0x23                      ; User CS
     push rcx                             ; User RIP
 
-    ; 3. Сохраняем все регистры общего назначения
+    ; 4. Сохраняем все регистры общего назначения (GPR)
     push rax
     push rbx
     push rcx
@@ -276,13 +276,13 @@ syscall_entry_asm:
     push r14
     push r15
 
-    ; 4. Вызываем C-обработчик
-    mov rdi, rsp
-    sub rsp, 8                           ; Выравнивание стека по 16 байт для System V ABI
+    ; 5. Вызываем диспетчер сисколлов
+    mov rdi, rsp                         ; Указатель на структуру регистров syscall_regs_t
+    sub rsp, 8                           ; Выравнивание RSP по 16 байт для System V AMD64 ABI
     call syscall_handler
     add rsp, 8
 
-    ; 5. Восстанавливаем регистры
+    ; 6. Восстанавливаем регистры
     pop r15
     pop r14
     pop r13
@@ -297,20 +297,17 @@ syscall_entry_asm:
     pop rdx
     pop rcx
     pop rbx
-    pop rax
+    pop rax                              ; RAX содержит результат сисколла
 
-    ; 6. Восстанавливаем контекст пользователя для SYSRETQ
-    pop rcx                              ; RIP
+    ; 7. Восстанавливаем контекст пользователя
+    pop rcx                              ; User RIP
     add rsp, 8                           ; Пропускаем CS
-    pop r11                              ; RFLAGS
-    pop rsp                              ; Восстанавливаем настоящий User RSP прямо из стека ядра!
+    pop r11                              ; User RFLAGS (включая IF)
+    pop rsp                              ; Восстанавливаем User RSP
 
-    db 0x48                              ; REX.W префикс для 64-битного SYSRET
-    sysret
+    db 0x48, 0x0F, 0x07                  ; sysretq (64-bit SYSRET)
 
 k_scratch_rsp: resq 1
-section .bss
-user_rsp_temp: resq 1
 
 section .data
 [global isr_stub_table]
