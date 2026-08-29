@@ -11,7 +11,8 @@ extern void keyboard_handler(void);
 extern void irq0_handler_asm(void);
 extern void irq_ignore_handler(void);
 extern void syscall_interrupt_asm(void);
-extern void page_fault_asm(void); // <-- Добавили объявление
+extern void page_fault_asm(void);
+extern void linux_syscall_interrupt_asm(void);
 
 void set_idt_gate(int n, uint64_t handler, uint16_t sel) {
     idt[n].low_offset = (uint16_t)(handler & 0xFFFF);
@@ -36,8 +37,8 @@ void init_idt(void) {
         set_idt_gate(i, isr_stub_table[i], sel); 
     }
 
-    // 2. Регистрируем правильный АССЕМБЛЕРНЫЙ ШЛЮЗ для Page Fault (#PF Vector 14)
-    set_idt_gate(14, (uint64_t)page_fault_asm, sel); // <-- ВМЕСТО vmm_page_fault_handler
+    // 2. Page Fault (#PF Vector 14)
+    set_idt_gate(14, (uint64_t)page_fault_asm, sel);
 
     // 3. Аппаратные IRQ 32..255
     for (int i = 32; i < 256; i++) {
@@ -49,8 +50,13 @@ void init_idt(void) {
 
     set_idt_gate(33, (uint64_t)keyboard_handler, sel);
 
+    // Родной сисколл int 0x80
     set_idt_gate(0x80, (uint64_t)syscall_interrupt_asm, sel);
-    idt[0x80].flags = 0xEF;
+    idt[0x80].flags = 0xEF; // DPL 3
+
+    // === ШЛЮЗ ДЛЯ BASH И MUSL: INT 0x81 ===
+    set_idt_gate(0x81, (uint64_t)linux_syscall_interrupt_asm, sel);
+    idt[0x81].flags = 0xEF; // DPL 3 (РАЗРЕШАЕМ ВЫЗОВ ИЗ USER MODE!)
 
     __asm__ __volatile__("lidt (%0)" : : "r"(&idt_reg));
 }

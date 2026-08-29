@@ -32,6 +32,7 @@
 #define SYS_RT_SIGPROCMASK  14
 #define SYS_IOCTL           16
 #define SYS_WRITEV          20
+#define SYS_ACCESS          21
 #define SYS_SCHED_YIELD     24
 #define SYS_DUP             32
 #define SYS_DUP2            33
@@ -42,12 +43,15 @@
 #define SYS_FCNTL           72
 #define SYS_GETCWD          79
 #define SYS_CHDIR           80
+#define SYS_READLINK        89
+#define SYS_GETRLIMIT       97
 #define SYS_SYSINFO         99
 #define SYS_GETUID          102
 #define SYS_GETGID          104
 #define SYS_GETEUID         107
 #define SYS_GETEGID         108
 #define SYS_GETPPID         110
+#define SYS_GETPGID         121
 #define SYS_ARCH_PRCTL      158
 #define SYS_TKILL           200
 #define SYS_FUTEX           202
@@ -58,6 +62,7 @@
 #define SYS_TGKILL          234
 #define SYS_OPENAT          257
 #define SYS_DUP3            292
+#define SYS_PRLIMIT64       302
 
 typedef struct {
     uint64_t total_ram;

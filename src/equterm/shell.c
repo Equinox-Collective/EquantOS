@@ -689,17 +689,16 @@ static void cmd_run(int argc, char **argv) {
     int child_argc = 0;
     char *child_argv[MAX_ARGS + 1];
 
-    if (argc == 2) {
-        // Просто "run busybox.elf" -> запускаем busybox sh
-        child_argv[child_argc++] = "busybox";
-        child_argv[child_argc++] = "sh";
-    } else {
-        // "run busybox.elf --help" -> argv[0]="busybox", argv[1]="--help"
-        // "run busybox.elf uname -a" -> argv[0]="busybox", argv[1]="uname", argv[2]="-a"
-        child_argv[child_argc++] = "busybox";
-        for (int i = 2; i < argc && child_argc < MAX_ARGS; i++) {
-            child_argv[child_argc++] = argv[i];
-        }
+    // Определяем базовое имя программы для argv[0] (bash или busybox)
+    const char *prog_name = "bash";
+    if (strstr(resolved, "busybox")) {
+        prog_name = "busybox";
+    }
+
+    child_argv[child_argc++] = (char *)prog_name;
+
+    for (int i = 2; i < argc && child_argc < MAX_ARGS; i++) {
+        child_argv[child_argc++] = argv[i];
     }
     child_argv[child_argc] = NULL;
 

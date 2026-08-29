@@ -152,82 +152,82 @@ irq0_handler_asm:
 
 [global syscall_interrupt_asm]
 syscall_interrupt_asm:
-    push r15
-    push r14
-    push r13
-    push r12
-    push r11
-    push r10
-    push rbp
-    push rdi
-    push rsi
-    push rdx
-    push rcx
+    push rax
     push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
     push r8
     push r9
-    push rax
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
 
     mov rdi, rsp
-    sub rsp, 8          ; Align RSP for C function call
+    sub rsp, 8          ; Выравнивание RSP по 16 байт
     call syscall_handler
     add rsp, 8
 
-    pop rax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
     pop r9
     pop r8
-    pop rbx
-    pop rcx
-    pop rdx
-    pop rsi
-    pop rdi
     pop rbp
-    pop r10
-    pop r11
-    pop r12
-    pop r13
-    pop r14
-    pop r15
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
     iretq
 
 [global linux_syscall_interrupt_asm]
 linux_syscall_interrupt_asm:
-    push r15
-    push r14
-    push r13
-    push r12
-    push r11
-    push r10
-    push rbp
-    push rdi
-    push rsi
-    push rdx
-    push rcx
+    push rax
     push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
     push r8
     push r9
-    push rax
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
 
     mov rdi, rsp
-    sub rsp, 8
+    sub rsp, 8          ; Выравнивание RSP по 16 байт
     call linux_syscall_handler
     add rsp, 8
 
-    pop rax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
     pop r9
     pop r8
-    pop rbx
-    pop rcx
-    pop rdx
-    pop rsi
-    pop rdi
     pop rbp
-    pop r10
-    pop r11
-    pop r12
-    pop r13
-    pop r14
-    pop r15
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
     iretq
 
 [global page_fault_asm]

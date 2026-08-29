@@ -636,8 +636,36 @@ static int64_t sys_access_handler(const char *pathname, int mode) {
     resolve_user_path(pathname, resolved, sizeof(resolved));
     vfs_node_t *node = vfs_open(resolved, 0);
     if (!node) return -ENOENT;
-    return 0; // Файл существует и доступен
+    return 0;
 }
+
+// 1. SYS_READLINK (89) - симлинков нет, возвращаем -EINVAL
+static int64_t sys_readlink_handler(const char *pathname, char *buf, size_t bufsiz) {
+    (void)buf; (void)bufsiz;
+    if (!pathname) return -EINVAL;
+    return -EINVAL; // В Linux для обычных файлов возвращается EINVAL (Invalid argument)
+}
+
+// 2. SYS_GETRLIMIT (97) и SYS_PRLIMIT64 (302)
+struct linux_rlimit {
+    uint64_t rlim_cur;
+    uint64_t rlim_max;
+};
+
+static int64_t sys_prlimit64_handler(int pid, int resource, const struct linux_rlimit *new_limit, struct linux_rlimit *old_limit) {
+    (void)pid; (void)new_limit;
+    if (old_limit) {
+        if (resource == 7 /* RLIMIT_NOFILE */) {
+            old_limit->rlim_cur = MAX_OPEN_FILES;
+            old_limit->rlim_max = MAX_OPEN_FILES;
+        } else {
+            old_limit->rlim_cur = 0xFFFFFFFFFFFFFFFFULL; // RLIM_INFINITY
+            old_limit->rlim_max = 0xFFFFFFFFFFFFFFFFULL;
+        }
+    }
+    return 0;
+}
+
 
 // Таблица имен для отладки
 // static const char *syscall_name(uint64_t num) {
@@ -740,6 +768,21 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_FCNTL:
             ret = sys_fcntl_handler((int)regs->rdi, (int)regs->rsi, regs->rdx);
+            break;
+        case SYS_ACCESS:
+            ret = sys_access_handler((const char *)regs->rdi, (int)regs->rsi);
+            break;
+        case SYS_READLINK:
+            ret = sys_readlink_handler((const char *)regs->rdi, (char *)regs->rsi, (size_t)regs->rdx);
+            break;
+        case SYS_GETPGID:
+            ret = current_task ? current_task->id : 1;
+            break;
+        case SYS_GETRLIMIT:
+            ret = sys_prlimit64_handler(0, (int)regs->rdi, NULL, (struct linux_rlimit *)regs->rsi);
+            break;
+        case SYS_PRLIMIT64:
+            ret = sys_prlimit64_handler((int)regs->rdi, (int)regs->rsi, (const struct linux_rlimit *)regs->rdx, (struct linux_rlimit *)regs->r10);
             break;
         case SYS_CHDIR:
             ret = sys_chdir_handler((const char *)regs->rdi);
