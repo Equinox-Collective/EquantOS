@@ -598,65 +598,86 @@ static int64_t sys_sysinfo_handler(equant_sysinfo_t *info) {
 #define F_DUPFD_CLOEXEC 1030
 
 static int64_t sys_fcntl_handler(int fd, int cmd, uint64_t arg) {
-    (void)arg;
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
-
     switch (cmd) {
-        case F_GETFD:
-            return 0; // Флаг FD_CLOEXEC снят
-        case F_SETFD:
-            return 0; // Успешно установили флаги
-        case F_GETFL:
-            return 2; // O_RDWR (чтение и запись)
-        case F_SETFL:
-            return 0; // Успешно изменили режим
-        case F_DUPFD:
-        case F_DUPFD_CLOEXEC:
-            return fd; // Возвращаем текущий fd как заглушку
-        default:
-            return 0;
+        case 0: /* F_DUPFD */
+        case 1030: /* F_DUPFD_CLOEXEC */
+            for (int i = (int)arg; i < MAX_OPEN_FILES; i++) {
+                if (current_task->process->files[i] == NULL) {
+                    current_task->process->files[i] = current_task->process->files[fd];
+                    return i;
+                }
+            }
+            return -EMFILE;
+        case 1: /* F_GETFD */ return 0;
+        case 2: /* F_SETFD */ return 0;
+        case 3: /* F_GETFL */ return 2; // O_RDWR
+        case 4: /* F_SETFL */ return 0;
+        default: return 0;
     }
+}
+
+static int64_t sys_dup2_handler(int oldfd, int newfd) {
+    if (oldfd < 0 || oldfd >= MAX_OPEN_FILES || !current_task->process->files[oldfd]) return -EBADF;
+    if (newfd < 0 || newfd >= MAX_OPEN_FILES) return -EBADF;
+    if (oldfd == newfd) return newfd;
+
+    if (current_task->process->files[newfd]) {
+        vfs_close(current_task->process->files[newfd]);
+    }
+    current_task->process->files[newfd] = current_task->process->files[oldfd];
+    return newfd;
+}
+
+static int64_t sys_access_handler(const char *pathname, int mode) {
+    (void)mode;
+    if (!pathname) return -EINVAL;
+    char resolved[256];
+    resolve_user_path(pathname, resolved, sizeof(resolved));
+    vfs_node_t *node = vfs_open(resolved, 0);
+    if (!node) return -ENOENT;
+    return 0; // Файл существует и доступен
 }
 
 // Таблица имен для отладки
-static const char *syscall_name(uint64_t num) {
-    switch (num) {
-        case SYS_READ: return "read";
-        case SYS_WRITE: return "write";
-        case SYS_OPEN: return "open";
-        case SYS_CLOSE: return "close";
-        case SYS_STAT: return "stat";
-        case SYS_FSTAT: return "fstat";
-        case SYS_POLL: return "poll";
-        case SYS_MMAP: return "mmap";
-        case SYS_MPROTECT: return "mprotect";
-        case SYS_MUNMAP: return "munmap";
-        case SYS_BRK: return "brk";
-        case SYS_RT_SIGACTION: return "rt_sigaction";
-        case SYS_RT_SIGPROCMASK: return "rt_sigprocmask";
-        case SYS_IOCTL: return "ioctl";
-        case SYS_WRITEV: return "writev";
-        case SYS_SCHED_YIELD: return "sched_yield";
-        case SYS_NANOSLEEP: return "nanosleep";
-        case SYS_GETPID: return "getpid";
-        case SYS_EXIT: return "exit";
-        case SYS_UNAME: return "uname";
-        case SYS_GETCWD: return "getcwd";
-        case SYS_CHDIR: return "chdir";
-        case SYS_GETUID: return "getuid";
-        case SYS_GETGID: return "getgid";
-        case SYS_GETEUID: return "geteuid";
-        case SYS_GETEGID: return "getegid";
-        case SYS_GETPPID: return "getppid";
-        case SYS_ARCH_PRCTL: return "arch_prctl";
-        case SYS_GETDENTS64: return "getdents64";
-        case SYS_SET_TID_ADDRESS: return "set_tid_address";
-        case SYS_CLOCK_GETTIME: return "clock_gettime";
-        case SYS_EXIT_GROUP: return "exit_group";
-        case SYS_OPENAT: return "openat";
-        default: return "UNKNOWN";
-    }
-}
+// static const char *syscall_name(uint64_t num) {
+//     switch (num) {
+//         case SYS_READ: return "read";
+//         case SYS_WRITE: return "write";
+//         case SYS_OPEN: return "open";
+//         case SYS_CLOSE: return "close";
+//         case SYS_STAT: return "stat";
+//         case SYS_FSTAT: return "fstat";
+//         case SYS_POLL: return "poll";
+//         case SYS_MMAP: return "mmap";
+//         case SYS_MPROTECT: return "mprotect";
+//         case SYS_MUNMAP: return "munmap";
+//         case SYS_BRK: return "brk";
+//         case SYS_RT_SIGACTION: return "rt_sigaction";
+//         case SYS_RT_SIGPROCMASK: return "rt_sigprocmask";
+//         case SYS_IOCTL: return "ioctl";
+//         case SYS_WRITEV: return "writev";
+//         case SYS_SCHED_YIELD: return "sched_yield";
+//         case SYS_NANOSLEEP: return "nanosleep";
+//         case SYS_GETPID: return "getpid";
+//         case SYS_EXIT: return "exit";
+//         case SYS_UNAME: return "uname";
+//         case SYS_GETCWD: return "getcwd";
+//         case SYS_CHDIR: return "chdir";
+//         case SYS_GETUID: return "getuid";
+//         case SYS_GETGID: return "getgid";
+//         case SYS_GETEUID: return "geteuid";
+//         case SYS_GETEGID: return "getegid";
+//         case SYS_GETPPID: return "getppid";
+//         case SYS_ARCH_PRCTL: return "arch_prctl";
+//         case SYS_GETDENTS64: return "getdents64";
+//         case SYS_SET_TID_ADDRESS: return "set_tid_address";
+//         case SYS_CLOCK_GETTIME: return "clock_gettime";
+//         case SYS_EXIT_GROUP: return "exit_group";
+//         case SYS_OPENAT: return "openat";
+//         default: return "UNKNOWN";
+//     }
+// }
 
 void syscall_handler(void *regs_ptr) {
     syscall_regs_t *regs = (syscall_regs_t *)regs_ptr;
@@ -664,25 +685,25 @@ void syscall_handler(void *regs_ptr) {
     int64_t ret = -ENOSYS;
 
     // === ЛОГИРОВАНИЕ В COM1 (QEMU stdio) ===
-    serial_puts(COM1, "[STRACE] ");
-    serial_puts(COM1, syscall_name(syscall_no));
-    serial_puts(COM1, "(");
+    // serial_puts(COM1, "[STRACE] ");
+    // serial_puts(COM1, syscall_name(syscall_no));
+    // serial_puts(COM1, "(");
     
-    // Если сискол работает со строками путей (open, stat, chdir) — выводим строку:
-    if (syscall_no == SYS_OPEN || syscall_no == SYS_STAT || syscall_no == SYS_CHDIR) {
-        serial_puts(COM1, "\"");
-        serial_puts(COM1, (const char *)regs->rdi);
-        serial_puts(COM1, "\"");
-    } else if (syscall_no == SYS_OPENAT) {
-        serial_puts(COM1, "\"");
-        serial_puts(COM1, (const char *)regs->rsi);
-        serial_puts(COM1, "\"");
-    } else {
-        char arg_buf[32];
-        itoa_hex(regs->rdi, arg_buf);
-        serial_puts(COM1, arg_buf);
-    }
-    serial_puts(COM1, ")\n");
+    // // Если сискол работает со строками путей (open, stat, chdir) — выводим строку:
+    // if (syscall_no == SYS_OPEN || syscall_no == SYS_STAT || syscall_no == SYS_CHDIR) {
+    //     serial_puts(COM1, "\"");
+    //     serial_puts(COM1, (const char *)regs->rdi);
+    //     serial_puts(COM1, "\"");
+    // } else if (syscall_no == SYS_OPENAT) {
+    //     serial_puts(COM1, "\"");
+    //     serial_puts(COM1, (const char *)regs->rsi);
+    //     serial_puts(COM1, "\"");
+    // } else {
+    //     char arg_buf[32];
+    //     itoa_hex(regs->rdi, arg_buf);
+    //     serial_puts(COM1, arg_buf);
+    // }
+    // serial_puts(COM1, ")\n");
 
     // === ДИСПЕТЧЕРИЗАЦИЯ СИСКОЛОВ ===
     switch (syscall_no) {

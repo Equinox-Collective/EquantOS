@@ -24,7 +24,7 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
 
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
 
-    // Verify ELF Magic bytes: 0x7F 'E' 'L' 'F'
+    // Проверка ELF Magic: 0x7F 'E' 'L' 'F'
     if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' ||
         ehdr->e_ident[2] != 'L'  || ehdr->e_ident[3] != 'F') {
         printf("[FAIL 2] ELF Loader: Invalid ELF magic signature.\n");
@@ -34,7 +34,7 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     printf("DEBUG [2/7]: ELF Header verified. Entry point: %x, PH Off: %x, PH Num: %u\n", 
            ehdr->e_entry, ehdr->e_phoff, ehdr->e_phnum);
 
-    // 1. Create a new virtual address space for the process
+    // 1. Создаем новое виртуальное адресное пространство (PML4)
     page_table_t *new_pml4 = vmm_create_address_space();
     if (!new_pml4) {
         printf("[FAIL 3] ELF Loader: Failed to create address space.\n");
@@ -42,10 +42,10 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     }
     printf("DEBUG [3/7]: New PML4 created successfully at %x\n", (uint64_t)new_pml4);
 
-    // 2. Iterate through Program Headers and load PT_LOAD segments
+    // 2. Загружаем сегменты PT_LOAD
     Elf64_Phdr *phdr = (Elf64_Phdr *)((uint8_t *)elf_data + ehdr->e_phoff);
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == 1) { // PT_LOAD segment
+        if (phdr[i].p_type == 1) { // PT_LOAD
             uint64_t p_vaddr = phdr[i].p_vaddr;
             uint64_t p_filesz = phdr[i].p_filesz;
             uint64_t p_memsz = phdr[i].p_memsz;
@@ -78,7 +78,7 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     }
     printf("DEBUG [5/7]: All segments mapped and copied.\n");
 
-    // 3. Allocate a user stack for the task (16 KB)
+    // 3. Выделяем стек пользователя (16 КБ)
     uint32_t stack_pages = 4;
     void *stack_phys = pmm_alloc_continuous(stack_pages);
     if (!stack_phys) {
@@ -98,93 +98,93 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     // =========================================================================
     //        ДИНАМИЧЕСКИЙ СТЕК SYSTEM V AMD64 ABI (ARGC, ARGV, ENVP, AUXV)
     // =========================================================================
-    uint8_t *k_stack_top = (uint8_t *)VIRT((uint64_t)stack_phys + (stack_pages * PAGE_SIZE));
-    uint8_t *k_ptr = k_stack_top;
+    uint64_t stack_top = user_stack_top;
+    uint8_t *topk = (uint8_t *)VIRT((uint64_t)stack_phys + (stack_pages * PAGE_SIZE));
+    uint64_t sp = stack_top;
 
-    // A. 16 случайных байт для AT_RANDOM
-    k_ptr -= 16;
-    memset(k_ptr, 0x42, 16);
-    uint64_t user_rand_vaddr = user_stack_top - (uint64_t)(k_stack_top - k_ptr);
-
-    // B. Базовые переменные окружения (ENVP)
-    const char *default_env[] = {
-    "PATH=/bin/:/usr/bin/:/sbin/:/usr/sbin/:/sys/bin/",
-    "USER=root",
-    "HOME=/",
-    "TERM=linux",
-    "SHELL=/bin/sh",
-    NULL
-    };
-    int envc = 0;
-    while (default_env[envc]) envc++;
-
-    uint64_t env_vaddrs[8];
-    for (int i = envc - 1; i >= 0; i--) {
-        size_t len = strlen(default_env[i]) + 1;
-        k_ptr -= len;
-        memcpy(k_ptr, default_env[i], len);
-        env_vaddrs[i] = user_stack_top - (uint64_t)(k_stack_top - k_ptr);
-    }
-
-    // C. Копируем строки аргументов (ARGV)
+    // Защита аргументов
     if (argc <= 0 || !argv) {
         argc = 1;
         argv = (char *[]){ "sh", NULL };
     }
     if (argc > 16) argc = 16;
 
-    uint64_t arg_vaddrs[16];
-    for (int i = argc - 1; i >= 0; i--) {
-        size_t len = strlen(argv[i]) + 1;
-        k_ptr -= len;
-        memcpy(k_ptr, argv[i], len);
-        arg_vaddrs[i] = user_stack_top - (uint64_t)(k_stack_top - k_ptr);
+    // 1. Копируем строки ARGV на стек
+    uint64_t argv_u[17];
+    for (int i = 0; i < argc; i++) {
+        const char *s = argv[i] ? argv[i] : "";
+        size_t len = strlen(s) + 1;
+        sp -= len;
+        memcpy(topk - (stack_top - sp), s, len);
+        argv_u[i] = sp;
     }
 
-    // D. Выравниваем стек по 16 байт
-    uint64_t *k_sp = (uint64_t *)((uintptr_t)k_ptr & ~0xFULL);
+    // 2. Копируем строки ENVP на стек
+    const char *default_env[] = {
+        "PATH=/bin/:/usr/bin/:/sbin/:/usr/sbin/:/sys/bin/",
+        "USER=root",
+        "HOME=/",
+        "TERM=linux",
+        "SHELL=/bin/sh",
+        NULL
+    };
+    int envc = 0;
+    while (default_env[envc]) envc++;
 
-    // Выравнивание глубины стека: проверяем четность элементов для System V ABI (RSP % 16 == 0)
-    size_t total_words = 26 + (envc + 1) + (argc + 1) + 1;
-    if ((total_words % 2) != 0) {
-        *--k_sp = 0; // Padding word
+    uint64_t envp_u[16];
+    for (int i = 0; i < envc; i++) {
+        size_t len = strlen(default_env[i]) + 1;
+        sp -= len;
+        memcpy(topk - (stack_top - sp), default_env[i], len);
+        envp_u[i] = sp;
     }
 
-    // E. Auxiliary Vector (AUXV)
-    *--k_sp = 0;                   *--k_sp = 0;  // AT_NULL (0)
-    *--k_sp = user_rand_vaddr;     *--k_sp = 25; // AT_RANDOM (25)
-    *--k_sp = 0;                   *--k_sp = 23; // AT_SECURE (23)
-    *--k_sp = 0;                   *--k_sp = 14; // AT_EGID (14)
-    *--k_sp = 0;                   *--k_sp = 13; // AT_GID (13)
-    *--k_sp = 0;                   *--k_sp = 12; // AT_EUID (12)
-    *--k_sp = 0;                   *--k_sp = 11; // AT_UID (11)
-    *--k_sp = ehdr->e_entry;       *--k_sp = 9;  // AT_ENTRY (9)
-    *--k_sp = PAGE_SIZE;           *--k_sp = 6;  // AT_PAGESZ (6)
-    *--k_sp = ehdr->e_phnum;       *--k_sp = 5;  // AT_PHNUM (5)
-    *--k_sp = ehdr->e_phentsize;   *--k_sp = 4;  // AT_PHENT (4)
+    // 3. 16 байт для AT_RANDOM
+    sp -= 16;
+    memset(topk - (stack_top - sp), 0x42, 16);
+    uint64_t at_random = sp;
+
+    // 4. Выравнивание 16 байт
+    sp &= ~0xFULL;
+
+    // 5. Формируем Auxiliary Vector (AUXV)
+    uint64_t aux[32]; 
+    int an = 0;
     uint64_t phdr_vaddr = phdr[0].p_vaddr + ehdr->e_phoff;
-    *--k_sp = phdr_vaddr;          *--k_sp = 3;  // AT_PHDR (3)
+    aux[an++] = 3;  aux[an++] = phdr_vaddr;          // AT_PHDR
+    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;   // AT_PHENT
+    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;       // AT_PHNUM
+    aux[an++] = 6;  aux[an++] = PAGE_SIZE;           // AT_PAGESZ
+    aux[an++] = 9;  aux[an++] = ehdr->e_entry;       // AT_ENTRY
+    aux[an++] = 11; aux[an++] = 0;                   // AT_UID
+    aux[an++] = 12; aux[an++] = 0;                   // AT_EUID
+    aux[an++] = 13; aux[an++] = 0;                   // AT_GID
+    aux[an++] = 14; aux[an++] = 0;                   // AT_EGID
+    aux[an++] = 23; aux[an++] = 0;                   // AT_SECURE
+    aux[an++] = 25; aux[an++] = at_random;           // AT_RANDOM
+    aux[an++] = 0;  aux[an++] = 0;                   // AT_NULL
 
-    // F. Массив указателей envp[]
-    *--k_sp = 0; // NULL terminator
-    for (int i = envc - 1; i >= 0; i--) {
-        *--k_sp = env_vaddrs[i];
-    }
+    // 6. Вычисляем количество слов и выравниваем глубину стека (System V ABI)
+    int total_words = 1 + (argc + 1) + (envc + 1) + an;
+    if (total_words & 1) sp -= 8;
 
-    // G. Массив указателей argv[]
-    *--k_sp = 0; // NULL terminator
-    for (int i = argc - 1; i >= 0; i--) {
-        *--k_sp = arg_vaddrs[i];
-    }
+    sp -= (uint64_t)total_words * 8;
 
-    // H. Число аргументов argc
-    *--k_sp = (uint64_t)argc;
+    // 7. Записываем указатели в стек
+    uint64_t *w = (uint64_t *)(topk - (stack_top - sp));
+    int idx = 0;
+    w[idx++] = (uint64_t)argc;
+    for (int i = 0; i < argc; i++) w[idx++] = argv_u[i];
+    w[idx++] = 0; // NULL terminator для argv
+    for (int i = 0; i < envc; i++) w[idx++] = envp_u[i];
+    w[idx++] = 0; // NULL terminator для envp
+    for (int i = 0; i < an; i++)   w[idx++] = aux[i];
 
-    uint64_t initial_user_rsp = user_stack_top - (uint64_t)(k_stack_top - (uint8_t *)k_sp);
+    uint64_t initial_user_rsp = sp;
 
     printf("DEBUG [6/7]: System V Stack initialized with %d args. User RSP: %x\n", argc, initial_user_rsp);
 
-    // 4. Create process and task structures
+    // 4. Создаем структуры процесса и потока
     process_t *proc = (process_t *)kmalloc(sizeof(process_t));
     if (!proc) return false;
     memset(proc, 0, sizeof(process_t));
@@ -206,14 +206,14 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
 
     uint64_t *stack = (uint64_t *)task->kstack_at_bottom;
 
-    *--stack = 0x1B;                  // SS
+    *--stack = 0x1B;                  // SS (User Data)
     *--stack = initial_user_rsp;      // RSP с нашими аргументами!
-    *--stack = 0x202;                 // RFLAGS
-    *--stack = 0x23;                  // CS
+    *--stack = 0x202;                 // RFLAGS (IF включен)
+    *--stack = 0x23;                  // CS (User Code)
     *--stack = ehdr->e_entry;         // RIP
 
-    *--stack = 0;
-    *--stack = 0;
+    *--stack = 0; // Error code
+    *--stack = 0; // Int no
 
     for (int k = 0; k < 15; k++) {
         *--stack = 0;
