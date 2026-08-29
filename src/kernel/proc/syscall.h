@@ -33,10 +33,13 @@
 #define SYS_IOCTL           16
 #define SYS_WRITEV          20
 #define SYS_SCHED_YIELD     24
+#define SYS_DUP             32
+#define SYS_DUP2            33
 #define SYS_NANOSLEEP       35
 #define SYS_GETPID          39
 #define SYS_EXIT            60
 #define SYS_UNAME           63
+#define SYS_FCNTL           72
 #define SYS_GETCWD          79
 #define SYS_CHDIR           80
 #define SYS_SYSINFO         99
@@ -54,6 +57,7 @@
 #define SYS_EXIT_GROUP      231
 #define SYS_TGKILL          234
 #define SYS_OPENAT          257
+#define SYS_DUP3            292
 
 typedef struct {
     uint64_t total_ram;

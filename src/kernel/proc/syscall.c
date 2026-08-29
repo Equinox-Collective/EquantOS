@@ -590,11 +590,101 @@ static int64_t sys_sysinfo_handler(equant_sysinfo_t *info) {
     return 0;
 }
 
+#define F_DUPFD         0
+#define F_GETFD         1
+#define F_SETFD         2
+#define F_GETFL         3
+#define F_SETFL         4
+#define F_DUPFD_CLOEXEC 1030
+
+static int64_t sys_fcntl_handler(int fd, int cmd, uint64_t arg) {
+    (void)arg;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    switch (cmd) {
+        case F_GETFD:
+            return 0; // Флаг FD_CLOEXEC снят
+        case F_SETFD:
+            return 0; // Успешно установили флаги
+        case F_GETFL:
+            return 2; // O_RDWR (чтение и запись)
+        case F_SETFL:
+            return 0; // Успешно изменили режим
+        case F_DUPFD:
+        case F_DUPFD_CLOEXEC:
+            return fd; // Возвращаем текущий fd как заглушку
+        default:
+            return 0;
+    }
+}
+
+// Таблица имен для отладки
+static const char *syscall_name(uint64_t num) {
+    switch (num) {
+        case SYS_READ: return "read";
+        case SYS_WRITE: return "write";
+        case SYS_OPEN: return "open";
+        case SYS_CLOSE: return "close";
+        case SYS_STAT: return "stat";
+        case SYS_FSTAT: return "fstat";
+        case SYS_POLL: return "poll";
+        case SYS_MMAP: return "mmap";
+        case SYS_MPROTECT: return "mprotect";
+        case SYS_MUNMAP: return "munmap";
+        case SYS_BRK: return "brk";
+        case SYS_RT_SIGACTION: return "rt_sigaction";
+        case SYS_RT_SIGPROCMASK: return "rt_sigprocmask";
+        case SYS_IOCTL: return "ioctl";
+        case SYS_WRITEV: return "writev";
+        case SYS_SCHED_YIELD: return "sched_yield";
+        case SYS_NANOSLEEP: return "nanosleep";
+        case SYS_GETPID: return "getpid";
+        case SYS_EXIT: return "exit";
+        case SYS_UNAME: return "uname";
+        case SYS_GETCWD: return "getcwd";
+        case SYS_CHDIR: return "chdir";
+        case SYS_GETUID: return "getuid";
+        case SYS_GETGID: return "getgid";
+        case SYS_GETEUID: return "geteuid";
+        case SYS_GETEGID: return "getegid";
+        case SYS_GETPPID: return "getppid";
+        case SYS_ARCH_PRCTL: return "arch_prctl";
+        case SYS_GETDENTS64: return "getdents64";
+        case SYS_SET_TID_ADDRESS: return "set_tid_address";
+        case SYS_CLOCK_GETTIME: return "clock_gettime";
+        case SYS_EXIT_GROUP: return "exit_group";
+        case SYS_OPENAT: return "openat";
+        default: return "UNKNOWN";
+    }
+}
+
 void syscall_handler(void *regs_ptr) {
     syscall_regs_t *regs = (syscall_regs_t *)regs_ptr;
     uint64_t syscall_no = regs->rax;
     int64_t ret = -ENOSYS;
 
+    // === ЛОГИРОВАНИЕ В COM1 (QEMU stdio) ===
+    serial_puts(COM1, "[STRACE] ");
+    serial_puts(COM1, syscall_name(syscall_no));
+    serial_puts(COM1, "(");
+    
+    // Если сискол работает со строками путей (open, stat, chdir) — выводим строку:
+    if (syscall_no == SYS_OPEN || syscall_no == SYS_STAT || syscall_no == SYS_CHDIR) {
+        serial_puts(COM1, "\"");
+        serial_puts(COM1, (const char *)regs->rdi);
+        serial_puts(COM1, "\"");
+    } else if (syscall_no == SYS_OPENAT) {
+        serial_puts(COM1, "\"");
+        serial_puts(COM1, (const char *)regs->rsi);
+        serial_puts(COM1, "\"");
+    } else {
+        char arg_buf[32];
+        itoa_hex(regs->rdi, arg_buf);
+        serial_puts(COM1, arg_buf);
+    }
+    serial_puts(COM1, ")\n");
+
+    // === ДИСПЕТЧЕРИЗАЦИЯ СИСКОЛОВ ===
     switch (syscall_no) {
         case SYS_READ:
             ret = sys_read_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
@@ -611,7 +701,7 @@ void syscall_handler(void *regs_ptr) {
         case SYS_STAT:
             ret = sys_stat_handler((const char *)regs->rdi, (struct linux_stat *)regs->rsi);
             break;
-        case SYS_FSTAT: // 5
+        case SYS_FSTAT:
             ret = sys_fstat_handler((int)regs->rdi, (struct linux_stat *)regs->rsi);
             break;
         case SYS_WRITEV:
@@ -625,7 +715,10 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_GETEUID:
         case SYS_GETEGID:
-            ret = 0; // Возвращаем 0 (UID 0 = ROOT!)
+            ret = 0;
+            break;
+        case SYS_FCNTL:
+            ret = sys_fcntl_handler((int)regs->rdi, (int)regs->rsi, regs->rdx);
             break;
         case SYS_CHDIR:
             ret = sys_chdir_handler((const char *)regs->rdi);
@@ -664,7 +757,7 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_TKILL:
         case SYS_TGKILL:
-            ret = 0; // Успешная обработка сигналов
+            ret = 0;
             break;
         case SYS_GETDENTS64:
             ret = sys_getdents64_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);

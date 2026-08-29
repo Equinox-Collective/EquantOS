@@ -108,12 +108,12 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
 
     // B. Базовые переменные окружения (ENVP)
     const char *default_env[] = {
-        "PATH=/bin:/usr/bin:/sbin:/usr/sbin:/sys/bin",
-        "USER=root",
-        "HOME=/",
-        "TERM=linux",
-        "SHELL=/bin/sh",
-        NULL
+    "PATH=/bin/:/usr/bin/:/sbin/:/usr/sbin/:/sys/bin/",
+    "USER=root",
+    "HOME=/",
+    "TERM=linux",
+    "SHELL=/bin/sh",
+    NULL
     };
     int envc = 0;
     while (default_env[envc]) envc++;

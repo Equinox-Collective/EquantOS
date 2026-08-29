@@ -156,10 +156,27 @@ static const shell_command_t commands[] = {
 
 static int tokenize(char *line, char **argv, int max_args) {
     int argc = 0;
-    char *token = strtok(line, " ");
-    while (token && argc < max_args) {
-        argv[argc++] = token;
-        token = strtok(NULL, " ");
+    char *p = line;
+
+    while (*p && argc < max_args) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+
+        if (*p == '"') {
+            p++;
+            argv[argc++] = p;
+            while (*p && *p != '"') p++;
+            if (*p == '"') *p++ = '\0';
+        } else if (*p == '\'') {
+            p++;
+            argv[argc++] = p;
+            while (*p && *p != '\'') p++;
+            if (*p == '\'') *p++ = '\0';
+        } else {
+            argv[argc++] = p;
+            while (*p && *p != ' ') p++;
+            if (*p == ' ') *p++ = '\0';
+        }
     }
     return argc;
 }
@@ -640,9 +657,6 @@ static void cmd_cd(int argc, char **argv) {
 static void cmd_run(int argc, char **argv) {
     if (argc < 2) {
         term_print("Usage: run <executable> [args...]\n");
-        term_print("Example: run busybox.elf uname -a\n");
-        term_print("Example: run busybox.elf free\n");
-        term_print("Example: run busybox.elf echo Hello World\n");
         return;
     }
 
@@ -650,62 +664,42 @@ static void cmd_run(int argc, char **argv) {
     resolve_path(argv[1], resolved, sizeof(resolved));
 
     vfs_node_t *file = vfs_open(resolved, 0);
-
-    // Fallback: Проверяем /sys/bin/
     if (!file) {
         char path_buf[256];
         strcpy(path_buf, "/sys/bin/");
         strcat(path_buf, argv[1]);
         file = vfs_open(path_buf, 0);
-        if (file) {
-            strcpy(resolved, path_buf);
-        }
+        if (file) strcpy(resolved, path_buf);
     }
 
-    if (!file) {
-        term_print("run: executable not found: ");
-        term_print(argv[1]);
-        term_print("\n");
-        return;
-    }
-
-    if (file->flags & FS_DIRECTORY) {
-        term_print("run: path is a directory: ");
-        term_print(resolved);
-        term_print("\n");
+    if (!file || (file->flags & FS_DIRECTORY)) {
+        term_print("run: executable not found\n");
         return;
     }
 
     uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
-    if (!elf_buf) {
-        term_print("run: out of memory\n");
-        return;
-    }
+    if (!elf_buf) return;
 
-    int64_t read_bytes = vfs_read(file, 0, file->length, elf_buf);
-    if (read_bytes <= 0) {
-        term_print("run: failed to read ELF file\n");
+    if (vfs_read(file, 0, file->length, elf_buf) <= 0) {
         kfree(elf_buf);
         return;
     }
 
-    // Формируем аргументы: run busybox.elf uname -a -> child_argv = ["busybox", "uname", "-a"]
-    int child_argc = argc - 1;
-    char *child_argv[MAX_ARGS];
+    // === ПРАВИЛЬНАЯ РАСКЛАДКА АРГУМЕНТОВ ===
+    int child_argc = 0;
+    char *child_argv[MAX_ARGS + 1];
 
-    // Нормализуем имя для BusyBox (busybox.elf -> busybox)
-    static char app_name[64];
-    const char *base_name = argv[1];
-    const char *slash = strrchr(argv[1], '/');
-    if (slash) base_name = slash + 1;
-    
-    strncpy(app_name, base_name, sizeof(app_name) - 1);
-    char *dot = strchr(app_name, '.');
-    if (dot) *dot = '\0';
-
-    child_argv[0] = app_name;
-    for (int i = 2; i < argc; i++) {
-        child_argv[i - 1] = argv[i];
+    if (argc == 2) {
+        // Просто "run busybox.elf" -> запускаем busybox sh
+        child_argv[child_argc++] = "busybox";
+        child_argv[child_argc++] = "sh";
+    } else {
+        // "run busybox.elf --help" -> argv[0]="busybox", argv[1]="--help"
+        // "run busybox.elf uname -a" -> argv[0]="busybox", argv[1]="uname", argv[2]="-a"
+        child_argv[child_argc++] = "busybox";
+        for (int i = 2; i < argc && child_argc < MAX_ARGS; i++) {
+            child_argv[child_argc++] = argv[i];
+        }
     }
     child_argv[child_argc] = NULL;
 

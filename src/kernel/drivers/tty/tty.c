@@ -150,6 +150,12 @@ static char input_code_to_ascii(uint16_t code, bool shift) {
             case KEY_C: return 'C'; case KEY_V: return 'V'; case KEY_B: return 'B';
             case KEY_N: return 'N'; case KEY_M: return 'M'; case KEY_SPACE: return ' ';
             case KEY_DOT: return '>'; case KEY_SLASH: return '?'; case KEY_COMMA: return '<';
+            case KEY_SEMICOLON: return ':'; 
+            case KEY_APOSTROPHE: return '"'; // <-- ВОТ ОНА, ДВОЙНАЯ КАВЫЧКА!
+            case KEY_GRAVE: return '~'; 
+            case KEY_BACKSLASH: return '|';
+            case KEY_LEFTBRACE: return '{'; 
+            case KEY_RIGHTBRACE: return '}';
             default: return 0;
         }
     }
@@ -168,6 +174,12 @@ static char input_code_to_ascii(uint16_t code, bool shift) {
         case KEY_C: return 'c'; case KEY_V: return 'v'; case KEY_B: return 'b';
         case KEY_N: return 'n'; case KEY_M: return 'm'; case KEY_SPACE: return ' ';
         case KEY_DOT: return '.'; case KEY_SLASH: return '/'; case KEY_COMMA: return ',';
+        case KEY_SEMICOLON: return ';'; 
+        case KEY_APOSTROPHE: return '\''; // Одинарная кавычка
+        case KEY_GRAVE: return '`'; 
+        case KEY_BACKSLASH: return '\\';
+        case KEY_LEFTBRACE: return '['; 
+        case KEY_RIGHTBRACE: return ']';
         default: return 0;
     }
 }
