@@ -116,7 +116,8 @@ ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/musltest.elf \
                  build/iso/equantmemtest.elf \
                  build/iso/busybox.elf \
-                 build/iso/font.psf
+                 build/iso/font.psf \
+				 build/iso/bash.elf
 
 # ==============================================================================
 # Build Rules
@@ -185,6 +186,11 @@ build/iso/font.psf: res/font.psf
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/font.psf,$@)
+
+build/iso/bash.elf: res/bash.elf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/bash.elf,$@)
 
 # ==============================================================================
 # Disk & Bootloader Assets
