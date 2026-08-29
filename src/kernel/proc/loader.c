@@ -1,3 +1,4 @@
+// src/kernel/proc/loader.c
 #include "loader.h"
 #include "task.h"
 #include "../core/mem/vmm.h"
@@ -13,7 +14,7 @@ extern uint64_t hhdm_offset;
 #define VIRT(addr) ((uint64_t)(addr) + hhdm_offset)
 #define PHYS(addr) ((uint64_t)(addr) - hhdm_offset)
 
-bool elf_load(void *elf_data, uint64_t size) {
+bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     printf("DEBUG [1/7]: elf_load entered. Data: %x, Size: %u bytes\n", (uint64_t)elf_data, (unsigned int)size);
 
     if (!elf_data || size < sizeof(Elf64_Ehdr)) {
@@ -36,13 +37,13 @@ bool elf_load(void *elf_data, uint64_t size) {
     // 1. Create a new virtual address space for the process
     page_table_t *new_pml4 = vmm_create_address_space();
     if (!new_pml4) {
-        printf("[FAIL 3] ELF Loader: Failed to create address space (vmm_create_address_space returned NULL).\n");
+        printf("[FAIL 3] ELF Loader: Failed to create address space.\n");
         return false;
     }
     printf("DEBUG [3/7]: New PML4 created successfully at %x\n", (uint64_t)new_pml4);
 
     // 2. Iterate through Program Headers and load PT_LOAD segments
-    Elf64_Phdr *phdr = (Elf64_Phdr *)((uint8_t * )elf_data + ehdr->e_phoff);
+    Elf64_Phdr *phdr = (Elf64_Phdr *)((uint8_t *)elf_data + ehdr->e_phoff);
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type == 1) { // PT_LOAD segment
             uint64_t p_vaddr = phdr[i].p_vaddr;
@@ -60,7 +61,7 @@ bool elf_load(void *elf_data, uint64_t size) {
 
             void *phys_pages = pmm_alloc_continuous(page_count);
             if (!phys_pages) {
-                printf("[FAIL 4] ELF Loader: Out of physical memory for segment %u (pages: %u).\n", i, page_count);
+                printf("[FAIL 4] ELF Loader: Out of physical memory for segment %u.\n", i);
                 return false;
             }
 
@@ -94,26 +95,63 @@ bool elf_load(void *elf_data, uint64_t size) {
                 PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
 
-    // Подготавливаем полный стек System V AMD64 ABI с AUXV для Musl libc
+    // =========================================================================
+    //        ДИНАМИЧЕСКИЙ СТЕК SYSTEM V AMD64 ABI (ARGC, ARGV, ENVP, AUXV)
+    // =========================================================================
     uint8_t *k_stack_top = (uint8_t *)VIRT((uint64_t)stack_phys + (stack_pages * PAGE_SIZE));
-    
-    // 1. Помещаем 16 случайных байт для AT_RANDOM (нужны для канареек стека в Musl)
-    uint8_t *k_rand_ptr = k_stack_top - 16;
-    memset(k_rand_ptr, 0x42, 16);
-    uint64_t user_rand_vaddr = user_stack_top - 16;
+    uint8_t *k_ptr = k_stack_top;
 
-    // 2. Помещаем имя программы
-    const char *prog_name = "sh";
-    size_t prog_len = strlen(prog_name) + 1;
-    uint8_t *k_str_ptr = k_rand_ptr - prog_len;
-    memcpy(k_str_ptr, prog_name, prog_len);
-    uint64_t user_str_vaddr = user_rand_vaddr - prog_len;
+    // A. 16 случайных байт для AT_RANDOM
+    k_ptr -= 16;
+    memset(k_ptr, 0x42, 16);
+    uint64_t user_rand_vaddr = user_stack_top - (uint64_t)(k_stack_top - k_ptr);
 
-    // 3. Выравниваем указатель стека по 16 байт
-    uint64_t *k_sp = (uint64_t *)((uintptr_t)k_str_ptr & ~0xFULL);
+    // B. Базовые переменные окружения (ENVP)
+    const char *default_env[] = {
+        "PATH=/bin:/usr/bin:/sbin:/usr/sbin:/sys/bin",
+        "USER=root",
+        "HOME=/",
+        "TERM=linux",
+        "SHELL=/bin/sh",
+        NULL
+    };
+    int envc = 0;
+    while (default_env[envc]) envc++;
 
-    // 4. Формируем Auxiliary Vector (AUXV) для Musl:
-    *--k_sp = 0;                   *--k_sp = 0;  // AT_NULL (0) - конец вектора
+    uint64_t env_vaddrs[8];
+    for (int i = envc - 1; i >= 0; i--) {
+        size_t len = strlen(default_env[i]) + 1;
+        k_ptr -= len;
+        memcpy(k_ptr, default_env[i], len);
+        env_vaddrs[i] = user_stack_top - (uint64_t)(k_stack_top - k_ptr);
+    }
+
+    // C. Копируем строки аргументов (ARGV)
+    if (argc <= 0 || !argv) {
+        argc = 1;
+        argv = (char *[]){ "sh", NULL };
+    }
+    if (argc > 16) argc = 16;
+
+    uint64_t arg_vaddrs[16];
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t len = strlen(argv[i]) + 1;
+        k_ptr -= len;
+        memcpy(k_ptr, argv[i], len);
+        arg_vaddrs[i] = user_stack_top - (uint64_t)(k_stack_top - k_ptr);
+    }
+
+    // D. Выравниваем стек по 16 байт
+    uint64_t *k_sp = (uint64_t *)((uintptr_t)k_ptr & ~0xFULL);
+
+    // Выравнивание глубины стека: проверяем четность элементов для System V ABI (RSP % 16 == 0)
+    size_t total_words = 26 + (envc + 1) + (argc + 1) + 1;
+    if ((total_words % 2) != 0) {
+        *--k_sp = 0; // Padding word
+    }
+
+    // E. Auxiliary Vector (AUXV)
+    *--k_sp = 0;                   *--k_sp = 0;  // AT_NULL (0)
     *--k_sp = user_rand_vaddr;     *--k_sp = 25; // AT_RANDOM (25)
     *--k_sp = 0;                   *--k_sp = 23; // AT_SECURE (23)
     *--k_sp = 0;                   *--k_sp = 14; // AT_EGID (14)
@@ -121,37 +159,41 @@ bool elf_load(void *elf_data, uint64_t size) {
     *--k_sp = 0;                   *--k_sp = 12; // AT_EUID (12)
     *--k_sp = 0;                   *--k_sp = 11; // AT_UID (11)
     *--k_sp = ehdr->e_entry;       *--k_sp = 9;  // AT_ENTRY (9)
-    *--k_sp = PAGE_SIZE;           *--k_sp = 6;  // AT_PAGESZ (6) = 4096
+    *--k_sp = PAGE_SIZE;           *--k_sp = 6;  // AT_PAGESZ (6)
     *--k_sp = ehdr->e_phnum;       *--k_sp = 5;  // AT_PHNUM (5)
     *--k_sp = ehdr->e_phentsize;   *--k_sp = 4;  // AT_PHENT (4)
     uint64_t phdr_vaddr = phdr[0].p_vaddr + ehdr->e_phoff;
     *--k_sp = phdr_vaddr;          *--k_sp = 3;  // AT_PHDR (3)
 
-    // 5. Передаем envp, argv и argc
-    *--k_sp = 0;              // envp[0] = NULL
-    *--k_sp = 0;              // argv[1] = NULL
-    *--k_sp = user_str_vaddr; // argv[0] = "/hello.elf"
-    *--k_sp = 1;              // argc = 1
+    // F. Массив указателей envp[]
+    *--k_sp = 0; // NULL terminator
+    for (int i = envc - 1; i >= 0; i--) {
+        *--k_sp = env_vaddrs[i];
+    }
+
+    // G. Массив указателей argv[]
+    *--k_sp = 0; // NULL terminator
+    for (int i = argc - 1; i >= 0; i--) {
+        *--k_sp = arg_vaddrs[i];
+    }
+
+    // H. Число аргументов argc
+    *--k_sp = (uint64_t)argc;
 
     uint64_t initial_user_rsp = user_stack_top - (uint64_t)(k_stack_top - (uint8_t *)k_sp);
 
-    printf("DEBUG [6/7]: Complete System V AUXV Stack initialized. User RSP: %x\n", initial_user_rsp);
+    printf("DEBUG [6/7]: System V Stack initialized with %d args. User RSP: %x\n", argc, initial_user_rsp);
+
     // 4. Create process and task structures
     process_t *proc = (process_t *)kmalloc(sizeof(process_t));
-    if (!proc) {
-        printf("[FAIL 6] ELF Loader: Failed to allocate memory for process structure.\n");
-        return false;
-    }
+    if (!proc) return false;
     memset(proc, 0, sizeof(process_t));
     proc->pid = 2;
     proc->cr3 = PHYS(new_pml4);
     proc->brk = 0x600000;
 
     task_t *task = (task_t *)kmalloc(sizeof(task_t));
-    if (!task) {
-        printf("[FAIL 7] ELF Loader: Failed to allocate memory for task structure.\n");
-        return false;
-    }
+    if (!task) return false;
     memset(task, 0, sizeof(task_t));
 
     task_init_fpu(task);
@@ -164,14 +206,14 @@ bool elf_load(void *elf_data, uint64_t size) {
 
     uint64_t *stack = (uint64_t *)task->kstack_at_bottom;
 
-    *--stack = 0x1B;                  // SS (User Data + RPL 3)
-    *--stack = initial_user_rsp;      // <-- Передаем выровненный RSP с argc и argv!
+    *--stack = 0x1B;                  // SS
+    *--stack = initial_user_rsp;      // RSP с нашими аргументами!
     *--stack = 0x202;                 // RFLAGS
-    *--stack = 0x23;                  // CS (User Code + RPL 3)
+    *--stack = 0x23;                  // CS
     *--stack = ehdr->e_entry;         // RIP
 
-    *--stack = 0;                     // Error code
-    *--stack = 0;                     // Interrupt number
+    *--stack = 0;
+    *--stack = 0;
 
     for (int k = 0; k < 15; k++) {
         *--stack = 0;
@@ -180,8 +222,12 @@ bool elf_load(void *elf_data, uint64_t size) {
     task->rsp = (uint64_t)stack;
 
     printf("DEBUG [7/7]: Task structure fully ready. Enqueueing to scheduler...\n");
-    last_spawned_task = task; // Сохраняем запущенный процесс
+    last_spawned_task = task;
     sched_enqueue(task);
-    printf("ELF Loader: Task successfully enqueued. Returning true.\n");
     return true;
+}
+
+bool elf_load(void *elf_data, uint64_t size) {
+    char *default_argv[] = { "sh", NULL };
+    return elf_load_args(elf_data, size, 1, default_argv);
 }
