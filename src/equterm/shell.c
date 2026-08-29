@@ -636,9 +636,13 @@ static void cmd_cd(int argc, char **argv) {
     strcpy(current_dir, resolved);
 }
 
+// В src/equterm/shell.c
 static void cmd_run(int argc, char **argv) {
     if (argc < 2) {
-        term_print("Usage: run <executable>\n");
+        term_print("Usage: run <executable> [args...]\n");
+        term_print("Example: run busybox.elf uname -a\n");
+        term_print("Example: run busybox.elf free\n");
+        term_print("Example: run busybox.elf echo Hello World\n");
         return;
     }
 
@@ -647,7 +651,7 @@ static void cmd_run(int argc, char **argv) {
 
     vfs_node_t *file = vfs_open(resolved, 0);
 
-    // Fallback: Check System Binary PATH (/sys/bin/)
+    // Fallback: Проверяем /sys/bin/
     if (!file) {
         char path_buf[256];
         strcpy(path_buf, "/sys/bin/");
@@ -659,7 +663,7 @@ static void cmd_run(int argc, char **argv) {
     }
 
     if (!file) {
-        term_print("run: executable not found in current directory or /sys/bin/: ");
+        term_print("run: executable not found: ");
         term_print(argv[1]);
         term_print("\n");
         return;
@@ -674,16 +678,36 @@ static void cmd_run(int argc, char **argv) {
 
     uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
     if (!elf_buf) {
-        term_print("run: out of memory for loading binary\n");
+        term_print("run: out of memory\n");
         return;
     }
 
     int64_t read_bytes = vfs_read(file, 0, file->length, elf_buf);
     if (read_bytes <= 0) {
-        term_print("run: failed to read ELF file data\n");
+        term_print("run: failed to read ELF file\n");
         kfree(elf_buf);
         return;
     }
+
+    // Формируем аргументы: run busybox.elf uname -a -> child_argv = ["busybox", "uname", "-a"]
+    int child_argc = argc - 1;
+    char *child_argv[MAX_ARGS];
+
+    // Нормализуем имя для BusyBox (busybox.elf -> busybox)
+    static char app_name[64];
+    const char *base_name = argv[1];
+    const char *slash = strrchr(argv[1], '/');
+    if (slash) base_name = slash + 1;
+    
+    strncpy(app_name, base_name, sizeof(app_name) - 1);
+    char *dot = strchr(app_name, '.');
+    if (dot) *dot = '\0';
+
+    child_argv[0] = app_name;
+    for (int i = 2; i < argc; i++) {
+        child_argv[i - 1] = argv[i];
+    }
+    child_argv[child_argc] = NULL;
 
     term_print("Spawning process: ");
     term_print(resolved);
@@ -691,12 +715,10 @@ static void cmd_run(int argc, char **argv) {
 
     last_spawned_task = NULL;
 
-    if (elf_load(elf_buf, file->length)) {
-        // СИНХРОННОЕ ОЖИДАНИЕ: Шелл передает кванты времени и ждет, пока процесс станет ZOMBIE
-         while (last_spawned_task && last_spawned_task->state != TASK_STATE_ZOMBIE) {
-            sched_yield(); // Отдаем процессор BusyBox'у
+    if (elf_load_args(elf_buf, file->length, child_argc, child_argv)) {
+        while (last_spawned_task && last_spawned_task->state != TASK_STATE_ZOMBIE) {
+            sched_yield();
         }
-
         term_print("\nProcess execution finished.\n");
     } else {
         term_print("run: ELF load failed\n");
