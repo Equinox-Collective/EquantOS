@@ -68,20 +68,20 @@ char tty_getchar(void) {
     for (;;) {
         __asm__ volatile("sti");
 
-        // 1. Проверка ввода из Serial терминала (COM1)
+        // 1. Serial (COM1)
         if (serial_received(COM1)) {
             char c = serial_getchar(COM1);
             if (c == '\r') c = '\n';
-            tty_putchar(c); // Эхо на экран и в serial
+            tty_putchar(c); // ЭХО НА ЭКРАН
             return c;
         }
 
-        // 2. Проверка событий физической клавиатуры
+        // 2. Клавиатура
         if (input_pop_event(&ev)) {
             char c = input_event_to_ascii(ev);
             if (c != 0) {
                 if (c == '\r') c = '\n';
-                tty_putchar(c); // Мгновенно отображаем символ на мониторе!
+                tty_putchar(c); // ВОЗВРАЩАЕМ ВИДИМЫЙ ВВОД!
                 return c;
             }
         }

@@ -60,28 +60,7 @@ void input_push_event(uint16_t type, uint16_t code, int32_t value) {
 }
 
 void input_timer_tick(void) {
-    if (repeating_key == 0) return;
-
-    if (repeat_delay_timer > 0) {
-        repeat_delay_timer--;
-        return;
-    }
-
-    if (repeat_rate_timer > 0) {
-        repeat_rate_timer--;
-    }
-
-    if (repeat_rate_timer == 0) {
-        repeat_rate_timer = REPEAT_RATE_TICKS;
-
-        int next = (ring_head + 1) % INPUT_BUFFER_SIZE;
-        if (next != ring_tail) {
-            event_ring_buffer[ring_head].type = EV_KEY;
-            event_ring_buffer[ring_head].code = repeating_key;
-            event_ring_buffer[ring_head].value = KEY_PRESS;
-            ring_head = next;
-        }
-    }
+    return;
 }
 
 bool input_pop_event(input_event_t *out_event) {
@@ -91,6 +70,10 @@ bool input_pop_event(input_event_t *out_event) {
     *out_event = event_ring_buffer[ring_tail];
     ring_tail = (ring_tail + 1) % INPUT_BUFFER_SIZE;
     return true;
+}
+
+bool input_has_events(void) {
+    return ring_head != ring_tail;
 }
 
 static int __init input_subsys_initcall(void) {

@@ -50,11 +50,6 @@ struct linux_utsname {
     char domainname[65];
 };
 
-struct linux_timespec {
-    int64_t tv_sec;
-    int64_t tv_nsec;
-};
-
 void linux_syscall_handler(void *regs_ptr) {
     syscall_handler(regs_ptr);
 }
@@ -153,12 +148,15 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
     // === STDIN (Клавиатура / Serial) ===
     if (fd == 0) {
         char *out = (char *)buf;
-        
-        // Читаем первый символ (блокируемся, пока не нажмут)
         char c = tty_getchar();
+
+        // Превращаем возврат каретки \r в каноничный Unix \n
+        if (c == '\r') {
+            c = '\n';
+        }
+
         out[0] = c;
-        
-        return 1; // Возвращаем 1 прочитанный байт сразу шеллу BusyBox!
+        return 1;
     }
 
     // === Обычные файлы VFS ===
@@ -190,7 +188,7 @@ static int64_t sys_getcwd_handler(char *buf, size_t size) {
     if (size < len) return -ERANGE;
 
     memcpy(buf, cwd, len);
-    return 0; // Успех
+    return (int64_t)len; // <-- ВОЗВРАЩАЕМ ДЛИНУ СТРОКИ, А НЕ 0!
 }
 
 static int64_t sys_chdir_handler(const char *path) {
@@ -257,6 +255,64 @@ static int64_t sys_exit_handler(int code) {
     for(;;);
     return 0;
 }
+
+static int64_t sys_stat_handler(const char *pathname, struct linux_stat *statbuf) {
+    if (!pathname || !statbuf) return -EINVAL;
+
+    char resolved[256];
+    resolve_user_path(pathname, resolved, sizeof(resolved));
+
+    vfs_node_t *node = vfs_open(resolved, 0);
+    if (!node) {
+        return -ENOENT; // ВАЖНО: возвращаем -2 (Файл не найден), а не -ENOSYS!
+    }
+
+    memset(statbuf, 0, sizeof(struct linux_stat));
+    statbuf->st_ino = node->inode ? node->inode : 1;
+    statbuf->st_nlink = 1;
+    statbuf->st_uid = 0; // root
+    statbuf->st_gid = 0; // root
+    statbuf->st_size = node->length;
+    statbuf->st_blksize = 4096;
+    statbuf->st_blocks = (node->length + 511) / 512;
+
+    if (node->flags & FS_DIRECTORY) {
+        statbuf->st_mode = S_IFDIR | 0755;
+    } else {
+        statbuf->st_mode = S_IFREG | 0777; // Исполняемый файл
+    }
+
+    return 0;
+}
+
+static int64_t sys_fstat_handler(int fd, struct linux_stat *statbuf) {
+    if (!statbuf) return -EINVAL;
+
+    // Для STDIN (0), STDOUT (1), STDERR (2) сообщаем, что это TTY (терминал)
+    if (fd >= 0 && fd <= 2) {
+        memset(statbuf, 0, sizeof(struct linux_stat));
+        statbuf->st_mode = S_IFCHR | 0666; // Символьное устройство
+        statbuf->st_rdev = 0x0501;         // /dev/tty
+        return 0;
+    }
+
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    memset(statbuf, 0, sizeof(struct linux_stat));
+    statbuf->st_ino = node->inode ? node->inode : 1;
+    statbuf->st_nlink = 1;
+    statbuf->st_size = node->length;
+    statbuf->st_blksize = 4096;
+    statbuf->st_blocks = (node->length + 511) / 512;
+    statbuf->st_mode = (node->flags & FS_DIRECTORY) ? (S_IFDIR | 0755) : (S_IFREG | 0777);
+
+    return 0;
+}
+
 static int64_t sys_arch_prctl_handler(int code, uint64_t addr) {
     if (!current_task) return -EINVAL;
 
@@ -361,9 +417,7 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
             ws->ws_ypixel = 480;
             return 0;
         }
-        if (req == TCGETS || req == TCSETS) {
-            return 0;
-        }
+        // Заглушки для настроек терминала (TCGETS, TCSETS, FIONREAD)
         return 0;
     }
     return -EINVAL;
@@ -452,6 +506,68 @@ static int64_t sys_rt_sigaction_handler(int signum, const void *act, void *oldac
     return 0;
 }
 
+struct linux_pollfd {
+    int   fd;
+    short events;
+    short revents;
+};
+
+#define POLLIN  0x0001
+#define POLLOUT 0x0004
+
+static bool tty_has_input(void) {
+    return serial_received(COM1) || input_has_events();
+}
+
+static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int timeout) {
+    if (!fds && nfds > 0) return -EINVAL;
+
+    int ready = 0;
+    for (uint64_t i = 0; i < nfds; i++) {
+        fds[i].revents = 0;
+
+        if (fds[i].fd == 0) { // STDIN
+            if (tty_has_input()) {
+                fds[i].revents |= (fds[i].events & POLLIN);
+                if (fds[i].revents) ready++;
+            }
+        } else if (fds[i].fd == 1 || fds[i].fd == 2) { // STDOUT / STDERR
+            fds[i].revents |= (fds[i].events & POLLOUT);
+            if (fds[i].revents) ready++;
+        }
+    }
+
+    // Если данные есть ИЛИ это неблокирующий опрос (timeout == 0) — выходим сразу
+    if (ready > 0 || timeout == 0) {
+        return ready;
+    }
+
+    // Если timeout > 0 или -1 (бесконечно) — ждем появления символа
+    uint64_t start_tick = tick;
+    uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : (timeout / 10);
+
+    while (ready == 0) {
+        if (timeout >= 0 && (tick - start_tick) >= max_ticks) {
+            break; // Таймаут истек
+        }
+
+        if (tty_has_input()) {
+            for (uint64_t i = 0; i < nfds; i++) {
+                if (fds[i].fd == 0) {
+                    fds[i].revents |= (fds[i].events & POLLIN);
+                    if (fds[i].revents) ready++;
+                }
+            }
+            break;
+        }
+
+        __asm__ volatile("sti");
+        __asm__ volatile("pause");
+        sched_yield();
+    }
+
+    return ready;
+}
 extern uint64_t pmm_get_total_memory(void);
 extern uint64_t pmm_get_used_memory(void);
 extern uint64_t total_pages;
@@ -492,11 +608,20 @@ void syscall_handler(void *regs_ptr) {
         case SYS_CLOSE:
             ret = sys_close_handler((int)regs->rdi);
             break;
+        case SYS_STAT:
+            ret = sys_stat_handler((const char *)regs->rdi, (struct linux_stat *)regs->rsi);
+            break;
+        case SYS_FSTAT: // 5
+            ret = sys_fstat_handler((int)regs->rdi, (struct linux_stat *)regs->rsi);
+            break;
         case SYS_WRITEV:
             ret = sys_writev_handler((int)regs->rdi, (const struct iovec *)regs->rsi, (int)regs->rdx);
             break;
         case SYS_GETCWD:
             ret = sys_getcwd_handler((char *)regs->rdi, (size_t)regs->rsi);
+            break;
+        case SYS_POLL:
+            ret = sys_poll_handler((struct linux_pollfd *)regs->rdi, regs->rsi, (int)regs->rdx);
             break;
         case SYS_GETEUID:
         case SYS_GETEGID:
@@ -569,11 +694,8 @@ void syscall_handler(void *regs_ptr) {
         case SYS_OPENAT:
             ret = sys_openat_handler((int)regs->rdi, (const char *)regs->rsi, (int)regs->rdx, (int)regs->r10);
             break;
-        case SYS_FSTAT:
-            ret = 0;
-            break;
         case SYS_IOCTL:
-            ret = 0;
+            ret = sys_ioctl_handler((int)regs->rdi, regs->rsi, (void *)regs->rdx);
             break;
         case SYS_SYSINFO:
             ret = sys_sysinfo_handler((equant_sysinfo_t *)regs->rdi);

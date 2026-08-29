@@ -103,7 +103,7 @@ bool elf_load(void *elf_data, uint64_t size) {
     uint64_t user_rand_vaddr = user_stack_top - 16;
 
     // 2. Помещаем имя программы
-    const char *prog_name = "/hello.elf";
+    const char *prog_name = "sh";
     size_t prog_len = strlen(prog_name) + 1;
     uint8_t *k_str_ptr = k_rand_ptr - prog_len;
     memcpy(k_str_ptr, prog_name, prog_len);

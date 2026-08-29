@@ -21,7 +21,9 @@
 #define SYS_WRITE           1
 #define SYS_OPEN            2
 #define SYS_CLOSE           3
+#define SYS_STAT            4
 #define SYS_FSTAT           5
+#define SYS_POLL            7
 #define SYS_MMAP            9
 #define SYS_MPROTECT        10
 #define SYS_MUNMAP          11
@@ -61,6 +63,33 @@ typedef struct {
     uint64_t pmm_used_pages;
     uint64_t kernel_heap_used;
 } __attribute__((packed)) equant_sysinfo_t;
+
+struct linux_timespec {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+};
+
+struct linux_stat {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint64_t st_nlink;
+    uint32_t st_mode;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint32_t __pad0;
+    uint64_t st_rdev;
+    int64_t  st_size;
+    int64_t  st_blksize;
+    int64_t  st_blocks;
+    struct linux_timespec st_atim;
+    struct linux_timespec st_mtim;
+    struct linux_timespec st_ctim;
+    int64_t  __unused[3];
+};
+
+#define S_IFREG  0100000  // Обычный файл
+#define S_IFDIR  0040000  // Директория
+#define S_IFCHR  0020000
 
 void init_syscalls(void);
 void syscall_handler(void *regs);

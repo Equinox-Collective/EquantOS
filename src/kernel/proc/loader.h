@@ -7,12 +7,9 @@
 #include "task.h"
 
 /**
- * @brief Parse and load an ELF64 binary into a new process address space, 
- *        then spawn it as a runnable task.
- * @param elf_data Pointer to raw ELF file in memory (loaded via Limine module).
- * @param size Size of the ELF file in bytes.
- * @return true on success, false on failure.
+ * @brief Parse and load an ELF64 binary with dynamic CLI arguments (argc, argv, envp).
  */
+bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv);
 bool elf_load(void *elf_data, uint64_t size);
 
 extern task_t *last_spawned_task;

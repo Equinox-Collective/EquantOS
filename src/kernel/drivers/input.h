@@ -152,5 +152,6 @@ void input_init(void);
 void input_push_event(uint16_t type, uint16_t code, int32_t value);
 bool input_pop_event(input_event_t *out_event);
 void input_timer_tick(void);
+bool input_has_events(void);
 
 #endif // INPUT_H
