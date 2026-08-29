@@ -407,22 +407,6 @@ struct winsize {
     unsigned short ws_ypixel;
 };
 
-static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
-    if (fd >= 0 && fd <= 2) {
-        if (req == TIOCGWINSZ && arg) {
-            struct winsize *ws = (struct winsize *)arg;
-            ws->ws_row = 25;
-            ws->ws_col = 80;
-            ws->ws_xpixel = 640;
-            ws->ws_ypixel = 480;
-            return 0;
-        }
-        // Заглушки для настроек терминала (TCGETS, TCSETS, FIONREAD)
-        return 0;
-    }
-    return -EINVAL;
-}
-
 static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {
     (void)prot; (void)flags; (void)fd; (void)offset;
     if (length == 0) return -EINVAL;
@@ -652,6 +636,71 @@ struct linux_rlimit {
     uint64_t rlim_max;
 };
 
+static int64_t sys_dup_handler(int oldfd) {
+    if (!current_task || !current_task->process) return -EBADF;
+    if (oldfd < 0 || oldfd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[oldfd];
+    if (!node) return -EBADF;
+
+    for (int i = 3; i < MAX_OPEN_FILES; i++) {
+        if (current_task->process->files[i] == NULL) {
+            current_task->process->files[i] = node;
+            return i;
+        }
+    }
+    return -EMFILE;
+}
+
+// 2. Дополняем SYS_IOCTL (16) поддержкой tcgetpgrp / tcsetpgrp / FIONREAD
+#define TIOCGPGRP   0x540F
+#define TIOCSPGRP   0x5410
+#define FIONREAD    0x541B
+
+static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
+    if (fd >= 0 && fd <= 2) {
+        if (req == TIOCGWINSZ && arg) {
+            struct winsize *ws = (struct winsize *)arg;
+            ws->ws_row = 25;
+            ws->ws_col = 80;
+            ws->ws_xpixel = 640;
+            ws->ws_ypixel = 480;
+            return 0;
+        }
+        if (req == TIOCGPGRP && arg) {
+            *(int *)arg = current_task ? (int)current_task->id : 1;
+            return 0;
+        }
+        if (req == TIOCSPGRP) {
+            return 0;
+        }
+        if (req == FIONREAD && arg) {
+            *(int *)arg = tty_has_input() ? 1 : 0;
+            return 0;
+        }
+        return 0;
+    }
+    return -EINVAL;
+}
+
+// 3. SYS_PSELECT6 (270) — обёртка над готовностью ввода
+static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, void *exceptfds, const struct linux_timespec *timeout, const void *sigmask) {
+    (void)writefds; (void)exceptfds; (void)sigmask;
+    if (readfds && nfds > 0) {
+        // Если передан STDIN (дескриптор 0)
+        uint64_t *rfds = (uint64_t *)readfds;
+        if (*rfds & 1) {
+            if (!tty_has_input() && timeout && (timeout->tv_sec == 0 && timeout->tv_nsec == 0)) {
+                *rfds = 0;
+                return 0;
+            }
+            *rfds = 1; // Дескриптор 0 готов
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int64_t sys_prlimit64_handler(int pid, int resource, const struct linux_rlimit *new_limit, struct linux_rlimit *old_limit) {
     (void)pid; (void)new_limit;
     if (old_limit) {
@@ -766,6 +815,14 @@ void syscall_handler(void *regs_ptr) {
         case SYS_GETEGID:
             ret = 0;
             break;
+        case SYS_FORK:
+        case SYS_VFORK:
+            // Возвращаем -EAGAIN (11), чтобы Bash мягко сообщал "cannot fork: Resource temporarily unavailable"
+            ret = -11;
+            break;
+        case SYS_WAIT4:
+            ret = -10; // -ECHILD
+            break;
         case SYS_FCNTL:
             ret = sys_fcntl_handler((int)regs->rdi, (int)regs->rsi, regs->rdx);
             break;
@@ -774,6 +831,15 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_READLINK:
             ret = sys_readlink_handler((const char *)regs->rdi, (char *)regs->rsi, (size_t)regs->rdx);
+            break;
+        case SYS_DUP:
+            ret = sys_dup_handler((int)regs->rdi);
+            break;
+        case SYS_SETPGID:
+            ret = 0; // Успешно установили группу
+            break;
+        case SYS_PSELECT6:
+            ret = sys_pselect6_handler((int)regs->rdi, (void *)regs->rsi, (void *)regs->rdx, (void *)regs->r10, (const struct linux_timespec *)regs->r8, (const void *)regs->r9);
             break;
         case SYS_GETPGID:
             ret = current_task ? current_task->id : 1;

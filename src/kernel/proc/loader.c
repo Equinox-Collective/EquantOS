@@ -78,34 +78,41 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     }
     printf("DEBUG [5/7]: All segments mapped and copied.\n");
 
-    // 3. Выделяем стек пользователя (16 КБ)
-    uint32_t stack_pages = 4;
-    void *stack_phys = pmm_alloc_continuous(stack_pages);
-    if (!stack_phys) {
-        printf("[FAIL 5] ELF Loader: Failed to allocate physical memory for task stack.\n");
-        return false;
-    }
-
+    // 3. Выделяем стек пользователя (8 МБ = 2048 страниц постранично)
+    uint32_t stack_pages = 2048;
     uint64_t user_stack_top = 0x7FFFFFFF0000ULL;
-    uint64_t user_stack_bottom = user_stack_top - (stack_pages * PAGE_SIZE);
+    uint64_t user_stack_bottom = user_stack_top - ((uint64_t)stack_pages * PAGE_SIZE);
+
+    void *top_stack_phys = NULL;
 
     for (uint32_t j = 0; j < stack_pages; j++) {
-        vmm_map(new_pml4, user_stack_bottom + (j * PAGE_SIZE), 
-                (uint64_t)stack_phys + (j * PAGE_SIZE), 
+        void *phys = pmm_alloc();
+        if (!phys) {
+            printf("[FAIL 5] ELF Loader: Out of physical memory for user stack.\n");
+            return false;
+        }
+        memset((void *)VIRT(phys), 0, PAGE_SIZE);
+        vmm_map(new_pml4, user_stack_bottom + ((uint64_t)j * PAGE_SIZE), 
+                (uint64_t)phys, 
                 PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+
+        // Запоминаем физический адрес самой верхней страницы стека (где лежат argv/envp)
+        if (j == stack_pages - 1) {
+            top_stack_phys = phys;
+        }
     }
 
     // =========================================================================
     //        ДИНАМИЧЕСКИЙ СТЕК SYSTEM V AMD64 ABI (ARGC, ARGV, ENVP, AUXV)
     // =========================================================================
     uint64_t stack_top = user_stack_top;
-    uint8_t *topk = (uint8_t *)VIRT((uint64_t)stack_phys + (stack_pages * PAGE_SIZE));
+    uint8_t *topk = (uint8_t *)VIRT(top_stack_phys);
     uint64_t sp = stack_top;
 
     // Защита аргументов
     if (argc <= 0 || !argv) {
         argc = 1;
-        argv = (char *[]){ "sh", NULL };
+        argv = (char *[]){ "bash", NULL };
     }
     if (argc > 16) argc = 16;
 
@@ -115,7 +122,7 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         const char *s = argv[i] ? argv[i] : "";
         size_t len = strlen(s) + 1;
         sp -= len;
-        memcpy(topk - (stack_top - sp), s, len);
+        memcpy(topk + (PAGE_SIZE - (stack_top - sp)), s, len);
         argv_u[i] = sp;
     }
 
@@ -125,7 +132,7 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         "USER=root",
         "HOME=/",
         "TERM=linux",
-        "SHELL=/bin/sh",
+        "SHELL=/bin/bash",
         NULL
     };
     int envc = 0;
@@ -135,13 +142,13 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     for (int i = 0; i < envc; i++) {
         size_t len = strlen(default_env[i]) + 1;
         sp -= len;
-        memcpy(topk - (stack_top - sp), default_env[i], len);
+        memcpy(topk + (PAGE_SIZE - (stack_top - sp)), default_env[i], len);
         envp_u[i] = sp;
     }
 
     // 3. 16 байт для AT_RANDOM
     sp -= 16;
-    memset(topk - (stack_top - sp), 0x42, 16);
+    memset(topk + (PAGE_SIZE - (stack_top - sp)), 0x42, 16);
     uint64_t at_random = sp;
 
     // 4. Выравнивание 16 байт
@@ -164,14 +171,14 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     aux[an++] = 25; aux[an++] = at_random;           // AT_RANDOM
     aux[an++] = 0;  aux[an++] = 0;                   // AT_NULL
 
-    // 6. Вычисляем количество слов и выравниваем глубину стека (System V ABI)
+    // 6. Вычисляем количество слов и выравниваем глубину стека
     int total_words = 1 + (argc + 1) + (envc + 1) + an;
     if (total_words & 1) sp -= 8;
 
     sp -= (uint64_t)total_words * 8;
 
-    // 7. Записываем указатели в стек
-    uint64_t *w = (uint64_t *)(topk - (stack_top - sp));
+    // 7. Записываем массив указателей в стек
+    uint64_t *w = (uint64_t *)(topk + (PAGE_SIZE - (stack_top - sp)));
     int idx = 0;
     w[idx++] = (uint64_t)argc;
     for (int i = 0; i < argc; i++) w[idx++] = argv_u[i];

@@ -38,7 +38,10 @@
 #define SYS_DUP2            33
 #define SYS_NANOSLEEP       35
 #define SYS_GETPID          39
+#define SYS_FORK            57
+#define SYS_VFORK           58
 #define SYS_EXIT            60
+#define SYS_WAIT4           61
 #define SYS_UNAME           63
 #define SYS_FCNTL           72
 #define SYS_GETCWD          79
@@ -50,6 +53,7 @@
 #define SYS_GETGID          104
 #define SYS_GETEUID         107
 #define SYS_GETEGID         108
+#define SYS_SETPGID         109
 #define SYS_GETPPID         110
 #define SYS_GETPGID         121
 #define SYS_ARCH_PRCTL      158
@@ -61,6 +65,7 @@
 #define SYS_EXIT_GROUP      231
 #define SYS_TGKILL          234
 #define SYS_OPENAT          257
+#define SYS_PSELECT6        270
 #define SYS_DUP3            292
 #define SYS_PRLIMIT64       302
 
