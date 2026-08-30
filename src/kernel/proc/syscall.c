@@ -823,7 +823,7 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
     char resolved[256];
     resolve_user_path(filename, resolved, sizeof(resolved));
 
-    // 1. Пытаемся открыть файл напрямую или в /sys/bin/ /bin/
+    // 1. Поиск файла
     vfs_node_t *file = vfs_open(resolved, 0);
     if (!file) {
         char alt[256];
@@ -838,10 +838,10 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
     }
 
     if (!file || (file->flags & FS_DIRECTORY)) {
-        return -ENOENT; // Файл не найден
+        return -ENOENT;
     }
 
-    // 2. Читаем ELF в память ядра
+    // 2. Читаем ELF
     uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
     if (!elf_buf) return -ENOMEM;
 
@@ -850,21 +850,28 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         return -EIO;
     }
 
-    // 3. Считаем argc
+    // 3. Считаем argc и нормализуем argv[0] для BusyBox
     int argc = 0;
+    char *exec_argv[16];
     if (argv) {
-        while (argv[argc]) argc++;
+        while (argv[argc] && argc < 15) {
+            exec_argv[argc] = argv[argc];
+            argc++;
+        }
+    }
+    exec_argv[argc] = NULL;
+
+    // ЕСЛИ ЗАПУСКАЕТСЯ BUSYBOX — делаем argv[0] = "busybox"
+    if (strstr(resolved, "busybox") && argc > 0) {
+        exec_argv[0] = "busybox";
     }
 
-    // 4. Загружаем новый ELF в текущий процесс (вызывает elf_load_args)
-    // Перед этим освобождаем старое адресное пространство и загружаем новый образ
-    bool ok = elf_load_args(elf_buf, file->length, argc, (char **)argv);
+    // 4. Загружаем и запускаем новый процесс
+    bool ok = elf_load_args(elf_buf, file->length, argc, exec_argv);
     kfree(elf_buf);
 
     if (!ok) return -ENOEXEC;
 
-    // elf_load_args создал новый task и поставил его в очередь. 
-    // Текущий поток старого образа просто завершаем:
     sys_exit_handler(0);
     return 0;
 }
