@@ -61,7 +61,7 @@ char input_event_to_ascii(input_event_t ev) {
     return 0;
 }
 
-// Блокирующее чтение символа (Keyboard + Serial)
+/// Blocking character read (Keyboard + Serial) without forced kernel echo
 char tty_getchar(void) {
     input_event_t ev;
 
@@ -72,16 +72,14 @@ char tty_getchar(void) {
         if (serial_received(COM1)) {
             char c = serial_getchar(COM1);
             if (c == '\r') c = '\n';
-            tty_putchar(c); // ЭХО НА ЭКРАН
             return c;
         }
 
-        // 2. Клавиатура
+        // 2. PS/2 or USB Keyboard
         if (input_pop_event(&ev)) {
             char c = input_event_to_ascii(ev);
             if (c != 0) {
                 if (c == '\r') c = '\n';
-                tty_putchar(c); // ВОЗВРАЩАЕМ ВИДИМЫЙ ВВОД!
                 return c;
             }
         }

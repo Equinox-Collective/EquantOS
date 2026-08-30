@@ -1,4 +1,4 @@
-// src/kernel/proc/loader.c
+// src/kernel/proc/loader.c - ELF Loader with Stdio Initialization
 #include "loader.h"
 #include "task.h"
 #include "../core/mem/vmm.h"
@@ -7,6 +7,7 @@
 #include "sched.h"
 #include "string.h"
 #include "stdio.h"
+#include "../fs/vfs.h"
 
 task_t *last_spawned_task = NULL;
 
@@ -14,35 +15,23 @@ extern uint64_t hhdm_offset;
 #define VIRT(addr) ((uint64_t)(addr) + hhdm_offset)
 #define PHYS(addr) ((uint64_t)(addr) - hhdm_offset)
 
-bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
-    printf("DEBUG [1/7]: elf_load entered. Data: %x, Size: %u bytes\n", (uint64_t)elf_data, (unsigned int)size);
+// Static dummy VFS nodes for stdin, stdout, stderr
+static vfs_node_t tty_stdin_node  = { .name = "stdin",  .flags = FS_FILE, .length = 0 };
+static vfs_node_t tty_stdout_node = { .name = "stdout", .flags = FS_FILE, .length = 0 };
+static vfs_node_t tty_stderr_node = { .name = "stderr", .flags = FS_FILE, .length = 0 };
 
-    if (!elf_data || size < sizeof(Elf64_Ehdr)) {
-        printf("[FAIL 1] ELF Loader: Invalid ELF data pointer or size.\n");
-        return false;
-    }
+bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
+    if (!elf_data || size < sizeof(Elf64_Ehdr)) return false;
 
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
-
-    // Проверка ELF Magic: 0x7F 'E' 'L' 'F'
     if (ehdr->e_ident[0] != 0x7F || ehdr->e_ident[1] != 'E' ||
         ehdr->e_ident[2] != 'L'  || ehdr->e_ident[3] != 'F') {
-        printf("[FAIL 2] ELF Loader: Invalid ELF magic signature.\n");
         return false;
     }
 
-    printf("DEBUG [2/7]: ELF Header verified. Entry point: %x, PH Off: %x, PH Num: %u\n", 
-           ehdr->e_entry, ehdr->e_phoff, ehdr->e_phnum);
-
-    // 1. Создаем новое виртуальное адресное пространство (PML4)
     page_table_t *new_pml4 = vmm_create_address_space();
-    if (!new_pml4) {
-        printf("[FAIL 3] ELF Loader: Failed to create address space.\n");
-        return false;
-    }
-    printf("DEBUG [3/7]: New PML4 created successfully at %x\n", (uint64_t)new_pml4);
+    if (!new_pml4) return false;
 
-    // 2. Загружаем сегменты PT_LOAD
     Elf64_Phdr *phdr = (Elf64_Phdr *)((uint8_t *)elf_data + ehdr->e_phoff);
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type == 1) { // PT_LOAD
@@ -51,19 +40,13 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
             uint64_t p_memsz = phdr[i].p_memsz;
             uint64_t p_offset = phdr[i].p_offset;
 
-            printf("DEBUG [4/7]: Loading segment %u -> VMA: %x, FileSz: %u, MemSz: %u\n", 
-                   i, p_vaddr, (unsigned int)p_filesz, (unsigned int)p_memsz);
-
             uint64_t vaddr_aligned = p_vaddr & ~0xFFFULL;
             uint64_t vaddr_end = (p_vaddr + p_memsz + 0xFFF) & ~0xFFFULL;
             uint64_t total_size = vaddr_end - vaddr_aligned;
             uint32_t page_count = total_size / PAGE_SIZE;
 
             void *phys_pages = pmm_alloc_continuous(page_count);
-            if (!phys_pages) {
-                printf("[FAIL 4] ELF Loader: Out of physical memory for segment %u.\n", i);
-                return false;
-            }
+            if (!phys_pages) return false;
 
             for (uint32_t j = 0; j < page_count; j++) {
                 uint64_t virt_page = vaddr_aligned + (j * PAGE_SIZE);
@@ -76,47 +59,35 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
                    (uint8_t *)elf_data + p_offset, p_filesz);
         }
     }
-    printf("DEBUG [5/7]: All segments mapped and copied.\n");
 
-    // 3. Выделяем стек пользователя (8 МБ = 2048 страниц постранично)
+    // Allocate 8 MB stack
     uint32_t stack_pages = 2048;
     uint64_t user_stack_top = 0x7FFFFFFF0000ULL;
     uint64_t user_stack_bottom = user_stack_top - ((uint64_t)stack_pages * PAGE_SIZE);
-
     void *top_stack_phys = NULL;
 
     for (uint32_t j = 0; j < stack_pages; j++) {
         void *phys = pmm_alloc();
-        if (!phys) {
-            printf("[FAIL 5] ELF Loader: Out of physical memory for user stack.\n");
-            return false;
-        }
+        if (!phys) return false;
         memset((void *)VIRT(phys), 0, PAGE_SIZE);
         vmm_map(new_pml4, user_stack_bottom + ((uint64_t)j * PAGE_SIZE), 
                 (uint64_t)phys, 
                 PTE_PRESENT | PTE_WRITABLE | PTE_USER);
 
-        // Запоминаем физический адрес самой верхней страницы стека (где лежат argv/envp)
-        if (j == stack_pages - 1) {
-            top_stack_phys = phys;
-        }
+        if (j == stack_pages - 1) top_stack_phys = phys;
     }
 
-    // =========================================================================
-    //        ДИНАМИЧЕСКИЙ СТЕК SYSTEM V AMD64 ABI (ARGC, ARGV, ENVP, AUXV)
-    // =========================================================================
+    // System V AMD64 ABI Stack Setup
     uint64_t stack_top = user_stack_top;
     uint8_t *topk = (uint8_t *)VIRT(top_stack_phys);
     uint64_t sp = stack_top;
 
-    // Защита аргументов
     if (argc <= 0 || !argv) {
         argc = 1;
         argv = (char *[]){ "bash", NULL };
     }
     if (argc > 16) argc = 16;
 
-    // 1. Копируем строки ARGV на стек
     uint64_t argv_u[17];
     for (int i = 0; i < argc; i++) {
         const char *s = (argv && argv[i]) ? argv[i] : "";
@@ -126,7 +97,6 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         argv_u[i] = sp;
     }
 
-    // 2. Копируем строки ENVP на стек
     const char *default_env[] = {
         "PATH=/bin/:/usr/bin/:/sbin/:/usr/sbin/:/sys/bin/",
         "USER=root",
@@ -146,58 +116,58 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         envp_u[i] = sp;
     }
 
-    // 3. 16 байт для AT_RANDOM
     sp -= 16;
     memset(topk + (PAGE_SIZE - (stack_top - sp)), 0x42, 16);
     uint64_t at_random = sp;
 
-    // 4. Выравнивание 16 байт
     sp &= ~0xFULL;
 
-    // 5. Формируем Auxiliary Vector (AUXV)
     uint64_t aux[32]; 
     int an = 0;
     uint64_t phdr_vaddr = phdr[0].p_vaddr + ehdr->e_phoff;
-    aux[an++] = 3;  aux[an++] = phdr_vaddr;          // AT_PHDR
-    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;   // AT_PHENT
-    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;       // AT_PHNUM
-    aux[an++] = 6;  aux[an++] = PAGE_SIZE;           // AT_PAGESZ
-    aux[an++] = 9;  aux[an++] = ehdr->e_entry;       // AT_ENTRY
-    aux[an++] = 11; aux[an++] = 0;                   // AT_UID
-    aux[an++] = 12; aux[an++] = 0;                   // AT_EUID
-    aux[an++] = 13; aux[an++] = 0;                   // AT_GID
-    aux[an++] = 14; aux[an++] = 0;                   // AT_EGID
-    aux[an++] = 23; aux[an++] = 0;                   // AT_SECURE
-    aux[an++] = 25; aux[an++] = at_random;           // AT_RANDOM
-    aux[an++] = 0;  aux[an++] = 0;                   // AT_NULL
+    aux[an++] = 3;  aux[an++] = phdr_vaddr;
+    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;
+    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;
+    aux[an++] = 6;  aux[an++] = PAGE_SIZE;
+    aux[an++] = 9;  aux[an++] = ehdr->e_entry;
+    aux[an++] = 11; aux[an++] = 0;
+    aux[an++] = 12; aux[an++] = 0;
+    aux[an++] = 13; aux[an++] = 0;
+    aux[an++] = 14; aux[an++] = 0;
+    aux[an++] = 23; aux[an++] = 0;
+    aux[an++] = 25; aux[an++] = at_random;
+    aux[an++] = 0;  aux[an++] = 0;
 
-    // 6. Вычисляем количество слов и выравниваем глубину стека
     int total_words = 1 + (argc + 1) + (envc + 1) + an;
     if (total_words & 1) sp -= 8;
-
     sp -= (uint64_t)total_words * 8;
 
-    // 7. Записываем массив указателей в стек
     uint64_t *w = (uint64_t *)(topk + (PAGE_SIZE - (stack_top - sp)));
     int idx = 0;
     w[idx++] = (uint64_t)argc;
     for (int i = 0; i < argc; i++) w[idx++] = argv_u[i];
-    w[idx++] = 0; // NULL terminator для argv
+    w[idx++] = 0;
     for (int i = 0; i < envc; i++) w[idx++] = envp_u[i];
-    w[idx++] = 0; // NULL terminator для envp
+    w[idx++] = 0;
     for (int i = 0; i < an; i++)   w[idx++] = aux[i];
 
     uint64_t initial_user_rsp = sp;
 
-    printf("DEBUG [6/7]: System V Stack initialized with %d args. User RSP: %x\n", argc, initial_user_rsp);
-
-    // 4. Создаем структуры процесса и потока
+    // Process Structure Initialization with Standard File Descriptors
     process_t *proc = (process_t *)kmalloc(sizeof(process_t));
     if (!proc) return false;
     memset(proc, 0, sizeof(process_t));
-    proc->pid = 2;
+
+    proc->pid = next_pid++; // Auto-increment PID!
+    proc->pgid = proc->pid;
     proc->cr3 = PHYS(new_pml4);
     proc->brk = 0x600000;
+    strcpy(proc->cwd, "/");
+
+    // Initialize FDs 0, 1, 2
+    proc->files[0] = &tty_stdin_node;
+    proc->files[1] = &tty_stdout_node;
+    proc->files[2] = &tty_stderr_node;
 
     task_t *task = (task_t *)kmalloc(sizeof(task_t));
     if (!task) return false;
@@ -206,6 +176,8 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     task_init_fpu(task);
     
     task->id = proc->pid;
+    task->priority = PRIO_INTERACTIVE;
+    task->time_slice = 10;
     task->state = TASK_STATE_RUNNABLE;
     task->running = true;
     task->process = proc;
@@ -214,8 +186,8 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     uint64_t *stack = (uint64_t *)task->kstack_at_bottom;
 
     *--stack = 0x1B;                  // SS (User Data)
-    *--stack = initial_user_rsp;      // RSP с нашими аргументами!
-    *--stack = 0x202;                 // RFLAGS (IF включен)
+    *--stack = initial_user_rsp;      // User Stack Pointer
+    *--stack = 0x202;                 // RFLAGS (IF=1)
     *--stack = 0x23;                  // CS (User Code)
     *--stack = ehdr->e_entry;         // RIP
 
@@ -228,7 +200,18 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
 
     task->rsp = (uint64_t)stack;
 
-    printf("DEBUG [7/7]: Task structure fully ready. Enqueueing to scheduler...\n");
+    extern task_t *task_list;
+    if (task_list) {
+        task->next = task_list->next;
+        task->prev = task_list;
+        task_list->next->prev = task;
+        task_list->next = task;
+    } else {
+        task->next = task;
+        task->prev = task;
+        task_list = task;
+    }
+
     last_spawned_task = task;
     sched_enqueue(task);
     return true;

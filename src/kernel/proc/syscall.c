@@ -12,6 +12,7 @@
 #include "../../equterm/term.h"
 #include "../misc/timer.h"
 #include "string.h"
+#include "stdio.h"
 #include "../fs/vfs.h"
 #include "../fs/ramfs.h"
 #include "../core/initcall.h"
@@ -57,8 +58,10 @@ static void resolve_user_path(const char *input, char *output, size_t max_len) {
         size_t cur_len = strlen(output);
         if (cur_len > 0 && output[cur_len - 1] != '/' && cur_len + 1 < max_len) {
             strcat(output, "/");
+            cur_len++;
         }
-        strncat(output, input, max_len - strlen(output) - 1);
+        size_t remaining = (max_len > cur_len + 1) ? (max_len - cur_len - 1) : 0;
+        strncpy(output + cur_len, input, remaining);
     }
     output[max_len - 1] = '\0';
 }
@@ -151,23 +154,13 @@ static int64_t sys_lseek_handler(int fd, int64_t offset, int whence) {
 
     int64_t new_offset = 0;
     switch (whence) {
-        case SEEK_SET:
-            new_offset = offset;
-            break;
-        case SEEK_CUR:
-            new_offset = (int64_t)current_task->process->file_offsets[fd] + offset;
-            break;
-        case SEEK_END:
-            new_offset = (int64_t)node->length + offset;
-            break;
-        default:
-            return -EINVAL;
+        case SEEK_SET: new_offset = offset; break;
+        case SEEK_CUR: new_offset = (int64_t)current_task->process->file_offsets[fd] + offset; break;
+        case SEEK_END: new_offset = (int64_t)node->length + offset; break;
+        default: return -EINVAL;
     }
 
-    if (new_offset < 0) {
-        return -EINVAL;
-    }
-
+    if (new_offset < 0) return -EINVAL;
     current_task->process->file_offsets[fd] = (uint64_t)new_offset;
     return new_offset;
 }
@@ -374,10 +367,16 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
             return 0;
         }
         if (req == TIOCGPGRP && arg) {
-            *(int *)arg = current_task ? (int)current_task->process->pgid : 1;
+            uint64_t pgid = (current_task && current_task->process && current_task->process->pgid) 
+                            ? current_task->process->pgid 
+                            : (current_task ? current_task->process->pid : 1);
+            *(int *)arg = (int)pgid;
             return 0;
         }
         if (req == TIOCSPGRP) {
+            if (arg && current_task && current_task->process) {
+                current_task->process->pgid = (uint64_t)(*(int *)arg);
+            }
             return 0;
         }
         if (req == FIONREAD && arg) {
@@ -577,29 +576,27 @@ static int64_t sys_getdents64_handler(int fd, void *dirp, size_t count) {
 
     uint8_t *out_buf = (uint8_t *)dirp;
     size_t written = 0;
-    uint32_t idx = (uint32_t)(current_task->process->file_offsets[fd] / sizeof(struct linux_dirent64));
+    uint32_t idx = (uint32_t)current_task->process->file_offsets[fd];
 
     vfs_node_t *child = NULL;
     while ((child = vfs_readdir(dir, idx)) != NULL) {
         size_t name_len = strlen(child->name);
-        size_t rec_len = (sizeof(struct linux_dirent64) + name_len + 1 + 7) & ~7;
+        size_t rec_len = (19 + name_len + 1 + 7) & ~7;
 
-        if (written + rec_len > count) {
-            break;
-        }
+        if (written + rec_len > count) break;
 
         struct linux_dirent64 *d = (struct linux_dirent64 *)(out_buf + written);
         d->d_ino = child->inode ? child->inode : (idx + 1);
-        d->d_off = (idx + 1) * sizeof(struct linux_dirent64);
+        d->d_off = idx + 1;
         d->d_reclen = (unsigned short)rec_len;
         d->d_type = (child->flags & FS_DIRECTORY) ? 4 : 8;
-        strcpy(d->d_name, child->name);
+        memcpy(d->d_name, child->name, name_len + 1);
 
         written += rec_len;
         idx++;
-        current_task->process->file_offsets[fd] = idx * sizeof(struct linux_dirent64);
     }
 
+    current_task->process->file_offsets[fd] = idx;
     return (int64_t)written;
 }
 
@@ -765,7 +762,6 @@ static int64_t sys_exit_handler(int code) {
         if (current_task->process->clear_child_tid) {
             uint32_t *tid_ptr = (uint32_t *)current_task->process->clear_child_tid;
             *tid_ptr = 0;
-            // Futex wake on clear_child_tid
             extern task_t *task_list;
             if (task_list) {
                 task_t *curr = task_list;
@@ -779,10 +775,18 @@ static int64_t sys_exit_handler(int code) {
             }
         }
 
-        task_t *waiter = current_task->process->wait_parent;
-        if (waiter) {
-            current_task->process->wait_parent = NULL;
-            sched_unblock(waiter);
+        // Wake up any parent process blocked in wait4
+        extern task_t *task_list;
+        if (task_list) {
+            task_t *curr = task_list;
+            do {
+                if (curr->process && curr->process->pid == current_task->process->parent_pid) {
+                    if (curr->state == TASK_STATE_BLOCKED) {
+                        sched_unblock(curr);
+                    }
+                }
+                curr = curr->next;
+            } while (curr && curr != task_list);
         }
 
         current_task->state = TASK_STATE_ZOMBIE;
@@ -836,7 +840,7 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
     child_task->id = (flags & CLONE_THREAD) ? next_pid++ : child_proc->pid;
     child_task->state = TASK_STATE_RUNNABLE;
     child_task->running = true;
-    child_task->priority = current_task->priority;
+    child_task->priority = PRIO_NORMAL;
     child_task->time_slice = 10;
     child_task->fs_base = (flags & CLONE_SETTLS) ? tls : current_task->fs_base;
     child_task->process = child_proc;
@@ -844,11 +848,13 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
     child_task->kstack_at_bottom = (uint64_t)kmalloc(16384) + 16384;
     uint64_t *stack = (uint64_t *)child_task->kstack_at_bottom;
 
-    *--stack = regs->ss;
-    *--stack = stack_top ? stack_top : regs->rsp;
-    *--stack = regs->rflags;
-    *--stack = regs->cs;
-    *--stack = regs->rip;
+    // Build iretq stack frame:
+    *--stack = 0x1B;                                // SS
+    *--stack = stack_top ? stack_top : regs->rsp;   // RSP
+    *--stack = 0x202;                               // Clean User RFLAGS (IF=1)
+    *--stack = 0x23;                                // CS
+    *--stack = (regs->rcx != 0) ? regs->rcx : regs->rip; // Userland RIP from RCX
+
     *--stack = 0; // int_no
     *--stack = 0; // error_code
     *--stack = regs->r15;
@@ -865,7 +871,7 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
     *--stack = regs->rdx;
     *--stack = regs->rcx;
     *--stack = regs->rbx;
-    *--stack = 0; // RAX = 0 in child
+    *--stack = 0; // RAX = 0 in child (fork return value)
 
     child_task->rsp = (uint64_t)stack;
 
@@ -900,10 +906,11 @@ static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
     if (!current_task || !current_task->process) return -ECHILD;
 
     extern task_t *task_list;
-    task_t *child = NULL;
 
     for (;;) {
         bool have_child = false;
+        task_t *child = NULL;
+
         if (task_list) {
             task_t *curr = task_list;
             do {
@@ -920,20 +927,24 @@ static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
             } while (curr && curr != task_list);
         }
 
-        if (child) break;
-        if (!have_child) return -ECHILD;
+        if (child) {
+            int child_pid = (int)child->process->pid;
+            if (wstatus) {
+                *wstatus = (child->process->exit_code & 0xFF) << 8;
+            }
+            child->process->parent_pid = 0; // Detach reaped child
+            return child_pid;
+        }
+
+        if (!have_child) {
+            return -ECHILD;
+        }
 
         current_task->state = TASK_STATE_BLOCKED;
         current_task->running = false;
         sched_dequeue(current_task);
         sched_yield();
     }
-
-    int child_pid = (int)child->process->pid;
-    if (wstatus) {
-        *wstatus = (child->process->exit_code & 0xFF) << 8;
-    }
-    return child_pid;
 }
 
 static int64_t sys_arch_prctl_handler(int code, uint64_t addr) {
@@ -1117,7 +1128,7 @@ static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int tim
     if (ready > 0 || timeout == 0) return ready;
 
     uint64_t start_tick = tick;
-    uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : (timeout / 10);
+    uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : ((uint64_t)timeout / 10);
 
     while (ready == 0) {
         if (timeout >= 0 && (tick - start_tick) >= max_ticks) break;
@@ -1134,6 +1145,32 @@ static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int tim
         sched_yield();
     }
     return ready;
+}
+
+static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, void *exceptfds, 
+                                   const struct linux_timespec *timeout, const void *sigmask) {
+    (void)writefds; (void)exceptfds; (void)sigmask;
+    uint8_t *rfds = (uint8_t *)readfds;
+
+    if (rfds && (rfds[0] & 1) && tty_has_input()) {
+        return 1;
+    }
+
+    uint64_t start_tick = tick;
+    uint64_t max_ticks = (timeout == NULL) ? (uint64_t)-1 : (timeout->tv_sec * 100 + timeout->tv_nsec / 10000000ULL);
+
+    while (1) {
+        if (tty_has_input()) {
+            if (rfds) rfds[0] = 1;
+            return 1;
+        }
+        if (timeout != NULL && (tick - start_tick) >= max_ticks) {
+            if (rfds) rfds[0] = 0;
+            return 0;
+        }
+        __asm__ volatile("sti; pause");
+        sched_yield();
+    }
 }
 
 static int64_t sys_sysinfo_handler(equant_sysinfo_t *info) {
@@ -1204,9 +1241,23 @@ static int64_t sys_prlimit64_handler(int pid, int resource, const struct linux_r
     return 0;
 }
 
-// ============================================================================
-// 7. Socket Layer Dispatcher (Local AF_UNIX / Stubs for Network Stack)
-// ============================================================================
+static int64_t sys_getpgid_handler(int pid) {
+    if (!current_task || !current_task->process) return -ESRCH;
+    if (pid == 0 || pid == (int)current_task->process->pid) {
+        return current_task->process->pgid ? (int64_t)current_task->process->pgid : (int64_t)current_task->process->pid;
+    }
+    extern task_t *task_list;
+    if (task_list) {
+        task_t *curr = task_list;
+        do {
+            if (curr->process && (int)curr->process->pid == pid) {
+                return curr->process->pgid ? (int64_t)curr->process->pgid : (int64_t)curr->process->pid;
+            }
+            curr = curr->next;
+        } while (curr && curr != task_list);
+    }
+    return -ESRCH;
+}
 
 static int64_t sys_socket_handler(int domain, int type, int protocol) {
     (void)domain; (void)type; (void)protocol;
@@ -1220,6 +1271,96 @@ static int64_t sys_socket_handler(int domain, int type, int protocol) {
 // ============================================================================
 // Master Syscall Dispatcher Table
 // ============================================================================
+
+static int64_t sys_execve_handler(const char *filename, char *const argv[], char *const envp[], syscall_regs_t *regs) {
+    (void)envp;
+    if (!filename || !current_task || !current_task->process) return -EINVAL;
+
+    char resolved[256];
+    resolve_user_path(filename, resolved, sizeof(resolved));
+
+    vfs_node_t *file = vfs_open(resolved, 0);
+    if (!file) {
+        char alt[256];
+        snprintf(alt, sizeof(alt), "/bin/%s", filename);
+        file = vfs_open(alt, 0);
+        if (!file) {
+            snprintf(alt, sizeof(alt), "/bin/%s.elf", filename);
+            file = vfs_open(alt, 0);
+        }
+        if (!file) {
+            snprintf(alt, sizeof(alt), "%s.elf", filename);
+            file = vfs_open(alt, 0);
+        }
+    }
+
+    if (!file || (file->flags & FS_DIRECTORY)) {
+        return -ENOENT;
+    }
+
+    uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
+    if (!elf_buf) return -ENOMEM;
+
+    if (vfs_read(file, 0, file->length, elf_buf) <= 0) {
+        kfree(elf_buf);
+        return -EIO;
+    }
+
+    int argc = 0;
+    char k_argv_storage[16][128];
+    char *exec_argv[17];
+
+    if (argv) {
+        while (argv[argc] && argc < 16) {
+            strncpy(k_argv_storage[argc], argv[argc], 127);
+            k_argv_storage[argc][127] = '\0';
+            exec_argv[argc] = k_argv_storage[argc];
+            argc++;
+        }
+    }
+    exec_argv[argc] = NULL;
+
+    uint64_t new_entry = 0;
+    uint64_t new_rsp = 0;
+    uint64_t new_cr3 = 0;
+
+    bool ok = elf_execve_replace(elf_buf, file->length, argc, exec_argv, &new_entry, &new_rsp, &new_cr3);
+    kfree(elf_buf);
+
+    if (!ok) {
+        return -ENOEXEC;
+    }
+
+    uint64_t old_cr3 = current_task->process->cr3;
+    current_task->process->cr3 = new_cr3;
+
+    __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
+    vmm_destroy_address_space(old_cr3);
+
+    regs->rip = new_entry;
+    regs->rcx = new_entry; // Required for SYSRETQ
+    regs->rsp = new_rsp;
+    regs->cs = 0x23;
+    regs->ss = 0x1B;
+    regs->rflags = 0x202;
+    regs->r11 = 0x202;    // Required for SYSRETQ
+
+    regs->rax = 0;
+    regs->rbx = 0;
+    regs->rdx = 0;
+    regs->rsi = 0;
+    regs->rdi = 0;
+    regs->rbp = 0;
+    regs->r8  = 0;
+    regs->r9  = 0;
+    regs->r10 = 0;
+    regs->r12 = 0;
+    regs->r13 = 0;
+    regs->r14 = 0;
+    regs->r15 = 0;
+
+    return 0;
+}
 
 void syscall_handler(void *regs_ptr) {
     syscall_regs_t *regs = (syscall_regs_t *)regs_ptr;
@@ -1240,13 +1381,11 @@ void syscall_handler(void *regs_ptr) {
             ret = sys_close_handler((int)regs->rdi);
             break;
         case SYS_STAT:
+        case SYS_LSTAT:
             ret = sys_stat_handler((const char *)regs->rdi, (struct linux_stat *)regs->rsi);
             break;
         case SYS_FSTAT:
             ret = sys_fstat_handler((int)regs->rdi, (struct linux_stat *)regs->rsi);
-            break;
-        case SYS_LSTAT:
-            ret = sys_stat_handler((const char *)regs->rdi, (struct linux_stat *)regs->rsi);
             break;
         case SYS_POLL:
             ret = sys_poll_handler((struct linux_pollfd *)regs->rdi, regs->rsi, (int)regs->rdx);
@@ -1298,7 +1437,8 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_SELECT:
         case SYS_PSELECT6:
-            ret = sys_poll_handler(NULL, 0, 0);
+            ret = sys_pselect6_handler((int)regs->rdi, (void *)regs->rsi, (void *)regs->rdx, 
+                                       (void *)regs->r10, (const struct linux_timespec *)regs->r8, (const void *)regs->r9);
             break;
         case SYS_SCHED_YIELD:
             sched_yield();
@@ -1334,7 +1474,6 @@ void syscall_handler(void *regs_ptr) {
             ret = -ECONNREFUSED;
             break;
         case SYS_SENDTO:
-        case SYS_WRITE:
             ret = sys_write_handler((int)regs->rdi, (const void *)regs->rsi, (size_t)regs->rdx);
             break;
         case SYS_RECVFROM:
@@ -1429,17 +1568,33 @@ void syscall_handler(void *regs_ptr) {
         case SYS_GETEGID:
             ret = 0;
             break;
-        case SYS_SETPGID:
+        case SYS_GETPPID:
+            ret = (current_task && current_task->process) ? (int64_t)current_task->process->parent_pid : 1;
+            break;
+        case SYS_GETPGID:
+            ret = sys_getpgid_handler((int)regs->rdi);
+            break;
+        case SYS_GETPGRP:
+            ret = sys_getpgid_handler(0);
+            break;
+        case SYS_SETPGID: {
+            int pid = (int)regs->rdi;
+            int pgid = (int)regs->rsi;
             if (current_task && current_task->process) {
-                current_task->process->pgid = regs->rsi ? regs->rsi : current_task->process->pid;
+                if (pid == 0) pid = (int)current_task->process->pid;
+                if (pgid == 0) pgid = pid;
+                current_task->process->pgid = (uint64_t)pgid;
             }
             ret = 0;
             break;
-        case SYS_GETPPID:
-            ret = current_task ? current_task->process->parent_pid : 1;
-            break;
-        case SYS_GETPGID:
-            ret = current_task ? current_task->process->pgid : 1;
+        }
+        case SYS_SETSID:
+            if (current_task && current_task->process) {
+                current_task->process->pgid = current_task->process->pid;
+                ret = (int64_t)current_task->process->pid;
+            } else {
+                ret = 1;
+            }
             break;
         case SYS_ARCH_PRCTL:
             ret = sys_arch_prctl_handler((int)regs->rdi, regs->rsi);
@@ -1499,15 +1654,16 @@ void syscall_handler(void *regs_ptr) {
 
 void init_syscalls(void) {
     uint64_t efer = read_msr(0xC0000080);
-    write_msr(0xC0000080, efer | 1);
+    write_msr(0xC0000080, efer | 1); // SCE (Syscall Enable)
 
     uint64_t star = ((uint64_t)0x10 << 48) | ((uint64_t)0x08 << 32);
     write_msr(0xC0000081, star);
 
     write_msr(0xC0000082, (uint64_t)syscall_entry_asm);
-    write_msr(0xC0000084, 0x200);
 
-    serial_puts(COM1, "[KERNEL] Native x86_64 Hardware 'syscall' MSRs Initialized.\n");
+    // Standard Linux x86_64 Syscall FMASK:
+    // Clears TF (0x100), IF (0x200), DF (0x400), IOPL (0x3000), NT (0x4000), AC (0x40000)
+    write_msr(0xC0000084, 0x257FD5);
 }
 
 static int __init init_syscalls_initcall(void) {

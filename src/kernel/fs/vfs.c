@@ -24,7 +24,7 @@ vfs_node_t *vfs_mount(const char *path, vfs_node_t *local_root) {
     return NULL;
 }
 
-// Helper to traverse path components
+// Helper to traverse path components with POSIX '.', '..', and mountpoint support
 static vfs_node_t *vfs_resolve_path(const char *path) {
     if (!path || path[0] != '/') return NULL;
     
@@ -53,6 +53,19 @@ static vfs_node_t *vfs_resolve_path(const char *path) {
         token = strsep(&rest, "/");
         if (!token || token[0] == '\0') continue;
 
+        // POSIX "." refers to the current directory
+        if (strcmp(token, ".") == 0) {
+            continue;
+        }
+
+        // POSIX ".." refers to parent directory
+        if (strcmp(token, "..") == 0) {
+            if (current->parent) {
+                current = current->parent;
+            }
+            continue;
+        }
+
         vfs_node_t *next = vfs_finddir(current, token);
         if (!next) {
             kfree(buffer);
@@ -60,7 +73,7 @@ static vfs_node_t *vfs_resolve_path(const char *path) {
         }
         current = next;
 
-        // CRITICAL: If reached node is a mount point, cross over to the mounted filesystem root!
+        // If reached node is a mount point, cross over to the mounted filesystem root
         if (current->flags & FS_MOUNTPOINT && current->ptr) {
             current = (vfs_node_t *)current->ptr;
         }

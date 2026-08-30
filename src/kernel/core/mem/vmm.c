@@ -103,7 +103,7 @@ page_table_t *vmm_create_address_space(void) {
     return new_pml4;
 }
 
-/* Mach/FreeBSD Copy-On-Write Process Cloning */
+/* Deep Process Memory Cloning (Ensures child & parent have independent physical pages) */
 page_table_t *vmm_clone_address_space(uint64_t parent_cr3_phys) {
     page_table_t *child = vmm_create_address_space();
     if (!child) return NULL;
@@ -129,27 +129,27 @@ page_table_t *vmm_clone_address_space(uint64_t parent_cr3_phys) {
                     uint64_t virt = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
                                     ((uint64_t)k << 21) | ((uint64_t)l << 12);
 
-                    uint64_t phys_addr = pt[l] & ~0xFFFULL;
-                    uint64_t flags     = pt[l] & 0xFFFULL;
+                    uint64_t parent_phys = pt[l] & ~0xFFFULL;
+                    uint64_t flags       = pt[l] & 0xFFFULL;
 
-                    // If page is writable, convert both Parent & Child to Copy-On-Write (COW)
-                    if (flags & PTE_WRITABLE) {
-                        flags &= ~PTE_WRITABLE; // Strip Write permission
-                        flags |= PTE_COW;       // Mark as Copy-On-Write
-
-                        pt[l] = phys_addr | flags; // Update Parent PTE
-                        invlpg(virt);
+                    // Allocate a separate, independent physical page for the child
+                    void *child_phys = pmm_alloc();
+                    if (!child_phys) {
+                        vmm_destroy_address_space(PHYS(child));
+                        return NULL;
                     }
 
-                    // Map Child to the EXACT SAME physical page (Zero-Copy!)
-                    vmm_map(child, virt, phys_addr, flags);
+                    // Copy exact 4KB memory contents from parent to child
+                    memcpy((void *)VIRT((uint64_t)child_phys), (void *)VIRT(parent_phys), PAGE_SIZE);
+
+                    // Map child to its own private physical page
+                    vmm_map(child, virt, (uint64_t)child_phys, flags);
                 }
             }
         }
     }
     return child;
 }
-
 /* Page Fault Handler (#PF Interrupt Vector 14) */
 void vmm_page_fault_handler(cpu_state_t *state) {
     uint64_t fault_addr;
