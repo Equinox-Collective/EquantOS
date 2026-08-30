@@ -117,6 +117,7 @@ ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/equantmemtest.elf \
                  build/iso/busybox.elf \
                  build/iso/font.psf \
+				 build/iso/.bashrc \
 				 build/iso/bash.elf
 
 # ==============================================================================
@@ -191,6 +192,11 @@ build/iso/bash.elf: res/bash.elf
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/bash.elf,$@)
+	
+build/iso/.bashrc: res/.bashrc
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/.bashrc,$@)
 
 # ==============================================================================
 # Disk & Bootloader Assets
