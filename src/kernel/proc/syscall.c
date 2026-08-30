@@ -14,6 +14,7 @@
 #include "../fs/vfs.h"
 #include "../core/initcall.h"
 #include "../drivers/tty/tty.h"
+#include "loader.h"
 
 __attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
 
@@ -62,6 +63,12 @@ extern void syscall_entry_asm(void);
 typedef struct {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
     uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
+    // После GPR-блока идёт iret-фрейм (syscall_entry_asm):
+    uint64_t rip;     // User RIP (rcx при входе в syscall)
+    uint64_t cs;      // User CS
+    uint64_t rflags;  // User RFLAGS (r11 при входе)
+    uint64_t rsp;     // User RSP
+    uint64_t ss;      // User SS
 } __attribute__((packed)) syscall_regs_t;
 
 static uint64_t mmap_virtual_base = 0x700000000000ULL;
@@ -676,8 +683,25 @@ static int64_t sys_fork_handler(syscall_regs_t *regs) {
     if (!current_task || !current_task->process) return -EAGAIN;
 
     // 1. Клонируем адресное пространство (COW — физические страницы не копируются)
+    serial_puts(COM1, "[FORK] Parent CR3: 0x");
+    char dbg[32];
+    itoa_hex(current_task->process->cr3, dbg);
+    serial_puts(COM1, dbg);
+    serial_puts(COM1, "\n");
+
     page_table_t *child_pml4 = vmm_clone_address_space(current_task->process->cr3);
-    if (!child_pml4) return -ENOMEM;
+    if (!child_pml4) {
+        serial_puts(COM1, "[FORK] ERROR: vmm_clone_address_space failed!\n");
+        return -ENOMEM;
+    }
+
+    serial_puts(COM1, "[FORK] Child PML4 (virt): 0x");
+    itoa_hex((uint64_t)child_pml4, dbg);
+    serial_puts(COM1, dbg);
+    serial_puts(COM1, " -> CR3 (phys): 0x");
+    itoa_hex(PHYS(child_pml4), dbg);
+    serial_puts(COM1, dbg);
+    serial_puts(COM1, "\n");
 
     // 2. Создаём структуру process для дочернего процесса
     process_t *child_proc = (process_t *)kmalloc(sizeof(process_t));
@@ -730,15 +754,15 @@ static int64_t sys_fork_handler(syscall_regs_t *regs) {
     // На стеке stack (растёт вниз):
     uint64_t *stack = (uint64_t *)child_task->kstack_at_bottom;
 
-    // iret frame
-    *--stack = 0x1B;             // SS
-    *--stack = syscall_user_rsp; // RSP (user stack)
-    *--stack = 0x202;            // RFLAGS (IF=1)
-    *--stack = 0x23;             // CS
-    *--stack = regs->rcx;        // RIP (rcx = rip после syscall по CPU ABI)
+    // iret frame (используем значения из syscall iret-фрейма родителя)
+    *--stack = regs->ss;             // SS
+    *--stack = regs->rsp;            // RSP (user stack)
+    *--stack = regs->rflags;         // RFLAGS
+    *--stack = regs->cs;             // CS
+    *--stack = regs->rip;            // RIP (адрес возврата после syscall)
     // int frame (будет пропущено add rsp, 16)
-    *--stack = 0;                // int_no
-    *--stack = 0;                // error_code
+    *--stack = 0;                    // int_no
+    *--stack = 0;                    // error_code
     // SAVE_REGS в обратном порядке (top → bottom = r15 → rax)
     *--stack = regs->r15;
     *--stack = regs->r14;
@@ -754,11 +778,32 @@ static int64_t sys_fork_handler(syscall_regs_t *regs) {
     *--stack = regs->rdx;
     *--stack = regs->rcx;
     *--stack = regs->rbx;
-    *--stack = 0;                // rax = 0 (fork возвращает 0 в дочернем процессе!)
+    *--stack = 0;                    // rax = 0 (fork возвращает 0 в дочернем процессе!)
 
     child_task->rsp = (uint64_t)stack;
 
-    // 5. Запускаем child
+    serial_puts(COM1, "[FORK] Child RSP: 0x");
+    itoa_hex(child_task->rsp, dbg);
+    serial_puts(COM1, dbg);
+    serial_puts(COM1, ", RIP will be: 0x");
+    itoa_hex(regs->rip, dbg);
+    serial_puts(COM1, dbg);
+    serial_puts(COM1, "\n");
+
+    // 5. Добавляем child в глобальный список задач (task_list)
+    extern task_t *task_list;
+    if (task_list) {
+        child_task->next = task_list->next;
+        child_task->prev = task_list;
+        task_list->next->prev = child_task;
+        task_list->next = child_task;
+    } else {
+        child_task->next = child_task;
+        child_task->prev = child_task;
+        task_list = child_task;
+    }
+
+    // 6. Запускаем child
     sched_enqueue(child_task);
 
     serial_puts(COM1, "[KERNEL] fork(): child PID=");
@@ -767,8 +812,61 @@ static int64_t sys_fork_handler(syscall_regs_t *regs) {
     serial_puts(COM1, pidstr);
     serial_puts(COM1, "\n");
 
-    // 6. Родитель возвращает PID дочернего процесса
+    // 7. Родитель возвращает PID дочернего процесса
     return (int64_t)child_proc->pid;
+}
+
+// === SYS_EXECVE (59) ===
+static int64_t sys_execve_handler(const char *filename, char *const argv[], char *const envp[], syscall_regs_t *regs) {
+    if (!filename) return -EINVAL;
+
+    char resolved[256];
+    resolve_user_path(filename, resolved, sizeof(resolved));
+
+    // 1. Пытаемся открыть файл напрямую или в /sys/bin/ /bin/
+    vfs_node_t *file = vfs_open(resolved, 0);
+    if (!file) {
+        char alt[256];
+        strcpy(alt, "/bin/");
+        strcat(alt, filename);
+        file = vfs_open(alt, 0);
+        if (!file) {
+            strcpy(alt, "/sys/bin/");
+            strcat(alt, filename);
+            file = vfs_open(alt, 0);
+        }
+    }
+
+    if (!file || (file->flags & FS_DIRECTORY)) {
+        return -ENOENT; // Файл не найден
+    }
+
+    // 2. Читаем ELF в память ядра
+    uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
+    if (!elf_buf) return -ENOMEM;
+
+    if (vfs_read(file, 0, file->length, elf_buf) <= 0) {
+        kfree(elf_buf);
+        return -EIO;
+    }
+
+    // 3. Считаем argc
+    int argc = 0;
+    if (argv) {
+        while (argv[argc]) argc++;
+    }
+
+    // 4. Загружаем новый ELF в текущий процесс (вызывает elf_load_args)
+    // Перед этим освобождаем старое адресное пространство и загружаем новый образ
+    bool ok = elf_load_args(elf_buf, file->length, argc, (char **)argv);
+    kfree(elf_buf);
+
+    if (!ok) return -ENOEXEC;
+
+    // elf_load_args создал новый task и поставил его в очередь. 
+    // Текущий поток старого образа просто завершаем:
+    sys_exit_handler(0);
+    return 0;
 }
 
 // === WAIT4 ===
@@ -776,27 +874,43 @@ static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
     (void)options;
     if (!current_task || !current_task->process) return -10; // -ECHILD
 
-    // Ищем дочерний процесс среди всех задач (упрощённо: ждём любого child)
-    // Для простоты: блокируемся и ждём пока кто-то нас разбудит через exit
-    // Полная реализация потребует списка всех процессов — здесь упрощённый вариант:
-    // Если pid > 0 — ищем конкретный; если -1 — любой child
-    (void)pid;
+    // Ищем дочерний процесс
+    extern task_t *task_list;
+    task_t *child = NULL;
 
-    // Проверяем: есть ли уже завершившийся child (без блокировки)
-    // В упрощённой реализации — просто блокируемся и ждём пробуждения от exit
-    // exit() сделает sched_unblock(wait_parent) если wait_parent != NULL
+    // Ждём, пока дочерний процесс не завершится (станет ZOMBIE)
+    for (;;) {
+        bool have_child = false;
+        if (task_list) {
+            task_t *curr = task_list;
+            do {
+                if (curr->process && curr->process->parent_pid == current_task->process->pid) {
+                    if (pid <= 0 || (int)curr->process->pid == pid) {
+                        have_child = true;
+                        if (curr->state == TASK_STATE_ZOMBIE || curr->process->exited) {
+                            child = curr;
+                            break;
+                        }
+                    }
+                }
+                curr = curr->next;
+            } while (curr && curr != task_list);
+        }
 
-    // Сохраняем себя как wait_parent в своём процессе для поиска из child
-    // (В полной реализации нужен глобальный список процессов)
-    // Пока просто блокируемся с таймаутом
-    sched_block(current_task);
-    sched_yield();
+        if (child) break;
+        if (!have_child) return -10; // -ECHILD (нет детей)
 
-    if (wstatus) {
-        // WIFEXITED: статус = (exit_code << 8)
-        *wstatus = (current_task->process->exit_code & 0xFF) << 8;
+        // Уступаем CPU и ждём выполнения дочернего процесса
+        __asm__ volatile("sti");
+        sched_yield();
     }
-    return pid > 0 ? pid : 1;
+
+    int child_pid = (int)child->process->pid;
+    if (wstatus) {
+        *wstatus = (child->process->exit_code & 0xFF) << 8;
+    }
+
+    return child_pid;
 }
 
 // 2. Дополняем SYS_IOCTL (16) поддержкой tcgetpgrp / tcsetpgrp / FIONREAD
@@ -977,6 +1091,9 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_READLINK:
             ret = sys_readlink_handler((const char *)regs->rdi, (char *)regs->rsi, (size_t)regs->rdx);
+            break;
+        case SYS_EXECVE:
+            ret = sys_execve_handler((const char *)regs->rdi, (char *const *)regs->rsi, (char *const *)regs->rdx, regs);
             break;
         case SYS_DUP:
             ret = sys_dup_handler((int)regs->rdi);

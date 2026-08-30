@@ -8,7 +8,7 @@
 #include "../drivers/serial/serial.h"
 
 task_t *current_task = NULL;
-static task_t *task_list = NULL;
+task_t *task_list = NULL;  // Убрали static для использования в syscall.c (fork)
 uint64_t next_pid = 1;
 
 void task_init_fpu(task_t *task) {

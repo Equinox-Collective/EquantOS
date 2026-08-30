@@ -66,6 +66,7 @@ typedef struct task {
 #define task_fpu_area(t) ((void*)(((uintptr_t)((t)->fpu_state) + 15) & ~15ULL))
 
 extern task_t *current_task;
+extern task_t *task_list; // Глобальный список всех задач (для fork)
 extern uint64_t next_pid; // Глобальный счётчик PID (используется fork)
 
 void task_init(void);
