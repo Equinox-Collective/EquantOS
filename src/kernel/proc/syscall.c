@@ -1,8 +1,9 @@
-// syscall.c - System Call Dispatcher & Native x86_64 Syscall Setup
+// src/kernel/proc/syscall.c - Native x86_64 Linux System Call Dispatcher
 #include "syscall.h"
 #include "task.h"
 #include "sched.h"
 #include "pipe.h"
+#include "loader.h"
 #include "../core/mem/vmm.h"
 #include "../core/mem/pmm.h"
 #include "../core/mem/memory.h"
@@ -12,101 +13,213 @@
 #include "../misc/timer.h"
 #include "string.h"
 #include "../fs/vfs.h"
+#include "../fs/ramfs.h"
 #include "../core/initcall.h"
 #include "../drivers/tty/tty.h"
-#include "loader.h"
 
 __attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
 
-#define IA32_EFER        0xC0000080
-#define IA32_STAR        0xC0000081
-#define IA32_LSTAR       0xC0000082
-#define IA32_FMASK       0xC0000084
-#define IA32_FS_BASE_MSR 0xC0000100
+extern void syscall_entry_asm(void);
+extern uint64_t pmm_get_total_memory(void);
+extern uint64_t pmm_get_used_memory(void);
+extern uint64_t total_pages;
+extern size_t used_memory;
 
-#define AT_FDCWD         -100
-#define O_CREAT          0100
-
-#define ARCH_SET_FS      0x1002
-#define ARCH_GET_FS      0x1003
-
-struct iovec {
-    void *iov_base;
-    size_t iov_len;
-};
-
-struct linux_dirent64 {
-    uint64_t d_ino;
-    int64_t  d_off;
-    unsigned short d_reclen;
-    unsigned char  d_type;
-    char           d_name[];
-};
-
-struct linux_utsname {
-    char sysname[65];
-    char nodename[65];
-    char release[65];
-    char version[65];
-    char machine[65];
-    char domainname[65];
-};
+static uint64_t mmap_virtual_base = 0x700000000000ULL;
 
 void linux_syscall_handler(void *regs_ptr) {
     syscall_handler(regs_ptr);
 }
 
-
-
-extern void syscall_entry_asm(void);
-
-typedef struct {
-    uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
-    uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
-    // После GPR-блока идёт iret-фрейм (syscall_entry_asm):
-    uint64_t rip;     // User RIP (rcx при входе в syscall)
-    uint64_t cs;      // User CS
-    uint64_t rflags;  // User RFLAGS (r11 при входе)
-    uint64_t rsp;     // User RSP
-    uint64_t ss;      // User SS
-} __attribute__((packed)) syscall_regs_t;
-
-static uint64_t mmap_virtual_base = 0x700000000000ULL;
+// ============================================================================
+// Helper Functions: File Descriptors, Paths, and Buffers
+// ============================================================================
 
 static void resolve_user_path(const char *input, char *output, size_t max_len) {
     if (!input || input[0] == '\0') {
         if (current_task && current_task->process && current_task->process->cwd[0] != '\0') {
-            strncpy(output, current_task->process->cwd, max_len);
+            strncpy(output, current_task->process->cwd, max_len - 1);
         } else {
             strcpy(output, "/");
         }
+        output[max_len - 1] = '\0';
         return;
     }
 
     if (input[0] == '/') {
-        strncpy(output, input, max_len);
+        strncpy(output, input, max_len - 1);
     } else {
         if (current_task && current_task->process && current_task->process->cwd[0] != '\0') {
-            strcpy(output, current_task->process->cwd);
+            strncpy(output, current_task->process->cwd, max_len - 1);
         } else {
             strcpy(output, "/");
         }
-        if (output[strlen(output) - 1] != '/') {
+        size_t cur_len = strlen(output);
+        if (cur_len > 0 && output[cur_len - 1] != '/' && cur_len + 1 < max_len) {
             strcat(output, "/");
         }
-        strcat(output, input);
+        strncat(output, input, max_len - strlen(output) - 1);
     }
+    output[max_len - 1] = '\0';
 }
 
-static int alloc_fd(vfs_node_t *node) {
+static int alloc_fd(vfs_node_t *node, uint32_t flags) {
     if (!current_task || !current_task->process) return -EMFILE;
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
         if (current_task->process->files[i] == NULL) {
             current_task->process->files[i] = node;
+            current_task->process->file_offsets[i] = 0;
+            current_task->process->file_flags[i] = flags;
             return i;
         }
     }
     return -EMFILE;
+}
+
+static bool tty_has_input(void) {
+    return serial_received(COM1) || input_has_events();
+}
+
+// ============================================================================
+// 1. File Descriptor & I/O Handlers
+// ============================================================================
+
+static int64_t sys_read_handler(int fd, void *buf, size_t count) {
+    if (count == 0) return 0;
+    if (!buf) return -EFAULT;
+
+    if (fd == 0) {
+        char *out = (char *)buf;
+        char c = tty_getchar();
+        if (c == '\r') c = '\n';
+        out[0] = c;
+        return 1;
+    }
+
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    uint64_t offset = current_task->process->file_offsets[fd];
+    int64_t bytes = vfs_read(node, offset, count, (uint8_t *)buf);
+    if (bytes > 0) {
+        current_task->process->file_offsets[fd] += bytes;
+    }
+    return bytes;
+}
+
+static int64_t sys_write_handler(int fd, const void *user_buf, size_t count) {
+    if (count == 0) return 0;
+    if (!user_buf) return -EFAULT;
+
+    if (fd == 1 || fd == 2) {
+        const char *buf = (const char *)user_buf;
+        for (size_t i = 0; i < count; i++) {
+            char c = buf[i];
+            serial_putchar(COM1, c);
+            term_putchar_raw(c);
+        }
+        return count;
+    }
+
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    uint64_t offset = current_task->process->file_offsets[fd];
+    if (current_task->process->file_flags[fd] & O_APPEND) {
+        offset = node->length;
+    }
+
+    int64_t bytes = vfs_write(node, offset, count, (uint8_t *)user_buf);
+    if (bytes > 0) {
+        current_task->process->file_offsets[fd] = offset + bytes;
+    }
+    return bytes;
+}
+
+static int64_t sys_lseek_handler(int fd, int64_t offset, int whence) {
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    int64_t new_offset = 0;
+    switch (whence) {
+        case SEEK_SET:
+            new_offset = offset;
+            break;
+        case SEEK_CUR:
+            new_offset = (int64_t)current_task->process->file_offsets[fd] + offset;
+            break;
+        case SEEK_END:
+            new_offset = (int64_t)node->length + offset;
+            break;
+        default:
+            return -EINVAL;
+    }
+
+    if (new_offset < 0) {
+        return -EINVAL;
+    }
+
+    current_task->process->file_offsets[fd] = (uint64_t)new_offset;
+    return new_offset;
+}
+
+static int64_t sys_pread64_handler(int fd, void *buf, size_t count, int64_t offset) {
+    if (count == 0) return 0;
+    if (!buf || offset < 0) return -EINVAL;
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    return vfs_read(node, (uint64_t)offset, count, (uint8_t *)buf);
+}
+
+static int64_t sys_pwrite64_handler(int fd, const void *buf, size_t count, int64_t offset) {
+    if (count == 0) return 0;
+    if (!buf || offset < 0) return -EINVAL;
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    return vfs_write(node, (uint64_t)offset, count, (uint8_t *)buf);
+}
+
+static int64_t sys_readv_handler(int fd, const struct iovec *iov, int iovcnt) {
+    if (!iov || iovcnt <= 0) return -EINVAL;
+    int64_t total = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].iov_base && iov[i].iov_len > 0) {
+            int64_t ret = sys_read_handler(fd, iov[i].iov_base, iov[i].iov_len);
+            if (ret < 0) return (total > 0) ? total : ret;
+            total += ret;
+        }
+    }
+    return total;
+}
+
+static int64_t sys_writev_handler(int fd, const struct iovec *iov, int iovcnt) {
+    if (!iov || iovcnt <= 0) return -EINVAL;
+    int64_t total = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].iov_base && iov[i].iov_len > 0) {
+            int64_t ret = sys_write_handler(fd, iov[i].iov_base, iov[i].iov_len);
+            if (ret < 0) return (total > 0) ? total : ret;
+            total += ret;
+        }
+    }
+    return total;
 }
 
 static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, int mode) {
@@ -118,10 +231,10 @@ static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, in
 
     vfs_node_t *node = vfs_open(resolved, 0);
 
-    // Поддержка создания файла при O_CREAT
     if (!node && (flags & O_CREAT)) {
         char parent_path[256];
-        strcpy(parent_path, resolved);
+        strncpy(parent_path, resolved, sizeof(parent_path) - 1);
+        parent_path[sizeof(parent_path) - 1] = '\0';
         char *filename = parent_path;
 
         char *last_slash = strrchr(parent_path, '/');
@@ -137,56 +250,224 @@ static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, in
 
         vfs_node_t *parent_dir = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
         if (parent_dir) {
-            node = vfs_create(parent_dir, filename, mode);
+            node = vfs_create(parent_dir, filename, mode ? mode : 0644);
         }
     }
 
     if (!node) return -ENOENT;
-
-    return alloc_fd(node);
-}
-
-#include "../drivers/tty/tty.h"
-
-// Обработчик сисколла read (sys_read)
-static int64_t sys_read_handler(int fd, void *buf, size_t count) {
-    if (count == 0) return 0;
-    if (!buf) return -EINVAL;
-
-    // === STDIN (Клавиатура / Serial) ===
-    if (fd == 0) {
-        char *out = (char *)buf;
-        char c = tty_getchar();
-
-        // Превращаем возврат каретки \r в каноничный Unix \n
-        if (c == '\r') {
-            c = '\n';
-        }
-
-        out[0] = c;
-        return 1;
+    if ((flags & O_DIRECTORY) && !(node->flags & FS_DIRECTORY)) {
+        return -ENOTDIR;
     }
 
-    // === Обычные файлы VFS ===
+    if ((flags & O_TRUNC) && (flags & (O_WRONLY | O_RDWR))) {
+        node->length = 0;
+    }
+
+    return alloc_fd(node, (uint32_t)flags);
+}
+
+static int64_t sys_close_handler(int fd) {
     if (!current_task || !current_task->process) return -EBADF;
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
     if (!node) return -EBADF;
 
-    return vfs_read(node, 0, count, (uint8_t *)buf);
+    vfs_close(node);
+    current_task->process->files[fd] = NULL;
+    current_task->process->file_offsets[fd] = 0;
+    current_task->process->file_flags[fd] = 0;
+    return 0;
 }
 
-static int64_t sys_close_handler(int fd) {
+static int64_t sys_dup_handler(int oldfd) {
     if (!current_task || !current_task->process) return -EBADF;
-    if (fd < 3 || fd >= MAX_OPEN_FILES) return -EBADF;
+    if (oldfd < 0 || oldfd >= MAX_OPEN_FILES || !current_task->process->files[oldfd]) return -EBADF;
+
+    for (int i = 3; i < MAX_OPEN_FILES; i++) {
+        if (current_task->process->files[i] == NULL) {
+            current_task->process->files[i] = current_task->process->files[oldfd];
+            current_task->process->file_offsets[i] = current_task->process->file_offsets[oldfd];
+            current_task->process->file_flags[i] = current_task->process->file_flags[oldfd];
+            return i;
+        }
+    }
+    return -EMFILE;
+}
+
+static int64_t sys_dup2_handler(int oldfd, int newfd) {
+    if (!current_task || !current_task->process) return -EBADF;
+    if (oldfd < 0 || oldfd >= MAX_OPEN_FILES || !current_task->process->files[oldfd]) return -EBADF;
+    if (newfd < 0 || newfd >= MAX_OPEN_FILES) return -EBADF;
+    if (oldfd == newfd) return newfd;
+
+    if (current_task->process->files[newfd]) {
+        vfs_close(current_task->process->files[newfd]);
+    }
+    current_task->process->files[newfd] = current_task->process->files[oldfd];
+    current_task->process->file_offsets[newfd] = current_task->process->file_offsets[oldfd];
+    current_task->process->file_flags[newfd] = current_task->process->file_flags[oldfd];
+    return newfd;
+}
+
+static int64_t sys_dup3_handler(int oldfd, int newfd, int flags) {
+    if (oldfd == newfd) return -EINVAL;
+    int64_t ret = sys_dup2_handler(oldfd, newfd);
+    if (ret >= 0 && (flags & O_CLOEXEC)) {
+        current_task->process->file_flags[newfd] |= O_CLOEXEC;
+    }
+    return ret;
+}
+
+static int64_t sys_pipe2_handler(int *pipefd, int flags) {
+    if (!pipefd) return -EFAULT;
+    int res = pipe_create(pipefd);
+    if (res == 0 && (flags & O_CLOEXEC)) {
+        current_task->process->file_flags[pipefd[0]] |= O_CLOEXEC;
+        current_task->process->file_flags[pipefd[1]] |= O_CLOEXEC;
+    }
+    return res;
+}
+
+static int64_t sys_fcntl_handler(int fd, int cmd, uint64_t arg) {
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES || !current_task->process->files[fd]) return -EBADF;
+
+    switch (cmd) {
+        case F_DUPFD:
+        case F_DUPFD_CLOEXEC: {
+            for (int i = (int)arg; i < MAX_OPEN_FILES; i++) {
+                if (current_task->process->files[i] == NULL) {
+                    current_task->process->files[i] = current_task->process->files[fd];
+                    current_task->process->file_offsets[i] = current_task->process->file_offsets[fd];
+                    current_task->process->file_flags[i] = (cmd == F_DUPFD_CLOEXEC) ? 
+                        (current_task->process->file_flags[fd] | O_CLOEXEC) : current_task->process->file_flags[fd];
+                    return i;
+                }
+            }
+            return -EMFILE;
+        }
+        case F_GETFD:
+            return (current_task->process->file_flags[fd] & O_CLOEXEC) ? 1 : 0;
+        case F_SETFD:
+            if (arg & 1) current_task->process->file_flags[fd] |= O_CLOEXEC;
+            else current_task->process->file_flags[fd] &= ~O_CLOEXEC;
+            return 0;
+        case F_GETFL:
+            return current_task->process->file_flags[fd];
+        case F_SETFL:
+            current_task->process->file_flags[fd] = (uint32_t)arg;
+            return 0;
+        default:
+            return -EINVAL;
+    }
+}
+
+static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
+    if (fd >= 0 && fd <= 2) {
+        if (req == TIOCGWINSZ && arg) {
+            struct winsize *ws = (struct winsize *)arg;
+            ws->ws_row = 25;
+            ws->ws_col = 80;
+            ws->ws_xpixel = 640;
+            ws->ws_ypixel = 480;
+            return 0;
+        }
+        if (req == TIOCGPGRP && arg) {
+            *(int *)arg = current_task ? (int)current_task->process->pgid : 1;
+            return 0;
+        }
+        if (req == TIOCSPGRP) {
+            return 0;
+        }
+        if (req == FIONREAD && arg) {
+            *(int *)arg = tty_has_input() ? 1 : 0;
+            return 0;
+        }
+        if (req == TCGETS && arg) {
+            struct termios *tio = (struct termios *)arg;
+            memset(tio, 0, sizeof(struct termios));
+            tio->c_iflag = 0x4500;
+            tio->c_oflag = 0x0005;
+            tio->c_cflag = 0x00BF;
+            tio->c_lflag = 0x8A3B;
+            return 0;
+        }
+        if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
+            return 0;
+        }
+        return 0;
+    }
+    return -ENOTTY;
+}
+
+// ============================================================================
+// 2. Filesystem Metadata & Directory Navigation
+// ============================================================================
+
+static void fill_linux_stat(vfs_node_t *node, struct linux_stat *statbuf) {
+    memset(statbuf, 0, sizeof(struct linux_stat));
+    statbuf->st_dev = 1;
+    statbuf->st_ino = node->inode ? node->inode : 1;
+    statbuf->st_nlink = 1;
+    statbuf->st_uid = 0;
+    statbuf->st_gid = 0;
+    statbuf->st_size = node->length;
+    statbuf->st_blksize = 4096;
+    statbuf->st_blocks = (node->length + 511) / 512;
+
+    if (node->flags & FS_DIRECTORY) {
+        statbuf->st_mode = S_IFDIR | 0755;
+    } else {
+        statbuf->st_mode = S_IFREG | 0777;
+    }
+
+    uint64_t cur_sec = tick / 100;
+    statbuf->st_atim.tv_sec = cur_sec;
+    statbuf->st_mtim.tv_sec = cur_sec;
+    statbuf->st_ctim.tv_sec = cur_sec;
+}
+
+static int64_t sys_stat_handler(const char *pathname, struct linux_stat *statbuf) {
+    if (!pathname || !statbuf) return -EFAULT;
+    char resolved[256];
+    resolve_user_path(pathname, resolved, sizeof(resolved));
+
+    vfs_node_t *node = vfs_open(resolved, 0);
+    if (!node) return -ENOENT;
+
+    fill_linux_stat(node, statbuf);
+    return 0;
+}
+
+static int64_t sys_fstat_handler(int fd, struct linux_stat *statbuf) {
+    if (!statbuf) return -EFAULT;
+
+    if (fd >= 0 && fd <= 2) {
+        memset(statbuf, 0, sizeof(struct linux_stat));
+        statbuf->st_mode = S_IFCHR | 0666;
+        statbuf->st_rdev = 0x0501;
+        statbuf->st_blksize = 4096;
+        return 0;
+    }
+
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
     if (!node) return -EBADF;
 
-    // vfs_close уже вызывает ops->close (pipe_read/write_close_op)
-    vfs_close(node);
-    current_task->process->files[fd] = NULL;
+    fill_linux_stat(node, statbuf);
+    return 0;
+}
+
+static int64_t sys_access_handler(const char *pathname, int mode) {
+    (void)mode;
+    if (!pathname) return -EFAULT;
+    char resolved[256];
+    resolve_user_path(pathname, resolved, sizeof(resolved));
+    vfs_node_t *node = vfs_open(resolved, 0);
+    if (!node) return -ENOENT;
     return 0;
 }
 
@@ -196,14 +477,12 @@ static int64_t sys_getcwd_handler(char *buf, size_t size) {
                       ? current_task->process->cwd : "/";
     size_t len = strlen(cwd) + 1;
     if (size < len) return -ERANGE;
-
     memcpy(buf, cwd, len);
-    return (int64_t)len; // <-- ВОЗВРАЩАЕМ ДЛИНУ СТРОКИ, А НЕ 0!
+    return (int64_t)len;
 }
 
 static int64_t sys_chdir_handler(const char *path) {
-    if (!path) return -EINVAL;
-
+    if (!path) return -EFAULT;
     char resolved[256];
     resolve_user_path(path, resolved, sizeof(resolved));
 
@@ -212,11 +491,84 @@ static int64_t sys_chdir_handler(const char *path) {
 
     if (current_task && current_task->process) {
         strncpy(current_task->process->cwd, resolved, sizeof(current_task->process->cwd) - 1);
+        current_task->process->cwd[sizeof(current_task->process->cwd) - 1] = '\0';
     }
     return 0;
 }
 
+static int64_t sys_mkdirat_handler(int dirfd, const char *pathname, int mode) {
+    (void)dirfd;
+    if (!pathname) return -EFAULT;
+    char resolved[256];
+    resolve_user_path(pathname, resolved, sizeof(resolved));
+
+    char parent_path[256];
+    strncpy(parent_path, resolved, sizeof(parent_path) - 1);
+    parent_path[sizeof(parent_path) - 1] = '\0';
+    char *dirname = parent_path;
+
+    char *last_slash = strrchr(parent_path, '/');
+    if (last_slash) {
+        if (last_slash == parent_path) {
+            dirname = last_slash + 1;
+            parent_path[1] = '\0';
+        } else {
+            *last_slash = '\0';
+            dirname = last_slash + 1;
+        }
+    }
+
+    vfs_node_t *parent = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
+    if (!parent) return -ENOENT;
+
+    vfs_node_t *created = vfs_create(parent, dirname, FS_DIRECTORY | (mode ? mode : 0755));
+    return created ? 0 : -EEXIST;
+}
+
+static int64_t sys_unlinkat_handler(int dirfd, const char *pathname, int flags) {
+    (void)dirfd; (void)flags;
+    if (!pathname) return -EFAULT;
+    char resolved[256];
+    resolve_user_path(pathname, resolved, sizeof(resolved));
+
+    vfs_node_t *node = vfs_open(resolved, 0);
+    if (!node) return -ENOENT;
+
+    if (node->parent && node->parent->children) {
+        vfs_node_t *curr = node->parent->children;
+        vfs_node_t *prev = NULL;
+        while (curr) {
+            if (curr == node) {
+                if (prev) prev->next = curr->next;
+                else node->parent->children = curr->next;
+                kfree(node);
+                return 0;
+            }
+            prev = curr;
+            curr = curr->next;
+        }
+    }
+    return 0;
+}
+
+static int64_t sys_renameat_handler(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) {
+    (void)olddirfd; (void)newdirfd;
+    if (!oldpath || !newpath) return -EFAULT;
+    char old_res[256], new_res[256];
+    resolve_user_path(oldpath, old_res, sizeof(old_res));
+    resolve_user_path(newpath, new_res, sizeof(new_res));
+
+    vfs_node_t *old_node = vfs_open(old_res, 0);
+    if (!old_node) return -ENOENT;
+
+    const char *new_name = strrchr(new_res, '/');
+    new_name = new_name ? new_name + 1 : new_res;
+    strncpy(old_node->name, new_name, sizeof(old_node->name) - 1);
+    return 0;
+}
+
 static int64_t sys_getdents64_handler(int fd, void *dirp, size_t count) {
+    if (!dirp || count == 0) return -EINVAL;
     if (!current_task || !current_task->process) return -EBADF;
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
@@ -225,136 +577,87 @@ static int64_t sys_getdents64_handler(int fd, void *dirp, size_t count) {
 
     uint8_t *out_buf = (uint8_t *)dirp;
     size_t written = 0;
-    uint32_t idx = 0;
+    uint32_t idx = (uint32_t)(current_task->process->file_offsets[fd] / sizeof(struct linux_dirent64));
 
     vfs_node_t *child = NULL;
-    while ((child = vfs_readdir(dir, idx++)) != NULL) {
+    while ((child = vfs_readdir(dir, idx)) != NULL) {
         size_t name_len = strlen(child->name);
         size_t rec_len = (sizeof(struct linux_dirent64) + name_len + 1 + 7) & ~7;
 
-        if (written + rec_len > count) break;
+        if (written + rec_len > count) {
+            break;
+        }
 
         struct linux_dirent64 *d = (struct linux_dirent64 *)(out_buf + written);
-        d->d_ino = child->inode ? child->inode : idx;
-        d->d_off = idx * 32;
+        d->d_ino = child->inode ? child->inode : (idx + 1);
+        d->d_off = (idx + 1) * sizeof(struct linux_dirent64);
         d->d_reclen = (unsigned short)rec_len;
         d->d_type = (child->flags & FS_DIRECTORY) ? 4 : 8;
         strcpy(d->d_name, child->name);
 
         written += rec_len;
-        kfree(child);
+        idx++;
+        current_task->process->file_offsets[fd] = idx * sizeof(struct linux_dirent64);
     }
 
     return (int64_t)written;
 }
 
-static int64_t sys_exit_handler(int code) {
-    serial_puts(COM1, "[KERNEL] User process exited with code: ");
-    char buf[32];
-    itoa_hex(code, buf);
-    serial_puts(COM1, buf);
-    serial_puts(COM1, "\n");
-
-    if (current_task && current_task->process) {
-        current_task->process->exit_code = code;
-        current_task->process->exited    = true;
-
-        // Если кто-то ждёт нас через wait4 — будим родителя
-        task_t *waiter = current_task->process->wait_parent;
-        if (waiter) {
-            current_task->process->wait_parent = NULL;
-            sched_unblock(waiter);
-        }
-
-        current_task->state   = TASK_STATE_ZOMBIE;
-        current_task->running = false;
-        sched_dequeue(current_task);
-    }
-
-    sched_yield();
-    for(;;);
-    return 0;
+static int64_t sys_umask_handler(int mask) {
+    if (!current_task || !current_task->process) return 022;
+    uint32_t old_mask = current_task->process->umask;
+    current_task->process->umask = (uint32_t)(mask & 0777);
+    return old_mask;
 }
 
-static int64_t sys_stat_handler(const char *pathname, struct linux_stat *statbuf) {
-    if (!pathname || !statbuf) return -EINVAL;
-
+static int64_t sys_chmod_handler(const char *path, int mode) {
+    if (!path) return -EFAULT;
     char resolved[256];
-    resolve_user_path(pathname, resolved, sizeof(resolved));
-
+    resolve_user_path(path, resolved, sizeof(resolved));
     vfs_node_t *node = vfs_open(resolved, 0);
-    if (!node) {
-        return -ENOENT; // ВАЖНО: возвращаем -2 (Файл не найден), а не -ENOSYS!
-    }
-
-    memset(statbuf, 0, sizeof(struct linux_stat));
-    statbuf->st_ino = node->inode ? node->inode : 1;
-    statbuf->st_nlink = 1;
-    statbuf->st_uid = 0; // root
-    statbuf->st_gid = 0; // root
-    statbuf->st_size = node->length;
-    statbuf->st_blksize = 4096;
-    statbuf->st_blocks = (node->length + 511) / 512;
-
-    if (node->flags & FS_DIRECTORY) {
-        statbuf->st_mode = S_IFDIR | 0755;
-    } else {
-        statbuf->st_mode = S_IFREG | 0777; // Исполняемый файл
-    }
-
+    if (!node) return -ENOENT;
+    node->permissions = (uint32_t)mode;
     return 0;
 }
 
-static int64_t sys_fstat_handler(int fd, struct linux_stat *statbuf) {
-    if (!statbuf) return -EINVAL;
+static int64_t sys_chown_handler(const char *path, int uid, int gid) {
+    (void)uid; (void)gid;
+    if (!path) return -EFAULT;
+    char resolved[256];
+    resolve_user_path(path, resolved, sizeof(resolved));
+    vfs_node_t *node = vfs_open(resolved, 0);
+    if (!node) return -ENOENT;
+    return 0;
+}
 
-    // Для STDIN (0), STDOUT (1), STDERR (2) сообщаем, что это TTY (терминал)
-    if (fd >= 0 && fd <= 2) {
-        memset(statbuf, 0, sizeof(struct linux_stat));
-        statbuf->st_mode = S_IFCHR | 0666; // Символьное устройство
-        statbuf->st_rdev = 0x0501;         // /dev/tty
-        return 0;
-    }
+static int64_t sys_truncate_handler(const char *path, int64_t length) {
+    if (!path || length < 0) return -EINVAL;
+    char resolved[256];
+    resolve_user_path(path, resolved, sizeof(resolved));
+    vfs_node_t *node = vfs_open(resolved, 0);
+    if (!node) return -ENOENT;
+    node->length = (uint64_t)length;
+    return 0;
+}
 
+static int64_t sys_ftruncate_handler(int fd, int64_t length) {
+    if (length < 0) return -EINVAL;
     if (!current_task || !current_task->process) return -EBADF;
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
-
     vfs_node_t *node = current_task->process->files[fd];
     if (!node) return -EBADF;
-
-    memset(statbuf, 0, sizeof(struct linux_stat));
-    statbuf->st_ino = node->inode ? node->inode : 1;
-    statbuf->st_nlink = 1;
-    statbuf->st_size = node->length;
-    statbuf->st_blksize = 4096;
-    statbuf->st_blocks = (node->length + 511) / 512;
-    statbuf->st_mode = (node->flags & FS_DIRECTORY) ? (S_IFDIR | 0755) : (S_IFREG | 0777);
-
+    node->length = (uint64_t)length;
     return 0;
 }
 
-static int64_t sys_arch_prctl_handler(int code, uint64_t addr) {
-    if (!current_task) return -EINVAL;
-
-    if (code == ARCH_SET_FS) {
-        current_task->fs_base = addr;
-        write_msr(IA32_FS_BASE_MSR, addr);
-        return 0;
-    } else if (code == ARCH_GET_FS) {
-        if (!addr) return -EINVAL;
-        *(uint64_t *)addr = current_task->fs_base;
-        return 0;
-    }
-    return -EINVAL;
-}
+// ============================================================================
+// 3. Memory Subsystem Handlers (Paging, Heap, Mmap)
+// ============================================================================
 
 static int64_t sys_brk_handler(uint64_t new_brk) {
     if (!current_task || !current_task->process) return 0;
-    
     uint64_t old_brk = current_task->process->brk;
-    if (new_brk == 0) {
-        return old_brk;
-    }
+    if (new_brk == 0) return old_brk;
 
     if (new_brk <= old_brk) {
         current_task->process->brk = new_brk;
@@ -362,19 +665,13 @@ static int64_t sys_brk_handler(uint64_t new_brk) {
     }
 
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
-    
     uint64_t start_page = (old_brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     uint64_t end_page = (new_brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
     for (uint64_t addr = start_page; addr < end_page; addr += PAGE_SIZE) {
-        if (vmm_get_phys(pml4, addr) != 0) {
-            continue;
-        }
-
+        if (vmm_get_phys(pml4, addr) != 0) continue;
         void *phys = pmm_alloc();
-        if (!phys) {
-            return old_brk;
-        }
+        if (!phys) return old_brk;
         memset((void *)VIRT((uint64_t)phys), 0, PAGE_SIZE);
         vmm_map(pml4, addr, (uint64_t)phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
@@ -383,71 +680,36 @@ static int64_t sys_brk_handler(uint64_t new_brk) {
     return new_brk;
 }
 
-static int64_t sys_write_handler(int fd, const void *user_buf, size_t count) {
-    if (fd == 1 || fd == 2) {
-        const char *buf = (const char *)user_buf;
-        for (size_t i = 0; i < count; i++) {
-            char c = buf[i];
-            serial_putchar(COM1, c);
-            term_putchar_raw(c);
-        }
-        return count;
-    }
-
-    if (!current_task || !current_task->process) return -EBADF;
-    if (fd < 3 || fd >= MAX_OPEN_FILES) return -EBADF;
-
-    vfs_node_t *node = current_task->process->files[fd];
-    if (!node) return -EBADF;
-
-    return vfs_write(node, 0, count, (uint8_t *)user_buf);
-}
-
-static int64_t sys_writev_handler(int fd, const struct iovec *iov, int iovcnt) {
-    if (!iov || iovcnt <= 0) return -EINVAL;
-    int64_t total = 0;
-    for (int i = 0; i < iovcnt; i++) {
-        if (iov[i].iov_base && iov[i].iov_len > 0) {
-            int64_t ret = sys_write_handler(fd, iov[i].iov_base, iov[i].iov_len);
-            if (ret < 0) return ret;
-            total += ret;
-        }
-    }
-    return total;
-}
-
-#define TCGETS      0x5401
-#define TCSETS      0x5402
-#define TIOCGWINSZ  0x5413
-
-struct winsize {
-    unsigned short ws_row;
-    unsigned short ws_col;
-    unsigned short ws_xpixel;
-    unsigned short ws_ypixel;
-};
-
 static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {
-    (void)prot; (void)flags; (void)fd; (void)offset;
+    (void)prot;
     if (length == 0) return -EINVAL;
 
     size_t page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
     size_t aligned_len = page_count * PAGE_SIZE;
 
     uint64_t virt_addr = addr;
-    if (virt_addr == 0) {
+    if (virt_addr == 0 || !(flags & MAP_FIXED)) {
         virt_addr = mmap_virtual_base;
         mmap_virtual_base += aligned_len;
     }
 
     if (!current_task || !current_task->process) return -EINVAL;
-
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
 
     for (size_t i = 0; i < page_count; i++) {
         void *phys = pmm_alloc();
         if (!phys) return -ENOMEM;
         memset((void *)VIRT((uint64_t)phys), 0, PAGE_SIZE);
+
+        if (fd >= 0 && fd < MAX_OPEN_FILES && current_task->process->files[fd]) {
+            vfs_node_t *node = current_task->process->files[fd];
+            uint64_t file_pos = (uint64_t)offset + (i * PAGE_SIZE);
+            if (file_pos < node->length) {
+                uint64_t chunk = (node->length - file_pos > PAGE_SIZE) ? PAGE_SIZE : (node->length - file_pos);
+                vfs_read(node, file_pos, chunk, (uint8_t *)VIRT((uint64_t)phys));
+            }
+        }
+
         vmm_map(pml4, virt_addr + (i * PAGE_SIZE), (uint64_t)phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
 
@@ -455,7 +717,20 @@ static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flag
 }
 
 static int64_t sys_munmap_handler(uint64_t addr, size_t length) {
-    (void)addr; (void)length;
+    if (length == 0 || (addr & (PAGE_SIZE - 1)) != 0) return -EINVAL;
+    if (!current_task || !current_task->process) return -EINVAL;
+
+    page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
+    size_t page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    for (size_t i = 0; i < page_count; i++) {
+        uint64_t virt = addr + (i * PAGE_SIZE);
+        uint64_t phys = vmm_get_phys(pml4, virt);
+        if (phys) {
+            pmm_free((void *)(phys & ~0xFFFULL));
+            vmm_unmap(pml4, virt);
+        }
+    }
     return 0;
 }
 
@@ -464,306 +739,118 @@ static int64_t sys_mprotect_handler(uint64_t addr, size_t len, int prot) {
     return 0;
 }
 
-static int64_t sys_uname_handler(struct linux_utsname *buf) {
-    if (!buf) return -EINVAL;
+static int64_t sys_mremap_handler(uint64_t old_address, size_t old_size, size_t new_size, int flags) {
+    (void)flags;
+    if (new_size == 0) return -EINVAL;
+    int64_t new_addr = sys_mmap_handler(0, new_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (new_addr < 0) return new_addr;
 
-    memset(buf, 0, sizeof(struct linux_utsname));
-    strcpy(buf->sysname, "EquantOS");
-    strcpy(buf->nodename, "equant");
-    strcpy(buf->release, "0.0.1-alpha");
-    strcpy(buf->version, "EquantOS Kernel v0.0.1 (x86_64)");
-    strcpy(buf->machine, "x86_64");
-    strcpy(buf->domainname, "localdomain");
-
-    return 0;
-}
-
-static int64_t sys_clock_gettime_handler(int clock_id, struct linux_timespec *tp) {
-    (void)clock_id;
-    if (!tp) return -EINVAL;
-
-    uint64_t current_ticks = tick;
-    tp->tv_sec = current_ticks / 100;
-    tp->tv_nsec = (current_ticks % 100) * 10000000ULL;
-
-    return 0;
-}
-
-static int64_t sys_nanosleep_handler(const struct linux_timespec *req, struct linux_timespec *rem) {
-    (void)rem;
-    if (!req) return -EINVAL;
-
-    uint64_t target_tick = tick + (req->tv_sec * 100 + req->tv_nsec / 10000000ULL);
-    
-    if (target_tick > tick) {
-        __asm__ volatile("sti");
-        while (tick < target_tick) {
-            __asm__ volatile("hlt");
-        }
-        __asm__ volatile("cli");
+    if (old_address && old_size) {
+        size_t copy_len = (old_size < new_size) ? old_size : new_size;
+        memcpy((void *)new_addr, (void *)old_address, copy_len);
+        sys_munmap_handler(old_address, old_size);
     }
-    return 0;
+    return new_addr;
 }
 
-static int64_t sys_rt_sigaction_handler(int signum, const void *act, void *oldact, size_t sigsetsize) {
-    (void)signum; (void)act; (void)oldact; (void)sigsetsize;
-    return 0;
-}
+// ============================================================================
+// 4. Process Lifecycle, Multitasking & Architecture Setup
+// ============================================================================
 
-struct linux_pollfd {
-    int   fd;
-    short events;
-    short revents;
-};
+static int64_t sys_exit_handler(int code) {
+    if (current_task && current_task->process) {
+        current_task->process->exit_code = code;
+        current_task->process->exited = true;
 
-#define POLLIN  0x0001
-#define POLLOUT 0x0004
-
-static bool tty_has_input(void) {
-    return serial_received(COM1) || input_has_events();
-}
-
-static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int timeout) {
-    if (!fds && nfds > 0) return -EINVAL;
-
-    int ready = 0;
-    for (uint64_t i = 0; i < nfds; i++) {
-        fds[i].revents = 0;
-
-        if (fds[i].fd == 0) { // STDIN
-            if (tty_has_input()) {
-                fds[i].revents |= (fds[i].events & POLLIN);
-                if (fds[i].revents) ready++;
+        if (current_task->process->clear_child_tid) {
+            uint32_t *tid_ptr = (uint32_t *)current_task->process->clear_child_tid;
+            *tid_ptr = 0;
+            // Futex wake on clear_child_tid
+            extern task_t *task_list;
+            if (task_list) {
+                task_t *curr = task_list;
+                do {
+                    if (curr->futex_addr == current_task->process->clear_child_tid) {
+                        curr->futex_addr = 0;
+                        sched_unblock(curr);
+                    }
+                    curr = curr->next;
+                } while (curr && curr != task_list);
             }
-        } else if (fds[i].fd == 1 || fds[i].fd == 2) { // STDOUT / STDERR
-            fds[i].revents |= (fds[i].events & POLLOUT);
-            if (fds[i].revents) ready++;
-        }
-    }
-
-    // Если данные есть ИЛИ это неблокирующий опрос (timeout == 0) — выходим сразу
-    if (ready > 0 || timeout == 0) {
-        return ready;
-    }
-
-    // Если timeout > 0 или -1 (бесконечно) — ждем появления символа
-    uint64_t start_tick = tick;
-    uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : (timeout / 10);
-
-    while (ready == 0) {
-        if (timeout >= 0 && (tick - start_tick) >= max_ticks) {
-            break; // Таймаут истек
         }
 
-        if (tty_has_input()) {
-            for (uint64_t i = 0; i < nfds; i++) {
-                if (fds[i].fd == 0) {
-                    fds[i].revents |= (fds[i].events & POLLIN);
-                    if (fds[i].revents) ready++;
-                }
-            }
-            break;
+        task_t *waiter = current_task->process->wait_parent;
+        if (waiter) {
+            current_task->process->wait_parent = NULL;
+            sched_unblock(waiter);
         }
 
-        __asm__ volatile("sti");
-        __asm__ volatile("pause");
-        sched_yield();
+        current_task->state = TASK_STATE_ZOMBIE;
+        current_task->running = false;
+        sched_dequeue(current_task);
     }
 
-    return ready;
-}
-extern uint64_t pmm_get_total_memory(void);
-extern uint64_t pmm_get_used_memory(void);
-extern uint64_t total_pages;
-extern size_t used_memory;
-
-static int64_t sys_sysinfo_handler(equant_sysinfo_t *info) {
-    if (!info) return -EINVAL;
-
-    equant_sysinfo_t kinfo;
-    memset(&kinfo, 0, sizeof(equant_sysinfo_t));
-
-    kinfo.total_ram = pmm_get_total_memory();
-    kinfo.used_ram = pmm_get_used_memory();
-    kinfo.free_ram = (kinfo.total_ram > kinfo.used_ram) ? (kinfo.total_ram - kinfo.used_ram) : 0;
-    kinfo.pmm_total_pages = total_pages;
-    kinfo.pmm_used_pages = kinfo.used_ram / PAGE_SIZE;
-    kinfo.kernel_heap_used = used_memory;
-
-    memcpy(info, &kinfo, sizeof(equant_sysinfo_t));
+    sched_yield();
+    for (;;) { __asm__ volatile("hlt"); }
     return 0;
 }
 
-#define F_DUPFD         0
-#define F_GETFD         1
-#define F_SETFD         2
-#define F_GETFL         3
-#define F_SETFL         4
-#define F_DUPFD_CLOEXEC 1030
-
-static int64_t sys_fcntl_handler(int fd, int cmd, uint64_t arg) {
-    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
-    switch (cmd) {
-        case 0: /* F_DUPFD */
-        case 1030: /* F_DUPFD_CLOEXEC */
-            for (int i = (int)arg; i < MAX_OPEN_FILES; i++) {
-                if (current_task->process->files[i] == NULL) {
-                    current_task->process->files[i] = current_task->process->files[fd];
-                    return i;
-                }
-            }
-            return -EMFILE;
-        case 1: /* F_GETFD */ return 0;
-        case 2: /* F_SETFD */ return 0;
-        case 3: /* F_GETFL */ return 2; // O_RDWR
-        case 4: /* F_SETFL */ return 0;
-        default: return 0;
-    }
-}
-
-static int64_t sys_dup2_handler(int oldfd, int newfd) {
-    if (oldfd < 0 || oldfd >= MAX_OPEN_FILES || !current_task->process->files[oldfd]) return -EBADF;
-    if (newfd < 0 || newfd >= MAX_OPEN_FILES) return -EBADF;
-    if (oldfd == newfd) return newfd;
-
-    if (current_task->process->files[newfd]) {
-        vfs_close(current_task->process->files[newfd]);
-    }
-    current_task->process->files[newfd] = current_task->process->files[oldfd];
-    return newfd;
-}
-
-static int64_t sys_access_handler(const char *pathname, int mode) {
-    (void)mode;
-    if (!pathname) return -EINVAL;
-    char resolved[256];
-    resolve_user_path(pathname, resolved, sizeof(resolved));
-    vfs_node_t *node = vfs_open(resolved, 0);
-    if (!node) return -ENOENT;
-    return 0;
-}
-
-// 1. SYS_READLINK (89) - симлинков нет, возвращаем -EINVAL
-static int64_t sys_readlink_handler(const char *pathname, char *buf, size_t bufsiz) {
-    (void)buf; (void)bufsiz;
-    if (!pathname) return -EINVAL;
-    return -EINVAL; // В Linux для обычных файлов возвращается EINVAL (Invalid argument)
-}
-
-// 2. SYS_GETRLIMIT (97) и SYS_PRLIMIT64 (302)
-struct linux_rlimit {
-    uint64_t rlim_cur;
-    uint64_t rlim_max;
-};
-
-static int64_t sys_dup_handler(int oldfd) {
-    if (!current_task || !current_task->process) return -EBADF;
-    if (oldfd < 0 || oldfd >= MAX_OPEN_FILES) return -EBADF;
-
-    vfs_node_t *node = current_task->process->files[oldfd];
-    if (!node) return -EBADF;
-
-    for (int i = 3; i < MAX_OPEN_FILES; i++) {
-        if (current_task->process->files[i] == NULL) {
-            current_task->process->files[i] = node;
-            return i;
-        }
-    }
-    return -EMFILE;
-}
-
-// === PIPE ===
-static int64_t sys_pipe_handler(int *pipefd) {
-    if (!pipefd) return -EINVAL;
-    return pipe_create(pipefd);
-}
-
-// === FORK (Copy-On-Write через vmm_clone_address_space) ===
-static int64_t sys_fork_handler(syscall_regs_t *regs) {
+static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent_tid, int *child_tid, uint64_t tls, syscall_regs_t *regs) {
     if (!current_task || !current_task->process) return -EAGAIN;
 
-    // 1. Клонируем адресное пространство (COW — физические страницы не копируются)
-    serial_puts(COM1, "[FORK] Parent CR3: 0x");
-    char dbg[32];
-    itoa_hex(current_task->process->cr3, dbg);
-    serial_puts(COM1, dbg);
-    serial_puts(COM1, "\n");
-
-    page_table_t *child_pml4 = vmm_clone_address_space(current_task->process->cr3);
-    if (!child_pml4) {
-        serial_puts(COM1, "[FORK] ERROR: vmm_clone_address_space failed!\n");
-        return -ENOMEM;
+    page_table_t *child_pml4 = NULL;
+    if (flags & CLONE_VM) {
+        child_pml4 = (page_table_t *)VIRT(current_task->process->cr3);
+    } else {
+        child_pml4 = vmm_clone_address_space(current_task->process->cr3);
+        if (!child_pml4) return -ENOMEM;
     }
 
-    serial_puts(COM1, "[FORK] Child PML4 (virt): 0x");
-    itoa_hex((uint64_t)child_pml4, dbg);
-    serial_puts(COM1, dbg);
-    serial_puts(COM1, " -> CR3 (phys): 0x");
-    itoa_hex(PHYS(child_pml4), dbg);
-    serial_puts(COM1, dbg);
-    serial_puts(COM1, "\n");
+    process_t *child_proc = current_task->process;
+    if (!(flags & CLONE_THREAD)) {
+        child_proc = (process_t *)kmalloc(sizeof(process_t));
+        if (!child_proc) return -ENOMEM;
+        memset(child_proc, 0, sizeof(process_t));
+        child_proc->pid = next_pid++;
+        child_proc->parent_pid = current_task->process->pid;
+        child_proc->pgid = current_task->process->pgid;
+        child_proc->cr3 = (flags & CLONE_VM) ? current_task->process->cr3 : PHYS(child_pml4);
+        child_proc->brk = current_task->process->brk;
+        child_proc->umask = current_task->process->umask;
+        memcpy(child_proc->cwd, current_task->process->cwd, sizeof(child_proc->cwd));
 
-    // 2. Создаём структуру process для дочернего процесса
-    process_t *child_proc = (process_t *)kmalloc(sizeof(process_t));
-    if (!child_proc) return -ENOMEM;
-    memset(child_proc, 0, sizeof(process_t));
-
-    child_proc->pid        = next_pid++;
-    child_proc->parent_pid = current_task->process->pid;
-    child_proc->cr3        = PHYS(child_pml4);
-    child_proc->brk        = current_task->process->brk;
-    child_proc->exited     = false;
-    child_proc->exit_code  = 0;
-    child_proc->wait_parent= NULL;
-    memcpy(child_proc->cwd, current_task->process->cwd, sizeof(child_proc->cwd));
-
-    // Копируем таблицу файловых дескрипторов (наследование FD)
-    for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        child_proc->files[i] = current_task->process->files[i];
+        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+            child_proc->files[i] = current_task->process->files[i];
+            child_proc->file_offsets[i] = current_task->process->file_offsets[i];
+            child_proc->file_flags[i] = current_task->process->file_flags[i];
+        }
     }
 
-    // 3. Создаём task для дочернего процесса
     task_t *child_task = (task_t *)kmalloc(sizeof(task_t));
-    if (!child_task) { kfree(child_proc); return -ENOMEM; }
+    if (!child_task) return -ENOMEM;
     memset(child_task, 0, sizeof(task_t));
 
     task_init_fpu(child_task);
-    // Копируем FPU-состояние родителя
     memcpy(task_fpu_area(child_task), task_fpu_area(current_task), 512);
 
-    child_task->id       = child_proc->pid;
-    child_task->state    = TASK_STATE_RUNNABLE;
-    child_task->running  = true;
+    child_task->id = (flags & CLONE_THREAD) ? next_pid++ : child_proc->pid;
+    child_task->state = TASK_STATE_RUNNABLE;
+    child_task->running = true;
     child_task->priority = current_task->priority;
     child_task->time_slice = 10;
-    child_task->fs_base  = current_task->fs_base;
-    child_task->process  = child_proc;
+    child_task->fs_base = (flags & CLONE_SETTLS) ? tls : current_task->fs_base;
+    child_task->process = child_proc;
 
-    // 4. Выделяем kernel stack для child и строим точный контекст
-    //    (такой же как у родителя в момент syscall)
     child_task->kstack_at_bottom = (uint64_t)kmalloc(16384) + 16384;
-
-    // Строим kernel stack для child в формате irq0_handler_asm (SAVE_REGS/RESTORE_REGS):
-    // Шедулер сделает: RESTORE_REGS → add rsp, 16 → iretq
-    //
-    // Порядок (от вершины стека вниз = порядок push):
-    //   iret frame: SS, RSP, RFLAGS, CS, RIP
-    //   int frame:  int_no, error_code  (add rsp,16 пропустит их)
-    //   SAVE_REGS:  rax,rbx,rcx,rdx,rbp,rsi,rdi,r8..r15
-    //
-    // На стеке stack (растёт вниз):
     uint64_t *stack = (uint64_t *)child_task->kstack_at_bottom;
 
-    // iret frame (используем значения из syscall iret-фрейма родителя)
-    *--stack = regs->ss;             // SS
-    *--stack = regs->rsp;            // RSP (user stack)
-    *--stack = regs->rflags;         // RFLAGS
-    *--stack = regs->cs;             // CS
-    *--stack = regs->rip;            // RIP (адрес возврата после syscall)
-    // int frame (будет пропущено add rsp, 16)
-    *--stack = 0;                    // int_no
-    *--stack = 0;                    // error_code
-    // SAVE_REGS в обратном порядке (top → bottom = r15 → rax)
+    *--stack = regs->ss;
+    *--stack = stack_top ? stack_top : regs->rsp;
+    *--stack = regs->rflags;
+    *--stack = regs->cs;
+    *--stack = regs->rip;
+    *--stack = 0; // int_no
+    *--stack = 0; // error_code
     *--stack = regs->r15;
     *--stack = regs->r14;
     *--stack = regs->r13;
@@ -778,19 +865,20 @@ static int64_t sys_fork_handler(syscall_regs_t *regs) {
     *--stack = regs->rdx;
     *--stack = regs->rcx;
     *--stack = regs->rbx;
-    *--stack = 0;                    // rax = 0 (fork возвращает 0 в дочернем процессе!)
+    *--stack = 0; // RAX = 0 in child
 
     child_task->rsp = (uint64_t)stack;
 
-    serial_puts(COM1, "[FORK] Child RSP: 0x");
-    itoa_hex(child_task->rsp, dbg);
-    serial_puts(COM1, dbg);
-    serial_puts(COM1, ", RIP will be: 0x");
-    itoa_hex(regs->rip, dbg);
-    serial_puts(COM1, dbg);
-    serial_puts(COM1, "\n");
+    if ((flags & CLONE_PARENT_SETTID) && parent_tid) {
+        *parent_tid = (int)child_task->id;
+    }
+    if ((flags & CLONE_CHILD_SETTID) && child_tid) {
+        *child_tid = (int)child_task->id;
+    }
+    if (flags & CLONE_CHILD_CLEARTID) {
+        child_proc->clear_child_tid = (uint64_t)child_tid;
+    }
 
-    // 5. Добавляем child в глобальный список задач (task_list)
     extern task_t *task_list;
     if (task_list) {
         child_task->next = task_list->next;
@@ -803,127 +891,17 @@ static int64_t sys_fork_handler(syscall_regs_t *regs) {
         task_list = child_task;
     }
 
-    // 6. Запускаем child
     sched_enqueue(child_task);
-
-    serial_puts(COM1, "[KERNEL] fork(): child PID=");
-    char pidstr[32];
-    itoa_hex(child_proc->pid, pidstr);
-    serial_puts(COM1, pidstr);
-    serial_puts(COM1, "\n");
-
-    // 7. Родитель возвращает PID дочернего процесса
-    return (int64_t)child_proc->pid;
+    return (int64_t)child_task->id;
 }
 
-// === SYS_EXECVE (59) ===
-static int64_t sys_execve_handler(const char *filename, char *const argv[], char *const envp[], syscall_regs_t *regs) {
-    if (!filename || !current_task || !current_task->process) return -EINVAL;
-
-    char resolved[256];
-    resolve_user_path(filename, resolved, sizeof(resolved));
-
-    vfs_node_t *file = vfs_open(resolved, 0);
-    if (!file) {
-        char alt[256];
-        strcpy(alt, "/bin/");
-        strcat(alt, filename);
-        file = vfs_open(alt, 0);
-        if (!file) {
-            strcpy(alt, "/sys/bin/");
-            strcat(alt, filename);
-            file = vfs_open(alt, 0);
-        }
-    }
-
-    if (!file || (file->flags & FS_DIRECTORY)) {
-        return -ENOENT;
-    }
-
-    uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
-    if (!elf_buf) return -ENOMEM;
-
-    if (vfs_read(file, 0, file->length, elf_buf) <= 0) {
-        kfree(elf_buf);
-        return -EIO;
-    }
-
-    // Копируем аргументы в память ядра перед заменой адресного пространства
-    int argc = 0;
-    char k_argv_storage[16][128];
-    char *exec_argv[17];
-
-    if (argv) {
-        while (argv[argc] && argc < 16) {
-            // Копируем строку аргумента из user space
-            strncpy(k_argv_storage[argc], argv[argc], 127);
-            k_argv_storage[argc][127] = '\0';
-            exec_argv[argc] = k_argv_storage[argc];
-            argc++;
-        }
-    }
-    exec_argv[argc] = NULL;
-
-    // ВАЖНО: Если запускается busybox с параметрами (например /busybox.elf ls /)
-    // то argv[0] должен быть "busybox", а argv[1] остается "ls"
-    if (strstr(resolved, "busybox") && argc > 0) {
-        exec_argv[0] = "busybox";
-    }
-
-    uint64_t new_entry = 0;
-    uint64_t new_rsp = 0;
-    uint64_t new_cr3 = 0;
-
-    bool ok = elf_execve_replace(elf_buf, file->length, argc, exec_argv, &new_entry, &new_rsp, &new_cr3);
-    kfree(elf_buf);
-
-    if (!ok) return -ENOEXEC;
-
-    // 1. Освобождаем старое адресное пространство
-    uint64_t old_cr3 = current_task->process->cr3;
-    current_task->process->cr3 = new_cr3;
-
-    // 2. Переключаем процессор на новое адресное пространство
-    __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
-    vmm_destroy_address_space(old_cr3);
-
-    // 3. Сбрасываем контекст регистров для прыжка в точку входа нового ELF
-    regs->rip = new_entry;
-    regs->rsp = new_rsp;
-    regs->cs = 0x23;
-    regs->ss = 0x1B;
-    regs->rflags = 0x202;
-
-    // Сбрасываем регистры общего назначения
-    regs->rax = 0;
-    regs->rbx = 0;
-    regs->rcx = 0;
-    regs->rdx = 0;
-    regs->rsi = 0;
-    regs->rdi = 0;
-    regs->rbp = 0;
-    regs->r8  = 0;
-    regs->r9  = 0;
-    regs->r10 = 0;
-    regs->r11 = 0;
-    regs->r12 = 0;
-    regs->r13 = 0;
-    regs->r14 = 0;
-    regs->r15 = 0;
-
-    return 0; // syscall_handler вернет управление через iretq/sysretq прямо в точку входа новой программы!
-}
-
-// === WAIT4 ===
 static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
     (void)options;
-    if (!current_task || !current_task->process) return -10; // -ECHILD
+    if (!current_task || !current_task->process) return -ECHILD;
 
-    // Ищем дочерний процесс
     extern task_t *task_list;
     task_t *child = NULL;
 
-    // Ждём, пока дочерний процесс не завершится (станет ZOMBIE)
     for (;;) {
         bool have_child = false;
         if (task_list) {
@@ -943,10 +921,11 @@ static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
         }
 
         if (child) break;
-        if (!have_child) return -10; // -ECHILD (нет детей)
+        if (!have_child) return -ECHILD;
 
-        // Уступаем CPU и ждём выполнения дочернего процесса
-        __asm__ volatile("sti");
+        current_task->state = TASK_STATE_BLOCKED;
+        current_task->running = false;
+        sched_dequeue(current_task);
         sched_yield();
     }
 
@@ -954,141 +933,299 @@ static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
     if (wstatus) {
         *wstatus = (child->process->exit_code & 0xFF) << 8;
     }
-
     return child_pid;
 }
 
-// 2. Дополняем SYS_IOCTL (16) поддержкой tcgetpgrp / tcsetpgrp / FIONREAD
-#define TIOCGPGRP   0x540F
-#define TIOCSPGRP   0x5410
-#define FIONREAD    0x541B
+static int64_t sys_arch_prctl_handler(int code, uint64_t addr) {
+    if (!current_task) return -EINVAL;
 
-static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
-    if (fd >= 0 && fd <= 2) {
-        if (req == TIOCGWINSZ && arg) {
-            struct winsize *ws = (struct winsize *)arg;
-            ws->ws_row = 25;
-            ws->ws_col = 80;
-            ws->ws_xpixel = 640;
-            ws->ws_ypixel = 480;
-            return 0;
-        }
-        if (req == TIOCGPGRP && arg) {
-            *(int *)arg = current_task ? (int)current_task->id : 1;
-            return 0;
-        }
-        if (req == TIOCSPGRP) {
-            return 0;
-        }
-        if (req == FIONREAD && arg) {
-            *(int *)arg = tty_has_input() ? 1 : 0;
-            return 0;
-        }
+    if (code == ARCH_SET_FS) {
+        current_task->fs_base = addr;
+        write_msr(0xC0000100, addr);
+        return 0;
+    } else if (code == ARCH_GET_FS) {
+        if (!addr) return -EFAULT;
+        *(uint64_t *)addr = current_task->fs_base;
+        return 0;
+    } else if (code == ARCH_SET_GS) {
+        current_task->gs_base = addr;
+        write_msr(0xC0000101, addr);
+        return 0;
+    } else if (code == ARCH_GET_GS) {
+        if (!addr) return -EFAULT;
+        *(uint64_t *)addr = current_task->gs_base;
         return 0;
     }
     return -EINVAL;
 }
 
-// 3. SYS_PSELECT6 (270) — обёртка над готовностью ввода
-static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, void *exceptfds, const struct linux_timespec *timeout, const void *sigmask) {
-    (void)writefds; (void)exceptfds; (void)sigmask;
-    if (readfds && nfds > 0) {
-        // Если передан STDIN (дескриптор 0)
-        uint64_t *rfds = (uint64_t *)readfds;
-        if (*rfds & 1) {
-            if (!tty_has_input() && timeout && (timeout->tv_sec == 0 && timeout->tv_nsec == 0)) {
-                *rfds = 0;
-                return 0;
-            }
-            *rfds = 1; // Дескриптор 0 готов
-            return 1;
-        }
+// ============================================================================
+// 5. Signals & Synchronization (Futex, Signal Actions, RT Mask)
+// ============================================================================
+
+static int64_t sys_rt_sigaction_handler(int signum, const struct linux_sigaction *act, struct linux_sigaction *oldact, size_t sigsetsize) {
+    (void)sigsetsize;
+    if (signum <= 0 || signum >= NSIG || signum == SIGKILL || signum == SIGSTOP) return -EINVAL;
+    if (!current_task || !current_task->process) return -EINVAL;
+
+    sigaction_info_t *entry = &current_task->process->sigactions[signum];
+    if (oldact) {
+        oldact->sa_handler = (void (*)(int))entry->handler;
+        oldact->sa_flags = entry->flags;
+        oldact->sa_restorer = (void (*)(void))entry->restorer;
+        oldact->sa_mask = entry->mask;
+    }
+    if (act) {
+        entry->handler = (uint64_t)act->sa_handler;
+        entry->flags = act->sa_flags;
+        entry->restorer = (uint64_t)act->sa_restorer;
+        entry->mask = act->sa_mask;
     }
     return 0;
+}
+
+static int64_t sys_rt_sigprocmask_handler(int how, const uint64_t *set, uint64_t *oldset, size_t sigsetsize) {
+    (void)sigsetsize;
+    if (!current_task || !current_task->process) return -EINVAL;
+
+    if (oldset) {
+        *oldset = current_task->process->sigmask;
+    }
+    if (set) {
+        if (how == SIG_BLOCK) current_task->process->sigmask |= *set;
+        else if (how == SIG_UNBLOCK) current_task->process->sigmask &= ~(*set);
+        else if (how == SIG_SETMASK) current_task->process->sigmask = *set;
+        else return -EINVAL;
+    }
+    return 0;
+}
+
+static int64_t sys_kill_handler(int pid, int sig) {
+    if (sig < 0 || sig >= NSIG) return -EINVAL;
+    extern task_t *task_list;
+    if (!task_list) return -ESRCH;
+
+    task_t *curr = task_list;
+    bool found = false;
+    do {
+        if (curr->process && (pid <= 0 || (int)curr->process->pid == pid)) {
+            found = true;
+            if (sig == SIGKILL || sig == SIGTERM) {
+                curr->process->exit_code = 128 + sig;
+                curr->process->exited = true;
+                curr->state = TASK_STATE_ZOMBIE;
+            } else if (sig == SIGSTOP) {
+                sched_block(curr);
+            } else if (sig == SIGCONT) {
+                sched_unblock(curr);
+            }
+        }
+        curr = curr->next;
+    } while (curr && curr != task_list);
+
+    return found ? 0 : -ESRCH;
+}
+
+static int64_t sys_futex_handler(uint32_t *uaddr, int op, uint32_t val, const struct linux_timespec *timeout, uint32_t *uaddr2, uint32_t val3) {
+    (void)timeout; (void)uaddr2; (void)val3;
+    if (!uaddr) return -EFAULT;
+    int cmd = op & 0x7F;
+
+    if (cmd == FUTEX_WAIT) {
+        if (*uaddr != val) {
+            return -EAGAIN;
+        }
+        current_task->futex_addr = (uint64_t)uaddr;
+        sched_block(current_task);
+        sched_yield();
+        current_task->futex_addr = 0;
+        return 0;
+    } else if (cmd == FUTEX_WAKE) {
+        int woken = 0;
+        extern task_t *task_list;
+        if (task_list) {
+            task_t *curr = task_list;
+            do {
+                if (curr->futex_addr == (uint64_t)uaddr) {
+                    curr->futex_addr = 0;
+                    sched_unblock(curr);
+                    woken++;
+                    if ((uint32_t)woken >= val) break;
+                }
+                curr = curr->next;
+            } while (curr && curr != task_list);
+        }
+        return woken;
+    }
+    return -ENOSYS;
+}
+
+// ============================================================================
+// 6. Time, Polling, and System Statistics
+// ============================================================================
+
+static int64_t sys_clock_gettime_handler(int clock_id, struct linux_timespec *tp) {
+    (void)clock_id;
+    if (!tp) return -EFAULT;
+    uint64_t current_ticks = tick;
+    tp->tv_sec = current_ticks / 100;
+    tp->tv_nsec = (current_ticks % 100) * 10000000ULL;
+    return 0;
+}
+
+static int64_t sys_gettimeofday_handler(struct linux_timeval *tv, struct linux_timezone *tz) {
+    if (tv) {
+        uint64_t current_ticks = tick;
+        tv->tv_sec = current_ticks / 100;
+        tv->tv_usec = (current_ticks % 100) * 10000ULL;
+    }
+    if (tz) {
+        tz->tz_minuteswest = 0;
+        tz->tz_dsttime = 0;
+    }
+    return 0;
+}
+
+static int64_t sys_nanosleep_handler(const struct linux_timespec *req, struct linux_timespec *rem) {
+    (void)rem;
+    if (!req) return -EFAULT;
+    uint64_t target_tick = tick + (req->tv_sec * 100 + req->tv_nsec / 10000000ULL);
+    if (target_tick > tick) {
+        sched_make_sleep(current_task, target_tick);
+        sched_yield();
+    }
+    return 0;
+}
+
+static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int timeout) {
+    if (!fds && nfds > 0) return -EFAULT;
+
+    int ready = 0;
+    for (uint64_t i = 0; i < nfds; i++) {
+        fds[i].revents = 0;
+        if (fds[i].fd == 0) {
+            if (tty_has_input()) {
+                fds[i].revents |= (fds[i].events & POLLIN);
+                if (fds[i].revents) ready++;
+            }
+        } else if (fds[i].fd == 1 || fds[i].fd == 2) {
+            fds[i].revents |= (fds[i].events & POLLOUT);
+            if (fds[i].revents) ready++;
+        }
+    }
+
+    if (ready > 0 || timeout == 0) return ready;
+
+    uint64_t start_tick = tick;
+    uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : (timeout / 10);
+
+    while (ready == 0) {
+        if (timeout >= 0 && (tick - start_tick) >= max_ticks) break;
+        if (tty_has_input()) {
+            for (uint64_t i = 0; i < nfds; i++) {
+                if (fds[i].fd == 0) {
+                    fds[i].revents |= (fds[i].events & POLLIN);
+                    if (fds[i].revents) ready++;
+                }
+            }
+            break;
+        }
+        __asm__ volatile("sti; pause");
+        sched_yield();
+    }
+    return ready;
+}
+
+static int64_t sys_sysinfo_handler(equant_sysinfo_t *info) {
+    if (!info) return -EFAULT;
+    equant_sysinfo_t kinfo;
+    memset(&kinfo, 0, sizeof(equant_sysinfo_t));
+    kinfo.total_ram = pmm_get_total_memory();
+    kinfo.used_ram = pmm_get_used_memory();
+    kinfo.free_ram = (kinfo.total_ram > kinfo.used_ram) ? (kinfo.total_ram - kinfo.used_ram) : 0;
+    kinfo.pmm_total_pages = total_pages;
+    kinfo.pmm_used_pages = kinfo.used_ram / PAGE_SIZE;
+    kinfo.kernel_heap_used = used_memory;
+    memcpy(info, &kinfo, sizeof(equant_sysinfo_t));
+    return 0;
+}
+
+static int64_t sys_uname_handler(struct linux_utsname *buf) {
+    if (!buf) return -EFAULT;
+    memset(buf, 0, sizeof(struct linux_utsname));
+    strcpy(buf->sysname, "Linux");
+    strcpy(buf->nodename, "equant");
+    strcpy(buf->release, "6.1.0-equantos");
+    strcpy(buf->version, "EquantOS SMP Unix Kernel x86_64");
+    strcpy(buf->machine, "x86_64");
+    strcpy(buf->domainname, "localdomain");
+    return 0;
+}
+
+static int64_t sys_getrusage_handler(int who, struct rusage *usage) {
+    (void)who;
+    if (!usage) return -EFAULT;
+    memset(usage, 0, sizeof(struct rusage));
+    if (current_task && current_task->process) {
+        usage->ru_utime.tv_sec = current_task->process->utime / 100;
+        usage->ru_utime.tv_usec = (current_task->process->utime % 100) * 10000;
+        usage->ru_stime.tv_sec = current_task->process->stime / 100;
+        usage->ru_stime.tv_usec = (current_task->process->stime % 100) * 10000;
+    }
+    usage->ru_maxrss = 4096;
+    return 0;
+}
+
+static int64_t sys_times_handler(struct tms *buf) {
+    if (!buf) return -EFAULT;
+    if (current_task && current_task->process) {
+        buf->tms_utime = current_task->process->utime;
+        buf->tms_stime = current_task->process->stime;
+        buf->tms_cutime = 0;
+        buf->tms_cstime = 0;
+    }
+    return (int64_t)tick;
 }
 
 static int64_t sys_prlimit64_handler(int pid, int resource, const struct linux_rlimit *new_limit, struct linux_rlimit *old_limit) {
     (void)pid; (void)new_limit;
     if (old_limit) {
-        if (resource == 7 /* RLIMIT_NOFILE */) {
+        if (resource == RLIMIT_NOFILE) {
             old_limit->rlim_cur = MAX_OPEN_FILES;
             old_limit->rlim_max = MAX_OPEN_FILES;
+        } else if (resource == RLIMIT_STACK) {
+            old_limit->rlim_cur = 8 * 1024 * 1024;
+            old_limit->rlim_max = 8 * 1024 * 1024;
         } else {
-            old_limit->rlim_cur = 0xFFFFFFFFFFFFFFFFULL; // RLIM_INFINITY
-            old_limit->rlim_max = 0xFFFFFFFFFFFFFFFFULL;
+            old_limit->rlim_cur = RLIM_INFINITY;
+            old_limit->rlim_max = RLIM_INFINITY;
         }
     }
     return 0;
 }
 
+// ============================================================================
+// 7. Socket Layer Dispatcher (Local AF_UNIX / Stubs for Network Stack)
+// ============================================================================
 
-// Таблица имен для отладки
-// static const char *syscall_name(uint64_t num) {
-//     switch (num) {
-//         case SYS_READ: return "read";
-//         case SYS_WRITE: return "write";
-//         case SYS_OPEN: return "open";
-//         case SYS_CLOSE: return "close";
-//         case SYS_STAT: return "stat";
-//         case SYS_FSTAT: return "fstat";
-//         case SYS_POLL: return "poll";
-//         case SYS_MMAP: return "mmap";
-//         case SYS_MPROTECT: return "mprotect";
-//         case SYS_MUNMAP: return "munmap";
-//         case SYS_BRK: return "brk";
-//         case SYS_RT_SIGACTION: return "rt_sigaction";
-//         case SYS_RT_SIGPROCMASK: return "rt_sigprocmask";
-//         case SYS_IOCTL: return "ioctl";
-//         case SYS_WRITEV: return "writev";
-//         case SYS_SCHED_YIELD: return "sched_yield";
-//         case SYS_NANOSLEEP: return "nanosleep";
-//         case SYS_GETPID: return "getpid";
-//         case SYS_EXIT: return "exit";
-//         case SYS_UNAME: return "uname";
-//         case SYS_GETCWD: return "getcwd";
-//         case SYS_CHDIR: return "chdir";
-//         case SYS_GETUID: return "getuid";
-//         case SYS_GETGID: return "getgid";
-//         case SYS_GETEUID: return "geteuid";
-//         case SYS_GETEGID: return "getegid";
-//         case SYS_GETPPID: return "getppid";
-//         case SYS_ARCH_PRCTL: return "arch_prctl";
-//         case SYS_GETDENTS64: return "getdents64";
-//         case SYS_SET_TID_ADDRESS: return "set_tid_address";
-//         case SYS_CLOCK_GETTIME: return "clock_gettime";
-//         case SYS_EXIT_GROUP: return "exit_group";
-//         case SYS_OPENAT: return "openat";
-//         default: return "UNKNOWN";
-//     }
-// }
+static int64_t sys_socket_handler(int domain, int type, int protocol) {
+    (void)domain; (void)type; (void)protocol;
+    int pipefd[2];
+    if (pipe_create(pipefd) == 0) {
+        return pipefd[0];
+    }
+    return -EAFNOSUPPORT;
+}
+
+// ============================================================================
+// Master Syscall Dispatcher Table
+// ============================================================================
 
 void syscall_handler(void *regs_ptr) {
     syscall_regs_t *regs = (syscall_regs_t *)regs_ptr;
     uint64_t syscall_no = regs->rax;
     int64_t ret = -ENOSYS;
 
-    // === ЛОГИРОВАНИЕ В COM1 (QEMU stdio) ===
-    // serial_puts(COM1, "[STRACE] ");
-    // serial_puts(COM1, syscall_name(syscall_no));
-    // serial_puts(COM1, "(");
-    
-    // // Если сискол работает со строками путей (open, stat, chdir) — выводим строку:
-    // if (syscall_no == SYS_OPEN || syscall_no == SYS_STAT || syscall_no == SYS_CHDIR) {
-    //     serial_puts(COM1, "\"");
-    //     serial_puts(COM1, (const char *)regs->rdi);
-    //     serial_puts(COM1, "\"");
-    // } else if (syscall_no == SYS_OPENAT) {
-    //     serial_puts(COM1, "\"");
-    //     serial_puts(COM1, (const char *)regs->rsi);
-    //     serial_puts(COM1, "\"");
-    // } else {
-    //     char arg_buf[32];
-    //     itoa_hex(regs->rdi, arg_buf);
-    //     serial_puts(COM1, arg_buf);
-    // }
-    // serial_puts(COM1, ")\n");
-
-    // === ДИСПЕТЧЕРИЗАЦИЯ СИСКОЛОВ ===
     switch (syscall_no) {
         case SYS_READ:
             ret = sys_read_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
@@ -1108,37 +1245,72 @@ void syscall_handler(void *regs_ptr) {
         case SYS_FSTAT:
             ret = sys_fstat_handler((int)regs->rdi, (struct linux_stat *)regs->rsi);
             break;
-        case SYS_WRITEV:
-            ret = sys_writev_handler((int)regs->rdi, (const struct iovec *)regs->rsi, (int)regs->rdx);
-            break;
-        case SYS_GETCWD:
-            ret = sys_getcwd_handler((char *)regs->rdi, (size_t)regs->rsi);
+        case SYS_LSTAT:
+            ret = sys_stat_handler((const char *)regs->rdi, (struct linux_stat *)regs->rsi);
             break;
         case SYS_POLL:
             ret = sys_poll_handler((struct linux_pollfd *)regs->rdi, regs->rsi, (int)regs->rdx);
             break;
-        case SYS_GETEUID:
-        case SYS_GETEGID:
+        case SYS_LSEEK:
+            ret = sys_lseek_handler((int)regs->rdi, (int64_t)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_MMAP:
+            ret = sys_mmap_handler(regs->rdi, (size_t)regs->rsi, (int)regs->rdx, (int)regs->r10, (int)regs->r8, (int64_t)regs->r9);
+            break;
+        case SYS_MPROTECT:
+            ret = sys_mprotect_handler(regs->rdi, (size_t)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_MUNMAP:
+            ret = sys_munmap_handler(regs->rdi, (size_t)regs->rsi);
+            break;
+        case SYS_BRK:
+            ret = sys_brk_handler(regs->rdi);
+            break;
+        case SYS_RT_SIGACTION:
+            ret = sys_rt_sigaction_handler((int)regs->rdi, (const struct linux_sigaction *)regs->rsi, (struct linux_sigaction *)regs->rdx, (size_t)regs->r10);
+            break;
+        case SYS_RT_SIGPROCMASK:
+            ret = sys_rt_sigprocmask_handler((int)regs->rdi, (const uint64_t *)regs->rsi, (uint64_t *)regs->rdx, (size_t)regs->r10);
+            break;
+        case SYS_RT_SIGRETURN:
             ret = 0;
             break;
-        case SYS_FORK:
-        case SYS_VFORK:
-            ret = sys_fork_handler(regs);
+        case SYS_IOCTL:
+            ret = sys_ioctl_handler((int)regs->rdi, regs->rsi, (void *)regs->rdx);
             break;
-        case SYS_WAIT4:
-            ret = sys_wait4_handler((int)regs->rdi, (int *)regs->rsi, (int)regs->rdx);
+        case SYS_PREAD64:
+            ret = sys_pread64_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx, (int64_t)regs->r10);
             break;
-        case SYS_FCNTL:
-            ret = sys_fcntl_handler((int)regs->rdi, (int)regs->rsi, regs->rdx);
+        case SYS_PWRITE64:
+            ret = sys_pwrite64_handler((int)regs->rdi, (const void *)regs->rsi, (size_t)regs->rdx, (int64_t)regs->r10);
+            break;
+        case SYS_READV:
+            ret = sys_readv_handler((int)regs->rdi, (const struct iovec *)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_WRITEV:
+            ret = sys_writev_handler((int)regs->rdi, (const struct iovec *)regs->rsi, (int)regs->rdx);
             break;
         case SYS_ACCESS:
             ret = sys_access_handler((const char *)regs->rdi, (int)regs->rsi);
             break;
-        case SYS_READLINK:
-            ret = sys_readlink_handler((const char *)regs->rdi, (char *)regs->rsi, (size_t)regs->rdx);
+        case SYS_PIPE:
+            ret = sys_pipe2_handler((int *)regs->rdi, 0);
             break;
-        case SYS_EXECVE:
-            ret = sys_execve_handler((const char *)regs->rdi, (char *const *)regs->rsi, (char *const *)regs->rdx, regs);
+        case SYS_SELECT:
+        case SYS_PSELECT6:
+            ret = sys_poll_handler(NULL, 0, 0);
+            break;
+        case SYS_SCHED_YIELD:
+            sched_yield();
+            ret = 0;
+            break;
+        case SYS_MREMAP:
+            ret = sys_mremap_handler(regs->rdi, (size_t)regs->rsi, (size_t)regs->rdx, (int)regs->r10);
+            break;
+        case SYS_MSYNC:
+        case SYS_MINCORE:
+        case SYS_MADVISE:
+            ret = 0;
             break;
         case SYS_DUP:
             ret = sys_dup_handler((int)regs->rdi);
@@ -1146,103 +1318,178 @@ void syscall_handler(void *regs_ptr) {
         case SYS_DUP2:
             ret = sys_dup2_handler((int)regs->rdi, (int)regs->rsi);
             break;
-        case SYS_PIPE:
-            ret = sys_pipe_handler((int *)regs->rdi);
+        case SYS_NANOSLEEP:
+            ret = sys_nanosleep_handler((const struct linux_timespec *)regs->rdi, (struct linux_timespec *)regs->rsi);
             break;
-        case SYS_SETPGID:
-            ret = 0; // Успешно установили группу
+        case SYS_GETPID:
+            ret = current_task ? current_task->process->pid : 1;
             break;
-        case SYS_PSELECT6:
-            ret = sys_pselect6_handler((int)regs->rdi, (void *)regs->rsi, (void *)regs->rdx, (void *)regs->r10, (const struct linux_timespec *)regs->r8, (const void *)regs->r9);
+        case SYS_SOCKET:
+            ret = sys_socket_handler((int)regs->rdi, (int)regs->rsi, (int)regs->rdx);
             break;
-        case SYS_GETPGID:
-            ret = current_task ? current_task->id : 1;
+        case SYS_CONNECT:
+        case SYS_ACCEPT:
+        case SYS_BIND:
+        case SYS_LISTEN:
+            ret = -ECONNREFUSED;
             break;
-        case SYS_GETRLIMIT:
-            ret = sys_prlimit64_handler(0, (int)regs->rdi, NULL, (struct linux_rlimit *)regs->rsi);
+        case SYS_SENDTO:
+        case SYS_WRITE:
+            ret = sys_write_handler((int)regs->rdi, (const void *)regs->rsi, (size_t)regs->rdx);
             break;
-        case SYS_PRLIMIT64:
-            ret = sys_prlimit64_handler((int)regs->rdi, (int)regs->rsi, (const struct linux_rlimit *)regs->rdx, (struct linux_rlimit *)regs->r10);
+        case SYS_RECVFROM:
+            ret = sys_read_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
             break;
-        case SYS_CHDIR:
-            ret = sys_chdir_handler((const char *)regs->rdi);
+        case SYS_CLONE:
+            ret = sys_clone_handler(regs->rdi, regs->rsi, (int *)regs->rdx, (int *)regs->r10, regs->r8, regs);
+            break;
+        case SYS_FORK:
+        case SYS_VFORK:
+            ret = sys_clone_handler(0, 0, NULL, NULL, 0, regs);
+            break;
+        case SYS_EXECVE:
+            ret = sys_execve_handler((const char *)regs->rdi, (char *const *)regs->rsi, (char *const *)regs->rdx, regs);
             break;
         case SYS_EXIT:
         case SYS_EXIT_GROUP:
             ret = sys_exit_handler((int)regs->rdi);
             break;
-        case SYS_BRK:
-            ret = sys_brk_handler(regs->rdi);
+        case SYS_WAIT4:
+            ret = sys_wait4_handler((int)regs->rdi, (int *)regs->rsi, (int)regs->rdx);
             break;
-        case SYS_MMAP:
-            ret = sys_mmap_handler(regs->rdi, (size_t)regs->rsi, (int)regs->rdx, (int)regs->r10, (int)regs->r8, (int64_t)regs->r9);
-            break;
-        case SYS_MUNMAP:
-            ret = sys_munmap_handler(regs->rdi, (size_t)regs->rsi);
-            break;
-        case SYS_MPROTECT:
-            ret = sys_mprotect_handler(regs->rdi, (size_t)regs->rsi, (int)regs->rdx);
-            break;
-        case SYS_RT_SIGACTION:
-            ret = sys_rt_sigaction_handler((int)regs->rdi, (const void *)regs->rsi, (void *)regs->rdx, (size_t)regs->r10);
-            break;
-        case SYS_RT_SIGPROCMASK:
-            ret = 0;
-            break;
-        case SYS_SCHED_YIELD:
-            sched_yield();
-            ret = 0;
-            break;
-        case SYS_NANOSLEEP:
-            ret = sys_nanosleep_handler((const struct linux_timespec *)regs->rdi, (struct linux_timespec *)regs->rsi);
-            break;
-        case SYS_ARCH_PRCTL:
-            ret = sys_arch_prctl_handler((int)regs->rdi, regs->rsi);
-            break;
+        case SYS_KILL:
         case SYS_TKILL:
         case SYS_TGKILL:
-            ret = 0;
-            break;
-        case SYS_GETDENTS64:
-            ret = sys_getdents64_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
-            break;
-        case SYS_GETPID:
-            ret = current_task ? current_task->id : 1;
-            break;
-        case SYS_GETPPID:
-            ret = 1;
-            break;
-        case SYS_GETUID:
-        case SYS_GETGID:
-            ret = 0;
+            ret = sys_kill_handler((int)regs->rdi, (int)regs->rsi);
             break;
         case SYS_UNAME:
             ret = sys_uname_handler((struct linux_utsname *)regs->rdi);
             break;
+        case SYS_FCNTL:
+            ret = sys_fcntl_handler((int)regs->rdi, (int)regs->rsi, regs->rdx);
+            break;
+        case SYS_TRUNCATE:
+            ret = sys_truncate_handler((const char *)regs->rdi, (int64_t)regs->rsi);
+            break;
+        case SYS_FTRUNCATE:
+            ret = sys_ftruncate_handler((int)regs->rdi, (int64_t)regs->rsi);
+            break;
+        case SYS_GETCWD:
+            ret = sys_getcwd_handler((char *)regs->rdi, (size_t)regs->rsi);
+            break;
+        case SYS_CHDIR:
+            ret = sys_chdir_handler((const char *)regs->rdi);
+            break;
+        case SYS_RENAME:
+            ret = sys_renameat_handler(AT_FDCWD, (const char *)regs->rdi, AT_FDCWD, (const char *)regs->rsi);
+            break;
+        case SYS_MKDIR:
+            ret = sys_mkdirat_handler(AT_FDCWD, (const char *)regs->rdi, (int)regs->rsi);
+            break;
+        case SYS_RMDIR:
+        case SYS_UNLINK:
+            ret = sys_unlinkat_handler(AT_FDCWD, (const char *)regs->rdi, 0);
+            break;
+        case SYS_READLINK:
+            ret = -EINVAL;
+            break;
+        case SYS_CHMOD:
+            ret = sys_chmod_handler((const char *)regs->rdi, (int)regs->rsi);
+            break;
+        case SYS_FCHMOD:
+            ret = 0;
+            break;
+        case SYS_CHOWN:
+            ret = sys_chown_handler((const char *)regs->rdi, (int)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_FCHOWN:
+            ret = 0;
+            break;
+        case SYS_UMASK:
+            ret = sys_umask_handler((int)regs->rdi);
+            break;
+        case SYS_GETTIMEOFDAY:
+            ret = sys_gettimeofday_handler((struct linux_timeval *)regs->rdi, (struct linux_timezone *)regs->rsi);
+            break;
+        case SYS_GETRLIMIT:
+            ret = sys_prlimit64_handler(0, (int)regs->rdi, NULL, (struct linux_rlimit *)regs->rsi);
+            break;
+        case SYS_GETRUSAGE:
+            ret = sys_getrusage_handler((int)regs->rdi, (struct rusage *)regs->rsi);
+            break;
+        case SYS_SYSINFO:
+            ret = sys_sysinfo_handler((equant_sysinfo_t *)regs->rdi);
+            break;
+        case SYS_TIMES:
+            ret = sys_times_handler((struct tms *)regs->rdi);
+            break;
+        case SYS_GETUID:
+        case SYS_GETGID:
+        case SYS_GETEUID:
+        case SYS_GETEGID:
+            ret = 0;
+            break;
+        case SYS_SETPGID:
+            if (current_task && current_task->process) {
+                current_task->process->pgid = regs->rsi ? regs->rsi : current_task->process->pid;
+            }
+            ret = 0;
+            break;
+        case SYS_GETPPID:
+            ret = current_task ? current_task->process->parent_pid : 1;
+            break;
+        case SYS_GETPGID:
+            ret = current_task ? current_task->process->pgid : 1;
+            break;
+        case SYS_ARCH_PRCTL:
+            ret = sys_arch_prctl_handler((int)regs->rdi, regs->rsi);
+            break;
+        case SYS_GETTID:
+            ret = current_task ? current_task->id : 1;
+            break;
+        case SYS_FUTEX:
+            ret = sys_futex_handler((uint32_t *)regs->rdi, (int)regs->rsi, (uint32_t)regs->rdx, (const struct linux_timespec *)regs->r10, (uint32_t *)regs->r8, (uint32_t)regs->r9);
+            break;
+        case SYS_GETDENTS64:
+            ret = sys_getdents64_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
+            break;
         case SYS_SET_TID_ADDRESS:
+            if (current_task && current_task->process) {
+                current_task->process->clear_child_tid = regs->rdi;
+            }
             ret = current_task ? current_task->id : 1;
             break;
         case SYS_CLOCK_GETTIME:
             ret = sys_clock_gettime_handler((int)regs->rdi, (struct linux_timespec *)regs->rsi);
             break;
-        case SYS_FUTEX:
-            ret = 0;
-            break;
         case SYS_OPENAT:
             ret = sys_openat_handler((int)regs->rdi, (const char *)regs->rsi, (int)regs->rdx, (int)regs->r10);
             break;
-        case SYS_IOCTL:
-            ret = sys_ioctl_handler((int)regs->rdi, regs->rsi, (void *)regs->rdx);
+        case SYS_MKDIRAT:
+            ret = sys_mkdirat_handler((int)regs->rdi, (const char *)regs->rsi, (int)regs->rdx);
             break;
-        case SYS_SYSINFO:
-            ret = sys_sysinfo_handler((equant_sysinfo_t *)regs->rdi);
+        case SYS_NEWFSTATAT:
+            ret = sys_stat_handler((const char *)regs->rsi, (struct linux_stat *)regs->rdx);
+            break;
+        case SYS_UNLINKAT:
+            ret = sys_unlinkat_handler((int)regs->rdi, (const char *)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_RENAMEAT:
+            ret = sys_renameat_handler((int)regs->rdi, (const char *)regs->rsi, (int)regs->rdx, (const char *)regs->r10);
+            break;
+        case SYS_FACCESSAT:
+            ret = sys_access_handler((const char *)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_DUP3:
+            ret = sys_dup3_handler((int)regs->rdi, (int)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_PIPE2:
+            ret = sys_pipe2_handler((int *)regs->rdi, (int)regs->rsi);
+            break;
+        case SYS_PRLIMIT64:
+            ret = sys_prlimit64_handler((int)regs->rdi, (int)regs->rsi, (const struct linux_rlimit *)regs->rdx, (struct linux_rlimit *)regs->r10);
             break;
         default:
-            serial_puts(COM1, "[KERNEL] Unknown Syscall: 0x");
-            char buf[32];
-            itoa_hex(syscall_no, buf);
-            serial_puts(COM1, buf);
-            serial_puts(COM1, "\n");
             ret = -ENOSYS;
             break;
     }
@@ -1251,14 +1498,14 @@ void syscall_handler(void *regs_ptr) {
 }
 
 void init_syscalls(void) {
-    uint64_t efer = read_msr(IA32_EFER);
-    write_msr(IA32_EFER, efer | 1);
+    uint64_t efer = read_msr(0xC0000080);
+    write_msr(0xC0000080, efer | 1);
 
     uint64_t star = ((uint64_t)0x10 << 48) | ((uint64_t)0x08 << 32);
-    write_msr(IA32_STAR, star);
+    write_msr(0xC0000081, star);
 
-    write_msr(IA32_LSTAR, (uint64_t)syscall_entry_asm);
-    write_msr(IA32_FMASK, 0x200);
+    write_msr(0xC0000082, (uint64_t)syscall_entry_asm);
+    write_msr(0xC0000084, 0x200);
 
     serial_puts(COM1, "[KERNEL] Native x86_64 Hardware 'syscall' MSRs Initialized.\n");
 }
