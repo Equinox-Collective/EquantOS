@@ -9,7 +9,7 @@
 
 task_t *current_task = NULL;
 static task_t *task_list = NULL;
-static uint64_t next_pid = 1;
+uint64_t next_pid = 1;
 
 void task_init_fpu(task_t *task) {
     memset(task->fpu_state, 0, sizeof(task->fpu_state));

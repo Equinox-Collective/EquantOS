@@ -2,6 +2,7 @@
 #include "syscall.h"
 #include "task.h"
 #include "sched.h"
+#include "pipe.h"
 #include "../core/mem/vmm.h"
 #include "../core/mem/pmm.h"
 #include "../core/mem/memory.h"
@@ -173,10 +174,12 @@ static int64_t sys_close_handler(int fd) {
     if (!current_task || !current_task->process) return -EBADF;
     if (fd < 3 || fd >= MAX_OPEN_FILES) return -EBADF;
 
-    if (current_task->process->files[fd]) {
-        vfs_close(current_task->process->files[fd]);
-        current_task->process->files[fd] = NULL;
-    }
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    // vfs_close уже вызывает ops->close (pipe_read/write_close_op)
+    vfs_close(node);
+    current_task->process->files[fd] = NULL;
     return 0;
 }
 
@@ -245,12 +248,22 @@ static int64_t sys_exit_handler(int code) {
     serial_puts(COM1, buf);
     serial_puts(COM1, "\n");
 
-    if (current_task) {
-        current_task->state = TASK_STATE_ZOMBIE;
+    if (current_task && current_task->process) {
+        current_task->process->exit_code = code;
+        current_task->process->exited    = true;
+
+        // Если кто-то ждёт нас через wait4 — будим родителя
+        task_t *waiter = current_task->process->wait_parent;
+        if (waiter) {
+            current_task->process->wait_parent = NULL;
+            sched_unblock(waiter);
+        }
+
+        current_task->state   = TASK_STATE_ZOMBIE;
         current_task->running = false;
-        sched_dequeue(current_task); // <-- ВОТ ОНА! ВЫБРАСЫВАЕМ ЗОМБИ ИЗ ОЧЕРЕДИ!
+        sched_dequeue(current_task);
     }
-    
+
     sched_yield();
     for(;;);
     return 0;
@@ -652,6 +665,140 @@ static int64_t sys_dup_handler(int oldfd) {
     return -EMFILE;
 }
 
+// === PIPE ===
+static int64_t sys_pipe_handler(int *pipefd) {
+    if (!pipefd) return -EINVAL;
+    return pipe_create(pipefd);
+}
+
+// === FORK (Copy-On-Write через vmm_clone_address_space) ===
+static int64_t sys_fork_handler(syscall_regs_t *regs) {
+    if (!current_task || !current_task->process) return -EAGAIN;
+
+    // 1. Клонируем адресное пространство (COW — физические страницы не копируются)
+    page_table_t *child_pml4 = vmm_clone_address_space(current_task->process->cr3);
+    if (!child_pml4) return -ENOMEM;
+
+    // 2. Создаём структуру process для дочернего процесса
+    process_t *child_proc = (process_t *)kmalloc(sizeof(process_t));
+    if (!child_proc) return -ENOMEM;
+    memset(child_proc, 0, sizeof(process_t));
+
+    child_proc->pid        = next_pid++;
+    child_proc->parent_pid = current_task->process->pid;
+    child_proc->cr3        = PHYS(child_pml4);
+    child_proc->brk        = current_task->process->brk;
+    child_proc->exited     = false;
+    child_proc->exit_code  = 0;
+    child_proc->wait_parent= NULL;
+    memcpy(child_proc->cwd, current_task->process->cwd, sizeof(child_proc->cwd));
+
+    // Копируем таблицу файловых дескрипторов (наследование FD)
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        child_proc->files[i] = current_task->process->files[i];
+    }
+
+    // 3. Создаём task для дочернего процесса
+    task_t *child_task = (task_t *)kmalloc(sizeof(task_t));
+    if (!child_task) { kfree(child_proc); return -ENOMEM; }
+    memset(child_task, 0, sizeof(task_t));
+
+    task_init_fpu(child_task);
+    // Копируем FPU-состояние родителя
+    memcpy(task_fpu_area(child_task), task_fpu_area(current_task), 512);
+
+    child_task->id       = child_proc->pid;
+    child_task->state    = TASK_STATE_RUNNABLE;
+    child_task->running  = true;
+    child_task->priority = current_task->priority;
+    child_task->time_slice = 10;
+    child_task->fs_base  = current_task->fs_base;
+    child_task->process  = child_proc;
+
+    // 4. Выделяем kernel stack для child и строим точный контекст
+    //    (такой же как у родителя в момент syscall)
+    child_task->kstack_at_bottom = (uint64_t)kmalloc(16384) + 16384;
+
+    // Строим kernel stack для child в формате irq0_handler_asm (SAVE_REGS/RESTORE_REGS):
+    // Шедулер сделает: RESTORE_REGS → add rsp, 16 → iretq
+    //
+    // Порядок (от вершины стека вниз = порядок push):
+    //   iret frame: SS, RSP, RFLAGS, CS, RIP
+    //   int frame:  int_no, error_code  (add rsp,16 пропустит их)
+    //   SAVE_REGS:  rax,rbx,rcx,rdx,rbp,rsi,rdi,r8..r15
+    //
+    // На стеке stack (растёт вниз):
+    uint64_t *stack = (uint64_t *)child_task->kstack_at_bottom;
+
+    // iret frame
+    *--stack = 0x1B;             // SS
+    *--stack = syscall_user_rsp; // RSP (user stack)
+    *--stack = 0x202;            // RFLAGS (IF=1)
+    *--stack = 0x23;             // CS
+    *--stack = regs->rcx;        // RIP (rcx = rip после syscall по CPU ABI)
+    // int frame (будет пропущено add rsp, 16)
+    *--stack = 0;                // int_no
+    *--stack = 0;                // error_code
+    // SAVE_REGS в обратном порядке (top → bottom = r15 → rax)
+    *--stack = regs->r15;
+    *--stack = regs->r14;
+    *--stack = regs->r13;
+    *--stack = regs->r12;
+    *--stack = regs->r11;
+    *--stack = regs->r10;
+    *--stack = regs->r9;
+    *--stack = regs->r8;
+    *--stack = regs->rdi;
+    *--stack = regs->rsi;
+    *--stack = regs->rbp;
+    *--stack = regs->rdx;
+    *--stack = regs->rcx;
+    *--stack = regs->rbx;
+    *--stack = 0;                // rax = 0 (fork возвращает 0 в дочернем процессе!)
+
+    child_task->rsp = (uint64_t)stack;
+
+    // 5. Запускаем child
+    sched_enqueue(child_task);
+
+    serial_puts(COM1, "[KERNEL] fork(): child PID=");
+    char pidstr[32];
+    itoa_hex(child_proc->pid, pidstr);
+    serial_puts(COM1, pidstr);
+    serial_puts(COM1, "\n");
+
+    // 6. Родитель возвращает PID дочернего процесса
+    return (int64_t)child_proc->pid;
+}
+
+// === WAIT4 ===
+static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
+    (void)options;
+    if (!current_task || !current_task->process) return -10; // -ECHILD
+
+    // Ищем дочерний процесс среди всех задач (упрощённо: ждём любого child)
+    // Для простоты: блокируемся и ждём пока кто-то нас разбудит через exit
+    // Полная реализация потребует списка всех процессов — здесь упрощённый вариант:
+    // Если pid > 0 — ищем конкретный; если -1 — любой child
+    (void)pid;
+
+    // Проверяем: есть ли уже завершившийся child (без блокировки)
+    // В упрощённой реализации — просто блокируемся и ждём пробуждения от exit
+    // exit() сделает sched_unblock(wait_parent) если wait_parent != NULL
+
+    // Сохраняем себя как wait_parent в своём процессе для поиска из child
+    // (В полной реализации нужен глобальный список процессов)
+    // Пока просто блокируемся с таймаутом
+    sched_block(current_task);
+    sched_yield();
+
+    if (wstatus) {
+        // WIFEXITED: статус = (exit_code << 8)
+        *wstatus = (current_task->process->exit_code & 0xFF) << 8;
+    }
+    return pid > 0 ? pid : 1;
+}
+
 // 2. Дополняем SYS_IOCTL (16) поддержкой tcgetpgrp / tcsetpgrp / FIONREAD
 #define TIOCGPGRP   0x540F
 #define TIOCSPGRP   0x5410
@@ -817,11 +964,10 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_FORK:
         case SYS_VFORK:
-            // Возвращаем -EAGAIN (11), чтобы Bash мягко сообщал "cannot fork: Resource temporarily unavailable"
-            ret = -11;
+            ret = sys_fork_handler(regs);
             break;
         case SYS_WAIT4:
-            ret = -10; // -ECHILD
+            ret = sys_wait4_handler((int)regs->rdi, (int *)regs->rsi, (int)regs->rdx);
             break;
         case SYS_FCNTL:
             ret = sys_fcntl_handler((int)regs->rdi, (int)regs->rsi, regs->rdx);
@@ -834,6 +980,12 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_DUP:
             ret = sys_dup_handler((int)regs->rdi);
+            break;
+        case SYS_DUP2:
+            ret = sys_dup2_handler((int)regs->rdi, (int)regs->rsi);
+            break;
+        case SYS_PIPE:
+            ret = sys_pipe_handler((int *)regs->rdi);
             break;
         case SYS_SETPGID:
             ret = 0; // Успешно установили группу

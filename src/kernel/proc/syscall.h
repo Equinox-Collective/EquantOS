@@ -13,6 +13,7 @@
 #define ENOTDIR             20
 #define EINVAL              22
 #define EMFILE              24
+#define EPIPE               32
 #define ERANGE              34
 #define ENOSYS              38
 
@@ -31,6 +32,7 @@
 #define SYS_RT_SIGACTION    13
 #define SYS_RT_SIGPROCMASK  14
 #define SYS_IOCTL           16
+#define SYS_PIPE            22
 #define SYS_WRITEV          20
 #define SYS_ACCESS          21
 #define SYS_SCHED_YIELD     24

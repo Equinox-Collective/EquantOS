@@ -25,10 +25,16 @@ typedef enum {
 
 typedef struct process {
     uint64_t pid;
+    uint64_t parent_pid;        // PID родителя (для wait4)
     uint64_t cr3;
     uint64_t brk;
     char cwd[256];
     struct vfs_node *files[MAX_OPEN_FILES];
+
+    // Для wait4: статус завершения
+    int      exit_code;         // Код выхода из sys_exit
+    bool     exited;            // true когда процесс вызвал exit()
+    struct task *wait_parent;   // Задача родителя, ждущая нас через wait4
 } process_t;
 
 typedef struct task {
@@ -60,6 +66,7 @@ typedef struct task {
 #define task_fpu_area(t) ((void*)(((uintptr_t)((t)->fpu_state) + 15) & ~15ULL))
 
 extern task_t *current_task;
+extern uint64_t next_pid; // Глобальный счётчик PID (используется fork)
 
 void task_init(void);
 void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2);
