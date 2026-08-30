@@ -119,7 +119,7 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     // 1. Копируем строки ARGV на стек
     uint64_t argv_u[17];
     for (int i = 0; i < argc; i++) {
-        const char *s = argv[i] ? argv[i] : "";
+        const char *s = (argv && argv[i]) ? argv[i] : "";
         size_t len = strlen(s) + 1;
         sp -= len;
         memcpy(topk + (PAGE_SIZE - (stack_top - sp)), s, len);

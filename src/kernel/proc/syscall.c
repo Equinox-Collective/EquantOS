@@ -818,12 +818,11 @@ static int64_t sys_fork_handler(syscall_regs_t *regs) {
 
 // === SYS_EXECVE (59) ===
 static int64_t sys_execve_handler(const char *filename, char *const argv[], char *const envp[], syscall_regs_t *regs) {
-    if (!filename) return -EINVAL;
+    if (!filename || !current_task || !current_task->process) return -EINVAL;
 
     char resolved[256];
     resolve_user_path(filename, resolved, sizeof(resolved));
 
-    // 1. Поиск файла
     vfs_node_t *file = vfs_open(resolved, 0);
     if (!file) {
         char alt[256];
@@ -841,7 +840,6 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         return -ENOENT;
     }
 
-    // 2. Читаем ELF
     uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
     if (!elf_buf) return -ENOMEM;
 
@@ -850,30 +848,70 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         return -EIO;
     }
 
-    // 3. Считаем argc и нормализуем argv[0] для BusyBox
+    // Копируем аргументы в память ядра перед заменой адресного пространства
     int argc = 0;
-    char *exec_argv[16];
+    char k_argv_storage[16][128];
+    char *exec_argv[17];
+
     if (argv) {
-        while (argv[argc] && argc < 15) {
-            exec_argv[argc] = argv[argc];
+        while (argv[argc] && argc < 16) {
+            // Копируем строку аргумента из user space
+            strncpy(k_argv_storage[argc], argv[argc], 127);
+            k_argv_storage[argc][127] = '\0';
+            exec_argv[argc] = k_argv_storage[argc];
             argc++;
         }
     }
     exec_argv[argc] = NULL;
 
-    // ЕСЛИ ЗАПУСКАЕТСЯ BUSYBOX — делаем argv[0] = "busybox"
+    // ВАЖНО: Если запускается busybox с параметрами (например /busybox.elf ls /)
+    // то argv[0] должен быть "busybox", а argv[1] остается "ls"
     if (strstr(resolved, "busybox") && argc > 0) {
         exec_argv[0] = "busybox";
     }
 
-    // 4. Загружаем и запускаем новый процесс
-    bool ok = elf_load_args(elf_buf, file->length, argc, exec_argv);
+    uint64_t new_entry = 0;
+    uint64_t new_rsp = 0;
+    uint64_t new_cr3 = 0;
+
+    bool ok = elf_execve_replace(elf_buf, file->length, argc, exec_argv, &new_entry, &new_rsp, &new_cr3);
     kfree(elf_buf);
 
     if (!ok) return -ENOEXEC;
 
-    sys_exit_handler(0);
-    return 0;
+    // 1. Освобождаем старое адресное пространство
+    uint64_t old_cr3 = current_task->process->cr3;
+    current_task->process->cr3 = new_cr3;
+
+    // 2. Переключаем процессор на новое адресное пространство
+    __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
+    vmm_destroy_address_space(old_cr3);
+
+    // 3. Сбрасываем контекст регистров для прыжка в точку входа нового ELF
+    regs->rip = new_entry;
+    regs->rsp = new_rsp;
+    regs->cs = 0x23;
+    regs->ss = 0x1B;
+    regs->rflags = 0x202;
+
+    // Сбрасываем регистры общего назначения
+    regs->rax = 0;
+    regs->rbx = 0;
+    regs->rcx = 0;
+    regs->rdx = 0;
+    regs->rsi = 0;
+    regs->rdi = 0;
+    regs->rbp = 0;
+    regs->r8  = 0;
+    regs->r9  = 0;
+    regs->r10 = 0;
+    regs->r11 = 0;
+    regs->r12 = 0;
+    regs->r13 = 0;
+    regs->r14 = 0;
+    regs->r15 = 0;
+
+    return 0; // syscall_handler вернет управление через iretq/sysretq прямо в точку входа новой программы!
 }
 
 // === WAIT4 ===
