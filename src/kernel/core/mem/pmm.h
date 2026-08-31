@@ -8,6 +8,7 @@
 
 #define PAGE_SIZE 4096ULL
 #define PMM_MAX_ORDER 11 // Orders 0..10 (Up to 4MB continuous blocks)
+#define PMM_RESERVE_PAGES 256
 
 // Backward compatibility globals for shell.c & main.c
 extern uint64_t free_memory;

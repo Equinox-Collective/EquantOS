@@ -110,7 +110,6 @@ page_table_t *vmm_clone_address_space(uint64_t parent_cr3_phys) {
 
     page_table_t *parent = (page_table_t *)VIRT(parent_cr3_phys);
 
-    // Iterate through User-Space lower half (PML4 0..255)
     for (int i = 0; i < 256; i++) {
         if (!(parent[i] & PTE_PRESENT)) continue;
         page_table_t *pdpt = (page_table_t *)VIRT(parent[i] & ~0xFFFULL);
@@ -132,17 +131,13 @@ page_table_t *vmm_clone_address_space(uint64_t parent_cr3_phys) {
                     uint64_t parent_phys = pt[l] & ~0xFFFULL;
                     uint64_t flags       = pt[l] & 0xFFFULL;
 
-                    // Allocate a separate, independent physical page for the child
                     void *child_phys = pmm_alloc();
                     if (!child_phys) {
                         vmm_destroy_address_space(PHYS(child));
                         return NULL;
                     }
 
-                    // Copy exact 4KB memory contents from parent to child
                     memcpy((void *)VIRT((uint64_t)child_phys), (void *)VIRT(parent_phys), PAGE_SIZE);
-
-                    // Map child to its own private physical page
                     vmm_map(child, virt, (uint64_t)child_phys, flags);
                 }
             }

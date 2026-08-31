@@ -802,18 +802,28 @@ static int64_t sys_exit_handler(int code) {
 static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent_tid, int *child_tid, uint64_t tls, syscall_regs_t *regs) {
     if (!current_task || !current_task->process) return -EAGAIN;
 
+    // Fail-fast Fork Guard: Prevent Fork Bombs from starving Kernel RAM
+    if (pmm_get_free_pages() < PMM_RESERVE_PAGES) {
+        return -EAGAIN; // Standard Linux behavior for fork bombs
+    }
+
     page_table_t *child_pml4 = NULL;
     if (flags & CLONE_VM) {
         child_pml4 = (page_table_t *)VIRT(current_task->process->cr3);
     } else {
         child_pml4 = vmm_clone_address_space(current_task->process->cr3);
-        if (!child_pml4) return -ENOMEM;
+        if (!child_pml4) {
+            return -ENOMEM;
+        }
     }
 
     process_t *child_proc = current_task->process;
     if (!(flags & CLONE_THREAD)) {
         child_proc = (process_t *)kmalloc(sizeof(process_t));
-        if (!child_proc) return -ENOMEM;
+        if (!child_proc) {
+            if (!(flags & CLONE_VM)) vmm_destroy_address_space(PHYS(child_pml4));
+            return -ENOMEM;
+        }
         memset(child_proc, 0, sizeof(process_t));
         child_proc->pid = next_pid++;
         child_proc->parent_pid = current_task->process->pid;
@@ -831,7 +841,11 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
     }
 
     task_t *child_task = (task_t *)kmalloc(sizeof(task_t));
-    if (!child_task) return -ENOMEM;
+    if (!child_task) {
+        if (!(flags & CLONE_THREAD)) kfree(child_proc);
+        if (!(flags & CLONE_VM)) vmm_destroy_address_space(PHYS(child_pml4));
+        return -ENOMEM;
+    }
     memset(child_task, 0, sizeof(task_t));
 
     task_init_fpu(child_task);
@@ -846,14 +860,20 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
     child_task->process = child_proc;
 
     child_task->kstack_at_bottom = (uint64_t)kmalloc(16384) + 16384;
+    if (!child_task->kstack_at_bottom) {
+        kfree(child_task);
+        if (!(flags & CLONE_THREAD)) kfree(child_proc);
+        if (!(flags & CLONE_VM)) vmm_destroy_address_space(PHYS(child_pml4));
+        return -ENOMEM;
+    }
+
     uint64_t *stack = (uint64_t *)child_task->kstack_at_bottom;
 
-    // Build iretq stack frame:
     *--stack = 0x1B;                                // SS
     *--stack = stack_top ? stack_top : regs->rsp;   // RSP
-    *--stack = 0x202;                               // Clean User RFLAGS (IF=1)
+    *--stack = 0x202;                               // RFLAGS (IF=1)
     *--stack = 0x23;                                // CS
-    *--stack = (regs->rcx != 0) ? regs->rcx : regs->rip; // Userland RIP from RCX
+    *--stack = (regs->rcx != 0) ? regs->rcx : regs->rip; // RIP
 
     *--stack = 0; // int_no
     *--stack = 0; // error_code
@@ -871,19 +891,13 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
     *--stack = regs->rdx;
     *--stack = regs->rcx;
     *--stack = regs->rbx;
-    *--stack = 0; // RAX = 0 in child (fork return value)
+    *--stack = 0; // RAX = 0 in child
 
     child_task->rsp = (uint64_t)stack;
 
-    if ((flags & CLONE_PARENT_SETTID) && parent_tid) {
-        *parent_tid = (int)child_task->id;
-    }
-    if ((flags & CLONE_CHILD_SETTID) && child_tid) {
-        *child_tid = (int)child_task->id;
-    }
-    if (flags & CLONE_CHILD_CLEARTID) {
-        child_proc->clear_child_tid = (uint64_t)child_tid;
-    }
+    if ((flags & CLONE_PARENT_SETTID) && parent_tid) *parent_tid = (int)child_task->id;
+    if ((flags & CLONE_CHILD_SETTID) && child_tid) *child_tid = (int)child_task->id;
+    if (flags & CLONE_CHILD_CLEARTID) child_proc->clear_child_tid = (uint64_t)child_tid;
 
     extern task_t *task_list;
     if (task_list) {

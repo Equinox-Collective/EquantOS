@@ -4,6 +4,9 @@
 #include "../panic.h"
 #include "../../../limine.h"
 #include "string.h"
+#include "../../proc/task.h"
+#include "../../drivers/serial/serial.h"
+#include "../../proc/sched.h"
 #include "stdio.h"
 
 extern uint64_t hhdm_offset;
@@ -23,6 +26,63 @@ static volatile struct limine_memmap_request memmap_request = {
     .revision = 0,
     .response = NULL
 };
+
+uint64_t pmm_get_free_pages(void) {
+    return free_phys_pages;
+}
+
+// OOM Killer Subsystem: Selects and terminates the rogue process with highest footprint
+void oom_killer(void) {
+    serial_puts(COM1, "\n[KERNEL OOM] Physical memory exhausted! Invoking OOM Killer...\n");
+
+    extern task_t *task_list;
+    if (!task_list) return;
+
+    task_t *victim = NULL;
+    uint64_t max_score = 0;
+
+    task_t *curr = task_list;
+    do {
+        // Do not kill kernel task (PID 1)
+        if (curr->process && curr->process->pid > 1 && curr->state != TASK_STATE_ZOMBIE) {
+            uint64_t score = 1;
+            // Higher score for processes with child tasks (fork bombs)
+            task_t *chk = task_list;
+            do {
+                if (chk->process && chk->process->parent_pid == curr->process->pid) {
+                    score += 10;
+                }
+                chk = chk->next;
+            } while (chk && chk != task_list);
+
+            if (score > max_score) {
+                max_score = score;
+                victim = curr;
+            }
+        }
+        curr = curr->next;
+    } while (curr && curr != task_list);
+
+    if (victim && victim->process) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "[KERNEL OOM] Killing rogue process PID %llu (Score: %llu)\n", 
+                 victim->process->pid, max_score);
+        serial_puts(COM1, msg);
+
+        victim->process->exit_code = 137; // 128 + SIGKILL
+        victim->process->exited = true;
+        victim->state = TASK_STATE_ZOMBIE;
+        victim->running = false;
+        sched_dequeue(victim);
+
+        // Reclaim address space
+        if (victim->process->cr3 != 0) {
+            vmm_destroy_address_space(victim->process->cr3);
+            victim->process->cr3 = 0;
+        }
+    }
+}
+
 
 static inline uint64_t page_to_pfn(pmm_page_t *page) {
     return (uint64_t)(page - page_array);
@@ -137,7 +197,6 @@ void *pmm_alloc_pages(size_t order) {
             list_remove(&free_areas[current_order].freelist, page);
             free_areas[current_order].free_count--;
 
-            // Split larger blocks down to requested order
             while (current_order > order) {
                 current_order--;
                 uint64_t buddy_pfn = page_to_pfn(page) ^ (1ULL << current_order);
@@ -157,7 +216,9 @@ void *pmm_alloc_pages(size_t order) {
         }
     }
 
-    return NULL; // Out of Physical Memory
+    // Trigger OOM Killer if normal allocation fails
+    oom_killer();
+    return NULL;
 }
 
 void pmm_free_pages(void *ptr, size_t order) {
