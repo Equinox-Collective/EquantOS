@@ -208,6 +208,110 @@ static int64_t ext2_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8
     return bytes_read;
 }
 
+// src/kernel/fs/ext2.c - Indirect & Doubly-Indirect Block Ext2 Support
+
+static uint32_t ext2_get_or_alloc_file_block(uint32_t inode_num, ext2_inode_t *inode, uint32_t block_idx) {
+    uint32_t bs = ext2_vol.block_size;
+    uint32_t pointers_per_block = bs / 4; // 256 for 1KB block
+
+    // 1. Direct Blocks (0 .. 11)
+    if (block_idx < 12) {
+        if (inode->i_block[block_idx] == 0) {
+            uint32_t blk = ext2_alloc_block();
+            if (blk == 0) return 0;
+            inode->i_block[block_idx] = blk;
+            ext2_write_inode(inode_num, inode);
+        }
+        return inode->i_block[block_idx];
+    }
+
+    // 2. Singly-Indirect Block (12 .. 267)
+    block_idx -= 12;
+    if (block_idx < pointers_per_block) {
+        uint32_t indir_blk = inode->i_block[12];
+        if (indir_blk == 0) {
+            indir_blk = ext2_alloc_block();
+            if (indir_blk == 0) return 0;
+            inode->i_block[12] = indir_blk;
+            ext2_write_inode(inode_num, inode);
+
+            uint8_t *z = (uint8_t *)kzalloc(bs);
+            if (z) {
+                ext2_vol.dev.write(ext2_block_to_lba(indir_blk), ext2_vol.sectors_per_block, z);
+                kfree(z);
+            }
+        }
+
+        uint32_t *table = (uint32_t *)kmalloc(bs);
+        if (!table) return 0;
+        ext2_vol.dev.read(ext2_block_to_lba(indir_blk), ext2_vol.sectors_per_block, table);
+
+        if (table[block_idx] == 0) {
+            uint32_t data_blk = ext2_alloc_block();
+            if (data_blk == 0) { kfree(table); return 0; }
+            table[block_idx] = data_blk;
+            ext2_vol.dev.write(ext2_block_to_lba(indir_blk), ext2_vol.sectors_per_block, table);
+        }
+
+        uint32_t res_blk = table[block_idx];
+        kfree(table);
+        return res_blk;
+    }
+
+    // 3. Doubly-Indirect Block (268+)
+    block_idx -= pointers_per_block;
+    uint32_t d_indir_blk = inode->i_block[13];
+    if (d_indir_blk == 0) {
+        d_indir_blk = ext2_alloc_block();
+        if (d_indir_blk == 0) return 0;
+        inode->i_block[13] = d_indir_blk;
+        ext2_write_inode(inode_num, inode);
+
+        uint8_t *z = (uint8_t *)kzalloc(bs);
+        if (z) {
+            ext2_vol.dev.write(ext2_block_to_lba(d_indir_blk), ext2_vol.sectors_per_block, z);
+            kfree(z);
+        }
+    }
+
+    uint32_t d1_idx = block_idx / pointers_per_block;
+    uint32_t d2_idx = block_idx % pointers_per_block;
+
+    uint32_t *d1_table = (uint32_t *)kmalloc(bs);
+    if (!d1_table) return 0;
+    ext2_vol.dev.read(ext2_block_to_lba(d_indir_blk), ext2_vol.sectors_per_block, d1_table);
+
+    uint32_t d2_blk = d1_table[d1_idx];
+    if (d2_blk == 0) {
+        d2_blk = ext2_alloc_block();
+        if (d2_blk == 0) { kfree(d1_table); return 0; }
+        d1_table[d1_idx] = d2_blk;
+        ext2_vol.dev.write(ext2_block_to_lba(d_indir_blk), ext2_vol.sectors_per_block, d1_table);
+
+        uint8_t *z = (uint8_t *)kzalloc(bs);
+        if (z) {
+            ext2_vol.dev.write(ext2_block_to_lba(d2_blk), ext2_vol.sectors_per_block, z);
+            kfree(z);
+        }
+    }
+
+    uint32_t *d2_table = (uint32_t *)kmalloc(bs);
+    if (!d2_table) { kfree(d1_table); return 0; }
+    ext2_vol.dev.read(ext2_block_to_lba(d2_blk), ext2_vol.sectors_per_block, d2_table);
+
+    if (d2_table[d2_idx] == 0) {
+        uint32_t data_blk = ext2_alloc_block();
+        if (data_blk == 0) { kfree(d1_table); kfree(d2_table); return 0; }
+        d2_table[d2_idx] = data_blk;
+        ext2_vol.dev.write(ext2_block_to_lba(d2_blk), ext2_vol.sectors_per_block, d2_table);
+    }
+
+    uint32_t res_blk = d2_table[d2_idx];
+    kfree(d1_table);
+    kfree(d2_table);
+    return res_blk;
+}
+
 static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     uint32_t inode_num = (uint32_t)(uintptr_t)node->ptr;
     ext2_inode_t inode;
@@ -220,16 +324,8 @@ static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint
         uint64_t file_off = offset + bytes_written;
         uint32_t block_idx = file_off / bs;
         
-        if (block_idx >= 12) {
-            break;
-        }
-
-        uint32_t block_num = inode.i_block[block_idx];
-        if (block_num == 0) {
-            block_num = ext2_alloc_block();
-            if (block_num == 0) break;
-            inode.i_block[block_idx] = block_num;
-        }
+        uint32_t block_num = ext2_get_or_alloc_file_block(inode_num, &inode, block_idx);
+        if (block_num == 0) break;
 
         uint8_t *blk_buf = (uint8_t *)kmalloc(bs);
         if (!blk_buf) break;
@@ -258,6 +354,7 @@ static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint
     node->length = inode.i_size;
     return bytes_written;
 }
+
 static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, const char *name, uint8_t file_type) {
     ext2_inode_t dir_inode;
     ext2_read_inode(dir_inode_num, &dir_inode);
@@ -449,6 +546,8 @@ static vfs_node_t *ext2_finddir(vfs_node_t *node, const char *name) {
     kfree(blk_buf);
     return NULL;
 }
+
+
 
 static vfs_node_t *ext2_create(vfs_node_t *dir, const char *name, uint32_t flags) {
     uint32_t dir_inode_num = (uint32_t)(uintptr_t)dir->ptr;

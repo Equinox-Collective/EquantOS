@@ -261,8 +261,8 @@ run: build/equantos.iso disks
 	$(call LOG_MSG,  $(CLR_INFO) Launching EquantOS in QEMU...)
 	$(Q)$(QEMU) -cdrom build/equantos.iso $(QEMUFLAGS)
 
-runbd: build/equantos.iso disks
-	$(call LOG_MSG,  $(CLR_INFO) Launching EquantOS in QEMU through GPT Disk...)
+runbd:
+	$(call LOG_MSG,  $(CLR_INFO) Launching EquantOS from Hard Disk (disk_gpt_ext2.img)...)
 	$(Q)$(QEMU) $(QEMUBDFLAGS)
 
 debug: build/equantos.iso disks
