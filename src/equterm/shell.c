@@ -24,7 +24,7 @@
 #include "../kernel/proc/task.h"
 #include "../kernel/core/gen/cpu.h"
 #include "../kernel/core/gen/io.h"
-#include "../kernel/drivers/usb/xhci.h"
+#include "../kernel/misc/installer.h"
 
 extern uint64_t free_memory;
 extern uint64_t total_pages;
@@ -97,6 +97,7 @@ static void cmd_ext2info(int argc, char **argv);
 static void cmd_xhcitest(int argc, char **argv);
 static void cmd_pcipeek(int argc, char **argv);
 static void cmd_inbtest(int argc, char **argv);
+static void cmd_installer(int argc, char **argv);
 
 static const shell_command_t commands[] = {
     { "help",       "List all diagnostic & stress commands",  cmd_help },
@@ -150,6 +151,7 @@ static const shell_command_t commands[] = {
     { "xhcitest",   "Show USB xHCI controller & port status", cmd_xhcitest },
     { "pcipeek",    "Read PCI register: pcipeek <b> <s> <f> <o>", cmd_pcipeek },
     { "inbtest",    "Read raw hardware I/O port: inbtest <hex_port>", cmd_inbtest },
+    { "installer", "Run interactive Archinstall-style OS Installer", cmd_installer },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -1424,4 +1426,9 @@ static void cmd_inbtest(int argc, char **argv) {
     term_print("inb(0x"); itoa_hex(port, b); term_print(b);
     term_print(") -> 0x"); itoa_hex(val, b); term_print(b);
     term_print("\n");
+}
+
+static void cmd_installer(int argc, char **argv) {
+    (void)argc; (void)argv;
+    installer_run();
 }
