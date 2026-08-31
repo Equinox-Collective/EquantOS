@@ -36,6 +36,18 @@ QEMUFLAGS := -boot d \
              -serial stdio \
 			 -d trace:usb_* -D qemu_usb.log
 
+QEMUBDFLAGS := -boot c \
+             -device qemu-xhci,id=xhci \
+             -device usb-kbd,bus=xhci.0 \
+             -device usb-mouse,bus=xhci.0 \
+             -drive file=disk_gpt_ext2.img,format=raw,if=none,id=nvme0 \
+             -device nvme,drive=nvme0,serial=deadbeef,bootindex=1 \
+             -drive file=disk_mbr_fat32.img,format=raw,if=none,id=fat0 \
+             -device ide-hd,drive=fat0 \
+             -serial stdio \
+             -d trace:usb_* -D qemu_usb.log
+
+
 
 # ==============================================================================
 # Environment & Shell Detection
@@ -248,6 +260,10 @@ build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd
 run: build/equantos.iso disks
 	$(call LOG_MSG,  $(CLR_INFO) Launching EquantOS in QEMU...)
 	$(Q)$(QEMU) -cdrom build/equantos.iso $(QEMUFLAGS)
+
+runbd: build/equantos.iso disks
+	$(call LOG_MSG,  $(CLR_INFO) Launching EquantOS in QEMU through GPT Disk...)
+	$(Q)$(QEMU) $(QEMUBDFLAGS)
 
 debug: build/equantos.iso disks
 	$(call LOG_MSG,  $(CLR_INFO) Launching EquantOS in debug mode (GDB server on port :1234)...)
