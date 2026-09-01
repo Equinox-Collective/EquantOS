@@ -302,8 +302,9 @@ int nvme_read_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
 
     uint32_t sec_size = nvme_ctrl.sector_size ? nvme_ctrl.sector_size : 512;
     size_t transfer_bytes = (size_t)sector_count * sec_size;
+    size_t pages_needed = (transfer_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    void *dma_virt = pmm_alloc_continuous((transfer_bytes + PAGE_SIZE - 1) / PAGE_SIZE);
+    void *dma_virt = pmm_alloc_continuous(pages_needed);
     if (!dma_virt) return NVME_ERR_NOMEM;
     uint64_t dma_phys = (uint64_t)dma_virt;
 
@@ -314,8 +315,28 @@ int nvme_read_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
     cmd.cdw0 = NVME_NVM_CMD_READ | (cid << 16);
     cmd.nsid = 1;
 
-    if (nvme_setup_prp(&cmd, dma_phys, transfer_bytes) != NVME_SUCCESS) {
-        return NVME_ERR_NOMEM;
+    void *prp_list_phys = NULL;
+    if (pages_needed == 1) {
+        cmd.prp1 = dma_phys;
+        cmd.prp2 = 0;
+    } else if (pages_needed == 2) {
+        cmd.prp1 = dma_phys;
+        cmd.prp2 = dma_phys + PAGE_SIZE;
+    } else {
+        void *prp_list_virt = pmm_alloc_continuous(1);
+        if (!prp_list_virt) {
+            size_t order = 0;
+            while ((1ULL << order) < pages_needed) order++;
+            pmm_free_pages(dma_virt, order);
+            return NVME_ERR_NOMEM;
+        }
+        prp_list_phys = prp_list_virt;
+        uint64_t *prp_entries = (uint64_t *)VIRT((uint64_t)prp_list_virt);
+        for (size_t i = 1; i < pages_needed; i++) {
+            prp_entries[i - 1] = dma_phys + (i * PAGE_SIZE);
+        }
+        cmd.prp1 = dma_phys;
+        cmd.prp2 = (uint64_t)prp_list_virt;
     }
 
     cmd.cdw10 = (uint32_t)lba;
@@ -329,6 +350,17 @@ int nvme_read_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
         memcpy(buffer, (void *)VIRT(dma_phys), transfer_bytes);
     }
 
+    // FIX: Free allocated DMA and PRP physical pages
+    size_t order = 0;
+    while ((1ULL << order) < pages_needed) {
+        order++;
+    }
+    pmm_free_pages(dma_virt, order);
+
+    if (prp_list_phys) {
+        pmm_free_pages(prp_list_phys, 0);
+    }
+
     return err;
 }
 
@@ -338,8 +370,9 @@ int nvme_write_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
 
     uint32_t sec_size = nvme_ctrl.sector_size ? nvme_ctrl.sector_size : 512;
     size_t transfer_bytes = (size_t)sector_count * sec_size;
+    size_t pages_needed = (transfer_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    void *dma_virt = pmm_alloc_continuous((transfer_bytes + PAGE_SIZE - 1) / PAGE_SIZE);
+    void *dma_virt = pmm_alloc_continuous(pages_needed);
     if (!dma_virt) return NVME_ERR_NOMEM;
     uint64_t dma_phys = (uint64_t)dma_virt;
 
@@ -352,8 +385,28 @@ int nvme_write_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
     cmd.cdw0 = NVME_NVM_CMD_WRITE | (cid << 16);
     cmd.nsid = 1;
 
-    if (nvme_setup_prp(&cmd, dma_phys, transfer_bytes) != NVME_SUCCESS) {
-        return NVME_ERR_NOMEM;
+    void *prp_list_phys = NULL;
+    if (pages_needed == 1) {
+        cmd.prp1 = dma_phys;
+        cmd.prp2 = 0;
+    } else if (pages_needed == 2) {
+        cmd.prp1 = dma_phys;
+        cmd.prp2 = dma_phys + PAGE_SIZE;
+    } else {
+        void *prp_list_virt = pmm_alloc_continuous(1);
+        if (!prp_list_virt) {
+            size_t order = 0;
+            while ((1ULL << order) < pages_needed) order++;
+            pmm_free_pages(dma_virt, order);
+            return NVME_ERR_NOMEM;
+        }
+        prp_list_phys = prp_list_virt;
+        uint64_t *prp_entries = (uint64_t *)VIRT((uint64_t)prp_list_virt);
+        for (size_t i = 1; i < pages_needed; i++) {
+            prp_entries[i - 1] = dma_phys + (i * PAGE_SIZE);
+        }
+        cmd.prp1 = dma_phys;
+        cmd.prp2 = (uint64_t)prp_list_virt;
     }
 
     cmd.cdw10 = (uint32_t)lba;
@@ -361,7 +414,20 @@ int nvme_write_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
     cmd.cdw12 = (sector_count - 1) & 0xFFFF;
 
     nvme_submit_command(&nvme_ctrl, &nvme_ctrl.io_queue, &cmd, 1);
-    return nvme_wait_completion(&nvme_ctrl, &nvme_ctrl.io_queue, cid, 1);
+    int err = nvme_wait_completion(&nvme_ctrl, &nvme_ctrl.io_queue, cid, 1);
+
+    // FIX: Free allocated DMA and PRP physical pages
+    size_t order = 0;
+    while ((1ULL << order) < pages_needed) {
+        order++;
+    }
+    pmm_free_pages(dma_virt, order);
+
+    if (prp_list_phys) {
+        pmm_free_pages(prp_list_phys, 0);
+    }
+
+    return err;
 }
 
 int nvme_init(void) {

@@ -25,7 +25,10 @@ LDFLAGS  := -nostdlib -static -z max-page-size=0x1000 -T src/linker.ld
 
 # QEMU Flags
 QEMU      := qemu-system-x86_64
-QEMUFLAGS := -boot d \
+QEMUFLAGS := -m 512M \
+             -vga std \
+             -boot d \
+			 -bios OVMF.fd \
              -device qemu-xhci,id=xhci \
              -device usb-kbd,bus=xhci.0 \
              -device usb-mouse,bus=xhci.0 \
@@ -33,19 +36,20 @@ QEMUFLAGS := -boot d \
              -device nvme,drive=nvme0,serial=deadbeef \
              -drive file=disk_mbr_fat32.img,format=raw,if=none,id=fat0 \
              -device ide-hd,drive=fat0 \
-             -serial stdio \
-			 -d trace:usb_* -D qemu_usb.log
+             -serial stdio
 
-QEMUBDFLAGS := -boot c \
+# Hard-Disk Boot Flags (512MB RAM, Full VGA, Filtered Logging)
+QEMUBDFLAGS := -m 512M \
+             -vga std \
+             -boot c \
+			 -bios OVMF.fd \
              -device qemu-xhci,id=xhci \
              -device usb-kbd,bus=xhci.0 \
              -device usb-mouse,bus=xhci.0 \
-             -drive file=disk_gpt_ext2.img,format=raw,if=none,id=nvme0 \
-             -device nvme,drive=nvme0,serial=deadbeef,bootindex=1 \
-             -drive file=disk_mbr_fat32.img,format=raw,if=none,id=fat0 \
-             -device ide-hd,drive=fat0 \
+             -drive file=disk_gpt_ext2.img,format=raw,if=none,id=hd0 \
+             -device ide-hd,drive=hd0,bootindex=1 \
              -serial stdio \
-             -d trace:usb_* -D qemu_usb.log
+             -d guest_errors,unimp -D qemu_bd.log
 
 
 

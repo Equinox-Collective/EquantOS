@@ -1,8 +1,10 @@
+// src/kernel/fs/fat32.h - Complete FAT32 Driver Interface with mkfs_fat32
 #ifndef FAT32_H
 #define FAT32_H
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "vfs.h"
 #include "../drivers/disk/block.h"
 
@@ -63,5 +65,6 @@ typedef struct {
 
 void fat32_init(void);
 vfs_node_t *fat32_mount_partition(block_device_t dev, uint32_t partition_lba, uint32_t partition_sectors);
+int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, const char *label);
 
 #endif // FAT32_H

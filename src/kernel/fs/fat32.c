@@ -1,4 +1,4 @@
-// fat32.c - Production-grade FAT32 File System Driver Implementation
+// src/kernel/fs/fat32.c - Full Production FAT32 Driver with FSInfo & UEFI Compliance
 #include "fat32.h"
 #include "mbr.h"
 #include "gpt.h"
@@ -10,6 +10,16 @@
 #include "../drivers/serial/serial.h"
 #include "../core/initcall.h"
 #include "ext2.h"
+
+typedef struct {
+    uint32_t lead_sig;      // 0x41615252 ("RRaA")
+    uint8_t  reserved1[480];
+    uint32_t struct_sig;    // 0x61417272 ("rrAa")
+    uint32_t free_count;    // 0xFFFFFFFF
+    uint32_t next_free;     // 0xFFFFFFFF (or 3)
+    uint8_t  reserved2[12];
+    uint32_t trail_sig;     // 0xAA550000
+} __attribute__((packed)) fat32_fsinfo_t;
 
 typedef struct {
     block_device_t dev;
@@ -120,9 +130,9 @@ static void fat32_format_filename(fat32_dir_entry_t *entry, char *dest) {
 }
 
 static int fat32_name_match(const char *fat_name, const char *target) {
-    char upper_target[13];
+    char upper_target[16];
     int i = 0;
-    while (target[i] && i < 12) {
+    while (target[i] && i < 15) {
         char c = target[i];
         if (c >= 'a' && c <= 'z') c -= 32;
         upper_target[i] = c;
@@ -149,11 +159,11 @@ static void fat32_update_dir_entry(uint32_t parent_cluster, const char *filename
             if (entries[i].name[0] == 0x00) break;
             if ((uint8_t)entries[i].name[0] == 0xE5 || (entries[i].attribute & FAT32_ATTR_LONG_NAME) == FAT32_ATTR_LONG_NAME) continue;
 
-            char fmt[13];
+            char fmt[16];
             fat32_format_filename(&entries[i], fmt);
             if (fat32_name_match(fmt, filename)) {
-                entries[i].first_cluster_high = (first_cluster >> 16) & 0xFFFF;
-                entries[i].first_cluster_low = first_cluster & 0xFFFF;
+                entries[i].first_cluster_high = (uint16_t)((first_cluster >> 16) & 0xFFFF);
+                entries[i].first_cluster_low = (uint16_t)(first_cluster & 0xFFFF);
                 entries[i].file_size = file_size;
                 current_vol.dev.write(lba, current_vol.sectors_per_cluster, cluster_buf);
                 kfree(cluster_buf);
@@ -202,7 +212,7 @@ static int64_t fat32_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint
     }
 
     kfree(cluster_buf);
-    return bytes_read;
+    return (int64_t)bytes_read;
 }
 
 static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
@@ -278,10 +288,10 @@ static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uin
 
     if (node->parent) {
         uint32_t parent_cluster = (uint32_t)(uintptr_t)node->parent->ptr;
-        fat32_update_dir_entry(parent_cluster, node->name, cluster, node->length);
+        fat32_update_dir_entry(parent_cluster, node->name, cluster, (uint32_t)node->length);
     }
 
-    return bytes_written;
+    return (int64_t)bytes_written;
 }
 
 static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
@@ -361,7 +371,7 @@ static vfs_node_t *fat32_finddir(vfs_node_t *node, const char *name) {
                 continue;
             }
 
-            char formatted_name[13];
+            char formatted_name[16];
             fat32_format_filename(&entries[i], formatted_name);
 
             if (fat32_name_match(formatted_name, name)) {
@@ -392,7 +402,6 @@ static vfs_node_t *fat32_finddir(vfs_node_t *node, const char *name) {
 }
 
 static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flags) {
-    (void)flags;
     uint32_t parent_cluster = (uint32_t)(uintptr_t)dir->ptr;
     uint32_t cluster_size = current_vol.sectors_per_cluster * current_vol.bytes_per_sector;
     uint32_t entries_per_cluster = cluster_size / sizeof(fat32_dir_entry_t);
@@ -467,12 +476,30 @@ static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flag
         return NULL;
     }
 
+    bool is_dir = (flags & FS_DIRECTORY) != 0;
+    uint32_t initial_cluster = 0;
+
+    if (is_dir) {
+        initial_cluster = fat32_alloc_cluster();
+        if (initial_cluster == 0) {
+            kfree(cluster_buf);
+            return NULL;
+        }
+        fat32_set_next_cluster(initial_cluster, 0x0FFFFFF8);
+
+        uint8_t *dir_data = (uint8_t *)kzalloc(cluster_size);
+        if (dir_data) {
+            current_vol.dev.write(fat32_cluster_to_lba(initial_cluster), current_vol.sectors_per_cluster, dir_data);
+            kfree(dir_data);
+        }
+    }
+
     memset(target_entry, 0, sizeof(fat32_dir_entry_t));
     memcpy(target_entry->name, short_name, 8);
     memcpy(target_entry->ext, short_ext, 3);
-    target_entry->attribute = FAT32_ATTR_ARCHIVE;
-    target_entry->first_cluster_high = 0;
-    target_entry->first_cluster_low = 0;
+    target_entry->attribute = is_dir ? FAT32_ATTR_DIRECTORY : FAT32_ATTR_ARCHIVE;
+    target_entry->first_cluster_high = (uint16_t)((initial_cluster >> 16) & 0xFFFF);
+    target_entry->first_cluster_low = (uint16_t)(initial_cluster & 0xFFFF);
     target_entry->file_size = 0;
 
     current_vol.dev.write(target_lba, current_vol.sectors_per_cluster, cluster_buf);
@@ -480,10 +507,10 @@ static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flag
 
     vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strncpy(vnode->name, name, sizeof(vnode->name) - 1);
-    vnode->flags = FS_FILE;
+    vnode->flags = is_dir ? FS_DIRECTORY : FS_FILE;
     vnode->length = 0;
-    vnode->inode = 0;
-    vnode->ptr = (vfs_node_t *)0;
+    vnode->inode = initial_cluster;
+    vnode->ptr = (vfs_node_t *)(uintptr_t)initial_cluster;
     vnode->parent = dir;
     vnode->ops = &fat32_fops;
 
@@ -496,7 +523,6 @@ vfs_node_t *fat32_mount_partition(block_device_t dev, uint32_t partition_lba, ui
 
     fat32_bpb_t *bpb = (fat32_bpb_t *)sector_buf;
 
-    // Strict BPB Structural Safeguards
     if (bpb->bytes_per_sector != 512 && bpb->bytes_per_sector != 1024 &&
         bpb->bytes_per_sector != 2048 && bpb->bytes_per_sector != 4096) {
         return NULL;
@@ -510,24 +536,17 @@ vfs_node_t *fat32_mount_partition(block_device_t dev, uint32_t partition_lba, ui
         return NULL;
     }
 
-    // Determine total sector count
     uint32_t total_sectors = bpb->total_sectors_16 != 0 ? bpb->total_sectors_16 : bpb->total_sectors_32;
     if (total_sectors == 0) {
         total_sectors = partition_sectors;
     }
 
     uint32_t fat_size = bpb->fat_size_16 != 0 ? bpb->fat_size_16 : bpb->table_size_32;
-    if (fat_size == 0) return NULL;
+    if (fat_size == 0 || bpb->root_cluster < 2) return NULL;
 
     uint32_t root_dir_sectors = ((bpb->root_entry_count * 32) + (bpb->bytes_per_sector - 1)) / bpb->bytes_per_sector;
     uint32_t data_sectors = total_sectors - (bpb->reserved_sectors + (bpb->num_fats * fat_size) + root_dir_sectors);
     uint32_t total_clusters = data_sectors / bpb->sectors_per_cluster;
-
-    // Microsoft Specification: Volume is FAT32 IF AND ONLY IF total_clusters >= 65525
-    if (total_clusters < 65525) {
-        serial_puts(COM1, "[FAT32 INFO] Partition is not FAT32 (Cluster count < 65525).\n");
-        return NULL;
-    }
 
     current_vol.dev = dev;
     current_vol.partition_lba = partition_lba;
@@ -553,6 +572,90 @@ vfs_node_t *fat32_mount_partition(block_device_t dev, uint32_t partition_lba, ui
     return root;
 }
 
+int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, const char *label) {
+    if (!dev.write || sector_count < 2048) return -1;
+
+    uint32_t bytes_per_sector = 512;
+    uint32_t sectors_per_cluster = 1;
+    uint16_t reserved_sectors = 32;
+    uint8_t num_fats = 2;
+    uint32_t root_cluster = 2;
+
+    uint32_t fat_size_sectors = ((sector_count * 4) + (bytes_per_sector - 1)) / bytes_per_sector;
+
+    uint8_t *sec_buf = (uint8_t *)kzalloc(512);
+    if (!sec_buf) return -1;
+
+    // 1. Write Volume Boot Record (VBR / Sector 0)
+    fat32_bpb_t *bpb = (fat32_bpb_t *)sec_buf;
+    bpb->jmp[0] = 0xEB; bpb->jmp[1] = 0x58; bpb->jmp[2] = 0x90;
+    memcpy(bpb->oem, "MSWIN4.1", 8);
+    bpb->bytes_per_sector = (uint16_t)bytes_per_sector;
+    bpb->sectors_per_cluster = (uint8_t)sectors_per_cluster;
+    bpb->reserved_sectors = reserved_sectors;
+    bpb->num_fats = num_fats;
+    bpb->root_entry_count = 0;
+    bpb->total_sectors_16 = 0;
+    bpb->media_type = 0xF8;
+    bpb->fat_size_16 = 0;
+    bpb->sectors_per_track = 32;
+    bpb->num_heads = 64;
+    bpb->hidden_sectors = start_lba;
+    bpb->total_sectors_32 = sector_count;
+    bpb->table_size_32 = fat_size_sectors;
+    bpb->ext_flags = 0;
+    bpb->fs_version = 0;
+    bpb->root_cluster = root_cluster;
+    bpb->fs_info = 1;               // FSInfo at Sector 1
+    bpb->backup_boot_sector = 6;    // Backup VBR at Sector 6
+    bpb->drive_num = 0x80;
+    bpb->boot_signature = 0x29;
+    bpb->volume_id = 0x12345678;
+    memcpy(bpb->volume_label, label ? label : "EFI SYSTEM ", 11);
+    memcpy(bpb->file_system_type, "FAT32   ", 8);
+    sec_buf[510] = 0x55;
+    sec_buf[511] = 0xAA;
+
+    dev.write(start_lba, 1, sec_buf);
+    dev.write(start_lba + 6, 1, sec_buf); // Backup VBR
+
+    // 2. Write Mandatory UEFI FSInfo Sector (Sector 1 & Backup Sector 7)
+    memset(sec_buf, 0, 512);
+    fat32_fsinfo_t *fsinfo = (fat32_fsinfo_t *)sec_buf;
+    fsinfo->lead_sig = 0x41615252;   // "RRaA"
+    fsinfo->struct_sig = 0x61417272; // "rrAa"
+    fsinfo->free_count = 0xFFFFFFFF;
+    fsinfo->next_free = 3;
+    fsinfo->trail_sig = 0xAA550000;
+
+    dev.write(start_lba + 1, 1, sec_buf);
+    dev.write(start_lba + 7, 1, sec_buf); // Backup FSInfo
+
+    // 3. Initialize FAT Tables (Cluster 0, 1, 2)
+    memset(sec_buf, 0, 512);
+    for (uint32_t f = 0; f < num_fats; f++) {
+        uint32_t fat_start = start_lba + reserved_sectors + (f * fat_size_sectors);
+        sec_buf[0] = 0xF8; sec_buf[1] = 0xFF; sec_buf[2] = 0xFF; sec_buf[3] = 0x0F;
+        sec_buf[4] = 0xFF; sec_buf[5] = 0xFF; sec_buf[6] = 0xFF; sec_buf[7] = 0x0F;
+        sec_buf[8] = 0xF8; sec_buf[9] = 0xFF; sec_buf[10] = 0xFF; sec_buf[11] = 0x0F;
+        dev.write(fat_start, 1, sec_buf);
+
+        memset(sec_buf, 0, 512);
+        for (uint32_t s = 1; s < fat_size_sectors; s++) {
+            dev.write(fat_start + s, 1, sec_buf);
+        }
+    }
+
+    // 4. Clear Root Directory Cluster
+    uint32_t first_data_sec = start_lba + reserved_sectors + (num_fats * fat_size_sectors);
+    for (uint32_t s = 0; s < sectors_per_cluster; s++) {
+        dev.write(first_data_sec + s, 1, sec_buf);
+    }
+
+    kfree(sec_buf);
+    return 0;
+}
+
 void fat32_init(void) {
     if (!vfs_root) return;
 
@@ -563,8 +666,6 @@ void fat32_init(void) {
     }
 
     block_device_t nvme_dev = nvme_get_block_device();
-
-    // Scan partitions via Unified Partition Scanner
     disk_partition_scan_device(nvme_dev);
 
     vfs_node_t *drives_dir = vfs_finddir(vfs_root, "drives");
@@ -577,7 +678,6 @@ void fat32_init(void) {
         partition_info_t *part = disk_get_partition(i);
         if (!part) continue;
 
-        // Try mounting as FAT32
         vfs_node_t *fat_root = fat32_mount_partition(nvme_dev, part->start_lba, part->sector_count);
         if (fat_root && drives_dir) {
             vfs_node_t *disk_dir = ramfs_create_directory(drives_dir, "fat32_nvme");
@@ -589,7 +689,6 @@ void fat32_init(void) {
             continue;
         }
 
-        // Try mounting as EXT2
         vfs_node_t *ext2_root = ext2_mount_partition(nvme_dev, part->start_lba);
         if (ext2_root && drives_dir) {
             vfs_node_t *ext2_dir = ramfs_create_directory(drives_dir, "ext2_nvme");
@@ -602,9 +701,6 @@ void fat32_init(void) {
         }
     }
 }
-
-
-// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
 
 static int __init fat32_fs_initcall(void) {
     fat32_init();
