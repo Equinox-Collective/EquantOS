@@ -26,7 +26,7 @@
 #define COLOR_SUCCESS_FG    0x0033FF33
 #define COLOR_LOG_FG        0x00FFFF55
 
-#define CHUNK_SZ 65536 // 64KB Safe Copy Buffer
+#define CHUNK_SZ 65536
 
 static installer_ctx_t g_installer_ctx;
 static int g_log_row = 12;
@@ -457,7 +457,7 @@ void installer_run(void) {
                     break;
                 }
 
-                // Create ESP Directories: /EFI, /EFI/BOOT, /EFI/equantos, /boot, /sys, /sys/bin
+                // Create ESP Directories
                 vfs_node_t *esp_efi = vfs_create(esp_root, "EFI", FS_DIRECTORY);
                 vfs_node_t *esp_boot = esp_efi ? vfs_create(esp_efi, "BOOT", FS_DIRECTORY) : NULL;
                 vfs_node_t *esp_equantos = esp_efi ? vfs_create(esp_efi, "equantos", FS_DIRECTORY) : NULL;
@@ -465,7 +465,7 @@ void installer_run(void) {
                 vfs_node_t *esp_sys = vfs_create(esp_root, "sys", FS_DIRECTORY);
                 vfs_node_t *esp_bin = esp_sys ? vfs_create(esp_sys, "bin", FS_DIRECTORY) : NULL;
 
-                // Create Root EXT2 Directories: /boot, /sys, /sys/bin
+                // Create Root EXT2 Directories
                 vfs_node_t *r_boot = vfs_create(root_ext2, "boot", FS_DIRECTORY);
                 vfs_node_t *r_sys  = vfs_create(root_ext2, "sys", FS_DIRECTORY);
                 vfs_node_t *r_bin  = r_sys ? vfs_create(r_sys, "bin", FS_DIRECTORY) : NULL;
@@ -500,7 +500,7 @@ void installer_run(void) {
                     }
 
                     if (src && src->length > 0) {
-                        // 1. Deploy Boot files to ESP Partition (FAT32)
+                        // 1. Deploy Boot & System files to ESP Partition (FAT32)
                         vfs_node_t *dest_esp = esp_root;
                         if (strcmp(fname, "BOOTX64.EFI") == 0) dest_esp = esp_boot ? esp_boot : esp_root;
                         else if (strcmp(fname, "kernel.elf") == 0 || strcmp(fname, "limine.conf") == 0) dest_esp = esp_boot_dir ? esp_boot_dir : esp_root;
@@ -519,7 +519,7 @@ void installer_run(void) {
                             }
                         }
 
-                        // Also deploy BOOTX64.EFI to /EFI/equantos/BOOTX64.EFI
+                        // Duplicate BOOTX64.EFI to /EFI/equantos/ for UEFI fallback
                         if (strcmp(fname, "BOOTX64.EFI") == 0 && esp_equantos) {
                             vfs_node_t *node_eq = vfs_create(esp_equantos, fname, FS_FILE);
                             if (node_eq) {
@@ -535,7 +535,7 @@ void installer_run(void) {
                             }
                         }
 
-                        // 2. Deploy OS System files to Root Partition (EXT2)
+                        // 2. Deploy Userland & System files to Root Partition (EXT2)
                         if (strcmp(fname, "BOOTX64.EFI") != 0) {
                             vfs_node_t *dest_ext2 = (strcmp(fname, "kernel.elf") == 0 || strcmp(fname, "limine.conf") == 0) ? r_boot : r_bin;
                             if (!dest_ext2) dest_ext2 = root_ext2;

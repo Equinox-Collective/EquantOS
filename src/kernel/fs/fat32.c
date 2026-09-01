@@ -1,4 +1,4 @@
-// src/kernel/fs/fat32.c - Production FAT32 with Full VFAT Long File Name (LFN) Engine
+// src/kernel/fs/fat32.c - Production-Grade FAT32 Driver with Full UEFI Directory & LFN Compliance
 #include "fat32.h"
 #include "mbr.h"
 #include "gpt.h"
@@ -37,6 +37,7 @@ typedef struct {
 } fat32_volume_t;
 
 static fat32_volume_t current_vol;
+static uint32_t fat32_last_alloc = 2;
 
 static int64_t fat32_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
@@ -54,7 +55,7 @@ static vfs_file_operations_t fat32_fops = {
     .create = fat32_create
 };
 
-// Calculate standard 8.3 checksum for LFN entries
+// Standard 8.3 checksum calculation for VFAT LFN entries
 static uint8_t fat32_calc_lfn_checksum(const uint8_t *short_name_11) {
     uint8_t sum = 0;
     for (int i = 0; i < 11; i++) {
@@ -63,18 +64,65 @@ static uint8_t fat32_calc_lfn_checksum(const uint8_t *short_name_11) {
     return sum;
 }
 
-// Generate short 8.3 name alias from long filename
+// Check if filename qualifies as a pure standard 8.3 short name
+static bool fat32_is_pure_short_name(const char *name) {
+    size_t len = strlen(name);
+    if (len == 0 || len > 12) return false;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return true;
+
+    const char *dot = strchr(name, '.');
+    if (dot) {
+        if (strchr(dot + 1, '.')) return false; // Multiple dots require LFN
+        size_t base_len = dot - name;
+        size_t ext_len = strlen(dot + 1);
+        if (base_len == 0 || base_len > 8 || ext_len > 3) return false;
+    } else {
+        if (len > 8) return false;
+    }
+
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        if (c == '.') continue;
+        if (c >= 'a' && c <= 'z') return false; // Lowercase requires LFN
+        if (c == ' ' || c == '+' || c == ',' || c == ';' || c == '=' || c == '[' || c == ']') return false;
+        if (c < 0x21 || c > 0x7E) return false;
+    }
+    return true;
+}
+
+// Generate valid short 8.3 name
 static void fat32_gen_short_alias(const char *long_name, char short_name[8], char short_ext[3]) {
     memset(short_name, ' ', 8);
     memset(short_ext, ' ', 3);
+
+    if (strcmp(long_name, ".") == 0) {
+        short_name[0] = '.';
+        return;
+    }
+    if (strcmp(long_name, "..") == 0) {
+        short_name[0] = '.';
+        short_name[1] = '.';
+        return;
+    }
 
     const char *last_dot = strrchr(long_name, '.');
     size_t name_part_len = last_dot ? (size_t)(last_dot - long_name) : strlen(long_name);
 
     if (name_part_len == 0 && last_dot) {
-        // Dotfile (e.g. ".bashrc")
         name_part_len = strlen(long_name);
         last_dot = NULL;
+    }
+
+    if (fat32_is_pure_short_name(long_name)) {
+        for (size_t i = 0; i < name_part_len && i < 8; i++) {
+            short_name[i] = long_name[i];
+        }
+        if (last_dot) {
+            for (size_t i = 0; i < 3 && last_dot[1 + i] != '\0'; i++) {
+                short_ext[i] = last_dot[1 + i];
+            }
+        }
+        return;
     }
 
     size_t k = 0;
@@ -105,7 +153,7 @@ static uint32_t fat32_cluster_to_lba(uint32_t cluster) {
 
 static uint32_t fat32_get_next_cluster(uint32_t cluster) {
     if (cluster < 2 || cluster >= current_vol.total_clusters + 2) {
-        return 0x0FFFFFF8;
+        return 0x0FFFFFFF;
     }
 
     uint32_t fat_offset = cluster * 4;
@@ -141,8 +189,15 @@ static void fat32_set_next_cluster(uint32_t cluster, uint32_t next_cluster) {
 
 static uint32_t fat32_alloc_cluster(void) {
     uint8_t sector_buf[512];
+    uint32_t total = current_vol.total_clusters + 2;
+    uint32_t start = (fat32_last_alloc >= 2 && fat32_last_alloc < total) ? fat32_last_alloc : 2;
 
-    for (uint32_t cluster = 2; cluster < current_vol.total_clusters + 2; cluster++) {
+    for (uint32_t i = 0; i < total; i++) {
+        uint32_t cluster = start + i;
+        if (cluster >= total) {
+            cluster = 2 + (cluster - total);
+        }
+
         uint32_t fat_offset = cluster * 4;
         uint32_t fat_sector = current_vol.first_fat_sector + (fat_offset / current_vol.bytes_per_sector);
         uint32_t ent_offset = fat_offset % current_vol.bytes_per_sector;
@@ -151,7 +206,8 @@ static uint32_t fat32_alloc_cluster(void) {
         uint32_t entry = (*(uint32_t *)&sector_buf[ent_offset]) & 0x0FFFFFFF;
 
         if (entry == 0x00000000) {
-            fat32_set_next_cluster(cluster, 0x0FFFFFF8);
+            fat32_set_next_cluster(cluster, 0x0FFFFFFF);
+            fat32_last_alloc = cluster + 1;
             return cluster;
         }
     }
@@ -213,7 +269,6 @@ static void fat32_update_dir_entry(uint32_t parent_cluster, const char *filename
                 continue;
             }
 
-            // Short entry reached
             char entry_name[260];
             if (lfn_acc[0] != '\0') {
                 strcpy(entry_name, lfn_acc);
@@ -225,6 +280,14 @@ static void fat32_update_dir_entry(uint32_t parent_cluster, const char *filename
                 entries[i].first_cluster_high = (uint16_t)((first_cluster >> 16) & 0xFFFF);
                 entries[i].first_cluster_low = (uint16_t)(first_cluster & 0xFFFF);
                 entries[i].file_size = file_size;
+                
+                // Write standard valid DOS timestamp (2026-09-01 12:00:00)
+                entries[i].create_date = 0x5D31;
+                entries[i].create_time = 0x6000;
+                entries[i].write_date  = 0x5D31;
+                entries[i].write_time  = 0x6000;
+                entries[i].last_access_date = 0x5D31;
+
                 current_vol.dev.write(lba, current_vol.sectors_per_cluster, cluster_buf);
                 kfree(cluster_buf);
                 return;
@@ -286,7 +349,7 @@ static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uin
     if (cluster == 0) {
         cluster = fat32_alloc_cluster();
         if (cluster == 0) return -1;
-        fat32_set_next_cluster(cluster, 0x0FFFFFF8);
+        fat32_set_next_cluster(cluster, 0x0FFFFFFF);
         node->ptr = (vfs_node_t *)(uintptr_t)cluster;
         node->inode = cluster;
     }
@@ -307,7 +370,7 @@ static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uin
                 return -1;
             }
             fat32_set_next_cluster(current_cluster, new_c);
-            fat32_set_next_cluster(new_c, 0x0FFFFFF8);
+            fat32_set_next_cluster(new_c, 0x0FFFFFFF);
             next = new_c;
         }
         current_cluster = next;
@@ -316,12 +379,14 @@ static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uin
 
     while (bytes_written < size) {
         uint32_t lba = fat32_cluster_to_lba(current_cluster);
-        current_vol.dev.read(lba, current_vol.sectors_per_cluster, cluster_buf);
-
         uint64_t chunk_off = (offset + bytes_written) % cluster_size;
         uint64_t chunk_size = cluster_size - chunk_off;
         if (chunk_size > size - bytes_written) {
             chunk_size = size - bytes_written;
+        }
+
+        if (chunk_off != 0 || chunk_size != cluster_size) {
+            current_vol.dev.read(lba, current_vol.sectors_per_cluster, cluster_buf);
         }
 
         memcpy(cluster_buf + chunk_off, buffer + bytes_written, chunk_size);
@@ -335,7 +400,7 @@ static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uin
                 uint32_t new_c = fat32_alloc_cluster();
                 if (new_c == 0) break;
                 fat32_set_next_cluster(current_cluster, new_c);
-                fat32_set_next_cluster(new_c, 0x0FFFFFF8);
+                fat32_set_next_cluster(new_c, 0x0FFFFFFF);
                 next = new_c;
             }
             current_cluster = next;
@@ -409,20 +474,22 @@ static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
                 fat32_format_short_name(&entries[i], entry_name);
             }
 
-            if (current_index == index) {
-                vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-                strcpy(vnode->name, entry_name);
-                vnode->length = entries[i].file_size;
-                vnode->inode = ((uint32_t)entries[i].first_cluster_high << 16) | entries[i].first_cluster_low;
-                vnode->ptr = (vfs_node_t *)(uintptr_t)vnode->inode;
-                vnode->parent = node;
-                vnode->flags = (entries[i].attribute & FAT32_ATTR_DIRECTORY) ? FS_DIRECTORY : FS_FILE;
-                vnode->ops = &fat32_fops;
+            if (strcmp(entry_name, ".") != 0 && strcmp(entry_name, "..") != 0) {
+                if (current_index == index) {
+                    vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                    strcpy(vnode->name, entry_name);
+                    vnode->length = entries[i].file_size;
+                    vnode->inode = ((uint32_t)entries[i].first_cluster_high << 16) | entries[i].first_cluster_low;
+                    vnode->ptr = (vfs_node_t *)(uintptr_t)vnode->inode;
+                    vnode->parent = node;
+                    vnode->flags = (entries[i].attribute & FAT32_ATTR_DIRECTORY) ? FS_DIRECTORY : FS_FILE;
+                    vnode->ops = &fat32_fops;
 
-                kfree(cluster_buf);
-                return vnode;
+                    kfree(cluster_buf);
+                    return vnode;
+                }
+                current_index++;
             }
-            current_index++;
             memset(lfn_acc, 0, sizeof(lfn_acc));
         }
         cluster = fat32_get_next_cluster(cluster) & 0x0FFFFFFF;
@@ -514,9 +581,10 @@ static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flag
     uint8_t *cluster_buf = (uint8_t *)kmalloc(cluster_size);
     if (!cluster_buf) return NULL;
 
+    bool pure_short = fat32_is_pure_short_name(name);
     size_t name_len = strlen(name);
-    uint32_t num_lfn = (uint32_t)((name_len + 12) / 13);
-    uint32_t slots_needed = num_lfn + 1; // LFN entries + 1 Short 8.3 entry
+    uint32_t num_lfn = pure_short ? 0 : (uint32_t)((name_len + 12) / 13);
+    uint32_t slots_needed = num_lfn + 1;
 
     char short_name[8], short_ext[3];
     fat32_gen_short_alias(name, short_name, short_ext);
@@ -562,7 +630,7 @@ static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flag
                 return NULL;
             }
             fat32_set_next_cluster(curr_cluster, new_dir_cluster);
-            fat32_set_next_cluster(new_dir_cluster, 0x0FFFFFF8);
+            fat32_set_next_cluster(new_dir_cluster, 0x0FFFFFFF);
             curr_cluster = new_dir_cluster;
 
             memset(cluster_buf, 0, cluster_size);
@@ -584,59 +652,85 @@ static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flag
     bool is_dir = (flags & FS_DIRECTORY) != 0;
     uint32_t initial_cluster = 0;
 
+    // Subdirectories MUST be initialized with '.' and '..' entries
     if (is_dir) {
         initial_cluster = fat32_alloc_cluster();
         if (initial_cluster == 0) {
             kfree(cluster_buf);
             return NULL;
         }
-        fat32_set_next_cluster(initial_cluster, 0x0FFFFFF8);
+        fat32_set_next_cluster(initial_cluster, 0x0FFFFFFF);
 
         uint8_t *dir_data = (uint8_t *)kzalloc(cluster_size);
         if (dir_data) {
+            fat32_dir_entry_t *dot = (fat32_dir_entry_t *)dir_data;
+            memset(dot->name, ' ', 8);
+            memset(dot->ext, ' ', 3);
+            dot->name[0] = '.';
+            dot->attribute = FAT32_ATTR_DIRECTORY;
+            dot->first_cluster_high = (uint16_t)((initial_cluster >> 16) & 0xFFFF);
+            dot->first_cluster_low  = (uint16_t)(initial_cluster & 0xFFFF);
+            dot->create_date = 0x5D31;
+            dot->create_time = 0x6000;
+            dot->write_date  = 0x5D31;
+            dot->write_time  = 0x6000;
+
+            fat32_dir_entry_t *dotdot = (fat32_dir_entry_t *)(dir_data + sizeof(fat32_dir_entry_t));
+            memset(dotdot->name, ' ', 8);
+            memset(dotdot->ext, ' ', 3);
+            dotdot->name[0] = '.';
+            dotdot->name[1] = '.';
+            dotdot->attribute = FAT32_ATTR_DIRECTORY;
+            uint32_t p_clust = (parent_cluster == current_vol.root_cluster) ? 0 : parent_cluster;
+            dotdot->first_cluster_high = (uint16_t)((p_clust >> 16) & 0xFFFF);
+            dotdot->first_cluster_low  = (uint16_t)(p_clust & 0xFFFF);
+            dotdot->create_date = 0x5D31;
+            dotdot->create_time = 0x6000;
+            dotdot->write_date  = 0x5D31;
+            dotdot->write_time  = 0x6000;
+
             current_vol.dev.write(fat32_cluster_to_lba(initial_cluster), current_vol.sectors_per_cluster, dir_data);
             kfree(dir_data);
         }
     }
 
-    // 1. Write VFAT LFN Entries in reverse order
-    for (uint32_t seq = num_lfn; seq >= 1; seq--) {
-        uint32_t lfn_idx = start_slot_idx + (num_lfn - seq);
-        fat32_lfn_entry_t *lfn = (fat32_lfn_entry_t *)&((fat32_dir_entry_t *)cluster_buf)[lfn_idx];
-        memset(lfn, 0xFF, sizeof(fat32_lfn_entry_t));
+    // 1. Write LFN entries if not pure 8.3
+    if (!pure_short) {
+        for (uint32_t seq = num_lfn; seq >= 1; seq--) {
+            uint32_t lfn_idx = start_slot_idx + (num_lfn - seq);
+            fat32_lfn_entry_t *lfn = (fat32_lfn_entry_t *)&((fat32_dir_entry_t *)cluster_buf)[lfn_idx];
+            memset(lfn, 0xFF, sizeof(fat32_lfn_entry_t));
 
-        lfn->order = (uint8_t)seq;
-        if (seq == num_lfn) {
-            lfn->order |= LFN_LAST_ENTRY_FLAG; // 0x40
-        }
-        lfn->attribute = FAT32_ATTR_LONG_NAME; // 0x0F
-        lfn->type = 0x00;
-        lfn->checksum = checksum;
-        lfn->first_cluster = 0x0000;
+            lfn->order = (uint8_t)seq;
+            if (seq == num_lfn) {
+                lfn->order |= LFN_LAST_ENTRY_FLAG;
+            }
+            lfn->attribute = FAT32_ATTR_LONG_NAME;
+            lfn->type = 0x00;
+            lfn->checksum = checksum;
+            lfn->first_cluster = 0x0000;
 
-        size_t str_pos = (seq - 1) * 13;
+            size_t str_pos = (seq - 1) * 13;
 
-        // name1 (5 chars)
-        for (int c = 0; c < 5; c++) {
-            if (str_pos < name_len) lfn->name1[c] = (uint16_t)(uint8_t)name[str_pos++];
-            else if (str_pos == name_len) { lfn->name1[c] = 0x0000; str_pos++; }
-            else lfn->name1[c] = 0xFFFF;
-        }
-        // name2 (6 chars)
-        for (int c = 0; c < 6; c++) {
-            if (str_pos < name_len) lfn->name2[c] = (uint16_t)(uint8_t)name[str_pos++];
-            else if (str_pos == name_len) { lfn->name2[c] = 0x0000; str_pos++; }
-            else lfn->name2[c] = 0xFFFF;
-        }
-        // name3 (2 chars)
-        for (int c = 0; c < 2; c++) {
-            if (str_pos < name_len) lfn->name3[c] = (uint16_t)(uint8_t)name[str_pos++];
-            else if (str_pos == name_len) { lfn->name3[c] = 0x0000; str_pos++; }
-            else lfn->name3[c] = 0xFFFF;
+            for (int c = 0; c < 5; c++) {
+                if (str_pos < name_len) lfn->name1[c] = (uint16_t)(uint8_t)name[str_pos++];
+                else if (str_pos == name_len) { lfn->name1[c] = 0x0000; str_pos++; }
+                else lfn->name1[c] = 0xFFFF;
+            }
+            for (int c = 0; c < 6; c++) {
+                if (str_pos < name_len) lfn->name2[c] = (uint16_t)(uint8_t)name[str_pos++];
+                else if (str_pos == name_len) { lfn->name2[c] = 0x0000; str_pos++; }
+                else lfn->name2[c] = 0xFFFF;
+            }
+            for (int c = 0; c < 2; c++) {
+                if (str_pos < name_len) lfn->name3[c] = (uint16_t)(uint8_t)name[str_pos++];
+                else if (str_pos == name_len) { lfn->name3[c] = 0x0000; str_pos++; }
+                else lfn->name3[c] = 0xFFFF;
+            }
         }
     }
 
-    // 2. Write 8.3 Short Entry immediately after LFN chain
+    // 2. Write 8.3 Directory Entry
     uint32_t short_idx = start_slot_idx + num_lfn;
     fat32_dir_entry_t *target_entry = &((fat32_dir_entry_t *)cluster_buf)[short_idx];
     memset(target_entry, 0, sizeof(fat32_dir_entry_t));
@@ -646,6 +740,11 @@ static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flag
     target_entry->first_cluster_high = (uint16_t)((initial_cluster >> 16) & 0xFFFF);
     target_entry->first_cluster_low = (uint16_t)(initial_cluster & 0xFFFF);
     target_entry->file_size = 0;
+    target_entry->create_date = 0x5D31;
+    target_entry->create_time = 0x6000;
+    target_entry->write_date  = 0x5D31;
+    target_entry->write_time  = 0x6000;
+    target_entry->last_access_date = 0x5D31;
 
     current_vol.dev.write(target_lba, current_vol.sectors_per_cluster, cluster_buf);
     kfree(cluster_buf);
@@ -707,6 +806,8 @@ vfs_node_t *fat32_mount_partition(block_device_t dev, uint32_t partition_lba, ui
     current_vol.first_data_sector = current_vol.reserved_sectors + (current_vol.num_fats * current_vol.fat_size_sectors);
     current_vol.total_clusters = total_clusters;
 
+    fat32_last_alloc = 2; // Reset allocator state on mount
+
     vfs_node_t *root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strcpy(root->name, "/");
     root->flags = FS_DIRECTORY;
@@ -732,7 +833,7 @@ int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, co
     uint8_t *sec_buf = (uint8_t *)kzalloc(512);
     if (!sec_buf) return -1;
 
-    // 1. Write Volume Boot Record (VBR / Sector 0)
+    // 1. Write Volume Boot Record (VBR / Sector 0 & Backup Sector 6)
     fat32_bpb_t *bpb = (fat32_bpb_t *)sec_buf;
     bpb->jmp[0] = 0xEB; bpb->jmp[1] = 0x58; bpb->jmp[2] = 0x90;
     memcpy(bpb->oem, "MSWIN4.1", 8);
@@ -752,8 +853,8 @@ int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, co
     bpb->ext_flags = 0;
     bpb->fs_version = 0;
     bpb->root_cluster = root_cluster;
-    bpb->fs_info = 1;               // FSInfo at Sector 1
-    bpb->backup_boot_sector = 6;    // Backup VBR at Sector 6
+    bpb->fs_info = 1;
+    bpb->backup_boot_sector = 6;
     bpb->drive_num = 0x80;
     bpb->boot_signature = 0x29;
     bpb->volume_id = 0x12345678;
@@ -763,27 +864,28 @@ int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, co
     sec_buf[511] = 0xAA;
 
     dev.write(start_lba, 1, sec_buf);
-    dev.write(start_lba + 6, 1, sec_buf); // Backup VBR
+    dev.write(start_lba + 6, 1, sec_buf);
 
     // 2. Write Mandatory UEFI FSInfo Sector (Sector 1 & Backup Sector 7)
     memset(sec_buf, 0, 512);
     fat32_fsinfo_t *fsinfo = (fat32_fsinfo_t *)sec_buf;
-    fsinfo->lead_sig = 0x41615252;   // "RRaA"
-    fsinfo->struct_sig = 0x61417272; // "rrAa"
-    fsinfo->free_count = 0xFFFFFFFF;
+    fsinfo->lead_sig = 0x41615252;
+    fsinfo->struct_sig = 0x61417272;
+    fsinfo->free_count = total_clusters - 1;
     fsinfo->next_free = 3;
     fsinfo->trail_sig = 0xAA550000;
 
     dev.write(start_lba + 1, 1, sec_buf);
-    dev.write(start_lba + 7, 1, sec_buf); // Backup FSInfo
+    dev.write(start_lba + 7, 1, sec_buf);
 
-    // 3. Initialize FAT Tables (Cluster 0, 1, 2)
-    memset(sec_buf, 0, 512);
+    // 3. Initialize BOTH FAT Tables (Cluster 0, 1, 2)
     for (uint32_t f = 0; f < num_fats; f++) {
         uint32_t fat_start = start_lba + reserved_sectors + (f * fat_size_sectors);
-        sec_buf[0] = 0xF8; sec_buf[1] = 0xFF; sec_buf[2] = 0xFF; sec_buf[3] = 0x0F;
-        sec_buf[4] = 0xFF; sec_buf[5] = 0xFF; sec_buf[6] = 0xFF; sec_buf[7] = 0x0F;
-        sec_buf[8] = 0xF8; sec_buf[9] = 0xFF; sec_buf[10] = 0xFF; sec_buf[11] = 0x0F;
+        
+        memset(sec_buf, 0, 512);
+        sec_buf[0] = 0xF8; sec_buf[1] = 0xFF; sec_buf[2] = 0xFF; sec_buf[3] = 0x0F; // Media
+        sec_buf[4] = 0xFF; sec_buf[5] = 0xFF; sec_buf[6] = 0xFF; sec_buf[7] = 0x0F; // Clean/EOC
+        sec_buf[8] = 0xFF; sec_buf[9] = 0xFF; sec_buf[10] = 0xFF; sec_buf[11] = 0x0F; // Root Dir
         dev.write(fat_start, 1, sec_buf);
 
         memset(sec_buf, 0, 512);
@@ -794,6 +896,7 @@ int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, co
 
     // 4. Clear Root Directory Cluster
     uint32_t first_data_sec = start_lba + reserved_sectors + (num_fats * fat_size_sectors);
+    memset(sec_buf, 0, 512);
     for (uint32_t s = 0; s < sectors_per_cluster; s++) {
         dev.write(first_data_sec + s, 1, sec_buf);
     }

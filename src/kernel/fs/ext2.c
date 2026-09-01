@@ -26,7 +26,7 @@ static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint
 static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index);
 static vfs_node_t *ext2_finddir(vfs_node_t *node, const char *name);
 static vfs_node_t *ext2_create(vfs_node_t *dir, const char *name, uint32_t flags);
-
+static uint32_t ext2_last_alloc_block = 0;
 static vfs_file_operations_t ext2_fops = {
     .read = ext2_read,
     .write = ext2_write,
@@ -115,12 +115,13 @@ static uint32_t ext2_alloc_block(void) {
     uint32_t total_blocks = ext2_vol.sb.s_blocks_per_group;
     uint32_t allocated_block = 0;
 
-    for (uint32_t i = 0; i < total_blocks; i++) {
+    for (uint32_t i = ext2_last_alloc_block; i < total_blocks; i++) {
         uint32_t byte_idx = i / 8;
         uint8_t bit_idx = i % 8;
         if (!(bitmap[byte_idx] & (1 << bit_idx))) {
             bitmap[byte_idx] |= (1 << bit_idx);
             allocated_block = ext2_vol.sb.s_first_data_block + i;
+            ext2_last_alloc_block = i + 1;
             break;
         }
     }
@@ -129,8 +130,6 @@ static uint32_t ext2_alloc_block(void) {
         ext2_vol.dev.write(ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block, bitmap);
         ext2_vol.bg0.bg_free_blocks_count--;
         ext2_vol.sb.s_free_blocks_count--;
-        ext2_write_bgd();
-        ext2_write_superblock();
     }
 
     kfree(bitmap);
@@ -352,6 +351,11 @@ static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint
     inode.i_blocks = ((inode.i_size + 511) / 512);
     ext2_write_inode(inode_num, &inode);
     node->length = inode.i_size;
+
+    // Flush metadata once at the end of write operation
+    ext2_write_bgd();
+    ext2_write_superblock();
+
     return bytes_written;
 }
 
