@@ -1,4 +1,4 @@
-// src/kernel/fs/fat32.h - Complete FAT32 Driver Interface with mkfs_fat32
+// src/kernel/fs/fat32.h - Complete FAT32 Driver with VFAT Long File Names (LFN) Support
 #ifndef FAT32_H
 #define FAT32_H
 
@@ -16,6 +16,38 @@
 #define FAT32_ATTR_ARCHIVE   0x20
 #define FAT32_ATTR_LONG_NAME (FAT32_ATTR_READ_ONLY | FAT32_ATTR_HIDDEN | FAT32_ATTR_SYSTEM | FAT32_ATTR_VOLUME_ID)
 
+#define LFN_LAST_ENTRY_FLAG  0x40
+
+// Standard FAT32 Directory Entry (32 Bytes)
+typedef struct {
+    char     name[8];
+    char     ext[3];
+    uint8_t  attribute;
+    uint8_t  nt_reserved;
+    uint8_t  create_time_tenth;
+    uint16_t create_time;
+    uint16_t create_date;
+    uint16_t last_access_date;
+    uint16_t first_cluster_high;
+    uint16_t write_time;
+    uint16_t write_date;
+    uint16_t first_cluster_low;
+    uint32_t file_size;
+} __attribute__((packed)) fat32_dir_entry_t;
+
+// VFAT Long File Name (LFN) Entry Structure (32 Bytes)
+typedef struct {
+    uint8_t  order;          // Sequence number (1..N) | 0x40 for last entry
+    uint16_t name1[5];       // UTF-16LE characters 1..5
+    uint8_t  attribute;      // Must be 0x0F (FAT32_ATTR_LONG_NAME)
+    uint8_t  type;           // 0x00
+    uint8_t  checksum;       // Checksum of short 8.3 name
+    uint16_t name2[6];       // UTF-16LE characters 6..11
+    uint16_t first_cluster;  // Must be 0x0000
+    uint16_t name3[2];       // UTF-16LE characters 12..13
+} __attribute__((packed)) fat32_lfn_entry_t;
+
+// FAT32 Boot Parameter Block (BPB)
 typedef struct {
     uint8_t  jmp[3];
     uint8_t  oem[8];
@@ -46,22 +78,6 @@ typedef struct {
     char     volume_label[11];
     char     file_system_type[8];
 } __attribute__((packed)) fat32_bpb_t;
-
-typedef struct {
-    char     name[8];
-    char     ext[3];
-    uint8_t  attribute;
-    uint8_t  nt_reserved;
-    uint8_t  create_time_tenth;
-    uint16_t create_time;
-    uint16_t create_date;
-    uint16_t last_access_date;
-    uint16_t first_cluster_high;
-    uint16_t write_time;
-    uint16_t write_date;
-    uint16_t first_cluster_low;
-    uint32_t file_size;
-} __attribute__((packed)) fat32_dir_entry_t;
 
 void fat32_init(void);
 vfs_node_t *fat32_mount_partition(block_device_t dev, uint32_t partition_lba, uint32_t partition_sectors);

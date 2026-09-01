@@ -49,10 +49,8 @@ QEMUBDFLAGS := -m 512M \
              -drive file=disk_gpt_ext2.img,format=raw,if=none,id=hd0 \
              -device ide-hd,drive=hd0,bootindex=1 \
              -serial stdio \
-             -d guest_errors,unimp -D qemu_bd.log
-
-
-
+             -d guest_errors,unimp -D qemu_bd.log \
+			 
 # ==============================================================================
 # Environment & Shell Detection
 # ==============================================================================

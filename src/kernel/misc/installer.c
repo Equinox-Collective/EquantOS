@@ -31,7 +31,6 @@
 static installer_ctx_t g_installer_ctx;
 static int g_log_row = 12;
 
-// CRC32 Algorithm for GPT Header & Partition Array
 static uint32_t gpt_crc32(const void *data, size_t len) {
     uint32_t crc = 0xFFFFFFFF;
     const uint8_t *p = (const uint8_t *)data;
@@ -44,9 +43,8 @@ static uint32_t gpt_crc32(const void *data, size_t len) {
     return ~crc;
 }
 
-// Partition Target Disk to GPT (Partition 1: ESP FAT32, Partition 2: Root EXT2)
 static int gpt_create_dual_partition_layout(block_device_t dev, uint64_t total_sectors, uint32_t esp_sectors) {
-    if (total_sectors < 8192) return -1;
+    if (total_sectors < 65536) return -1;
 
     uint8_t *sec_buf = (uint8_t *)kzalloc(512);
     if (!sec_buf) return -1;
@@ -67,12 +65,10 @@ static int gpt_create_dual_partition_layout(block_device_t dev, uint64_t total_s
         return -1; 
     }
 
-    // EFI System Partition (ESP) GUID: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
     static const uint8_t esp_guid[16] = {
         0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
         0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B
     };
-    // Linux Root GUID: 0FC63DAF-8483-4772-8E79-3D69D8477DE4
     static const uint8_t linux_guid[16] = {
         0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47,
         0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4
@@ -84,14 +80,12 @@ static int gpt_create_dual_partition_layout(block_device_t dev, uint64_t total_s
     uint64_t p2_start = p1_end + 1;
     uint64_t p2_end   = total_sectors - 34;
 
-    // Entry 0: ESP Partition
     gpt_partition_entry_t *e0 = (gpt_partition_entry_t *)&entries_buf[0];
     memcpy(e0->partition_type_guid, esp_guid, 16);
     memset(e0->unique_partition_guid, 0x01, 16);
     e0->starting_lba = p1_start;
     e0->ending_lba = p1_end;
 
-    // Entry 1: Root Linux EXT2 Partition
     gpt_partition_entry_t *e1 = (gpt_partition_entry_t *)&entries_buf[128];
     memcpy(e1->partition_type_guid, linux_guid, 16);
     memset(e1->unique_partition_guid, 0x02, 16);
@@ -99,11 +93,12 @@ static int gpt_create_dual_partition_layout(block_device_t dev, uint64_t total_s
     e1->ending_lba = p2_end;
 
     dev.write(2, 32, entries_buf);
+    dev.write(total_sectors - 33, 32, entries_buf);
 
     // 3. LBA 1: Primary GPT Header
     memset(sec_buf, 0, 512);
     gpt_header_t *hdr = (gpt_header_t *)sec_buf;
-    hdr->signature = GPT_SIGNATURE; // "EFI PART"
+    hdr->signature = GPT_SIGNATURE;
     hdr->revision = 0x00010000;
     hdr->header_size = 92;
     hdr->current_lba = 1;
@@ -117,8 +112,15 @@ static int gpt_create_dual_partition_layout(block_device_t dev, uint64_t total_s
     hdr->partition_array_crc32 = gpt_crc32(entries_buf, entries_bytes);
     hdr->header_crc32 = 0;
     hdr->header_crc32 = gpt_crc32(hdr, 92);
-
     dev.write(1, 1, sec_buf);
+
+    // 4. LBA total_sectors - 1: Backup GPT Header
+    hdr->current_lba = total_sectors - 1;
+    hdr->backup_lba = 1;
+    hdr->partition_entries_lba = total_sectors - 33;
+    hdr->header_crc32 = 0;
+    hdr->header_crc32 = gpt_crc32(hdr, 92);
+    dev.write(total_sectors - 1, 1, sec_buf);
 
     kfree(entries_buf);
     kfree(sec_buf);
@@ -412,26 +414,23 @@ void installer_run(void) {
                 term_clear_screen();
                 tui_draw_box(2, 2, 76, 18, " FORMATTING DISK (GPT: ESP + ROOT) ", COLOR_HEADER, COLOR_TUI_BG);
 
-                installer_log_verbose("Creating Dual-Partition GPT Layout (ESP 16MB + ROOT EXT2)...");
+                installer_log_verbose("Creating Dual-Partition GPT Layout (ESP 34MB + ROOT EXT2)...");
                 tui_draw_progress(4, 5, 72, 10, COLOR_HEADER, COLOR_TUI_BG);
 
-                uint64_t total_sec = 131072; // 64MB Default Disk Image
-                uint32_t esp_sec = 32768;    // 16MB ESP
+                uint64_t total_sec = 131072; // 64MB Disk Image
+                uint32_t esp_sec = 69632;    // 34MB ESP
 
-                // 1. Write Partition Table (GPT)
                 gpt_create_dual_partition_layout(g_installer_ctx.target_dev, total_sec, esp_sec);
-                installer_log_verbose("Partition #1: ESP FAT32 (LBA 2048 .. 34815)");
-                installer_log_verbose("Partition #2: ROOT EXT2 (LBA 34816 .. 131038)");
+                installer_log_verbose("Partition #1: ESP FAT32 (LBA 2048 .. 71679)");
+                installer_log_verbose("Partition #2: ROOT EXT2 (LBA 71680 .. 131038)");
 
-                // 2. Format ESP to FAT32
                 tui_draw_progress(4, 5, 72, 40, COLOR_HEADER, COLOR_TUI_BG);
                 installer_log_verbose("Formatting Partition #1 with FAT32 (ESP)...");
                 mkfs_fat32(g_installer_ctx.target_dev, 2048, esp_sec, "EFI SYSTEM");
 
-                // 3. Format Root to EXT2
                 tui_draw_progress(4, 5, 72, 80, COLOR_HEADER, COLOR_TUI_BG);
                 installer_log_verbose("Formatting Partition #2 with EXT2 (Root)...");
-                mkfs_ext2(g_installer_ctx.target_dev, 34816, (uint32_t)(total_sec - 34 - 34816 + 1), "EQUANT_SYS");
+                mkfs_ext2(g_installer_ctx.target_dev, 71680, (uint32_t)(total_sec - 34 - 71680 + 1), "EQUANT_SYS");
 
                 tui_draw_progress(4, 5, 72, 100, COLOR_HEADER, COLOR_TUI_BG);
                 installer_log_verbose("Formatting complete! Moving to file deployment.");
@@ -444,13 +443,13 @@ void installer_run(void) {
                 tui_draw_box(2, 2, 76, 20, " DEPLOYING UEFI ESP & SYSTEM PAYLOAD ", COLOR_HEADER, COLOR_TUI_BG);
                 g_log_row = 11;
 
-                // 1. Mount ESP FAT32 Partition (LBA 2048)
+                // 1. Mount ESP FAT32 Partition (LBA 2048, 34MB)
                 installer_log_verbose("Mounting ESP FAT32 partition (LBA 2048)...");
-                vfs_node_t *esp_root = fat32_mount_partition(g_installer_ctx.target_dev, 2048, 32768);
+                vfs_node_t *esp_root = fat32_mount_partition(g_installer_ctx.target_dev, 2048, 69632);
 
-                // 2. Mount Root EXT2 Partition (LBA 34816)
-                installer_log_verbose("Mounting Root EXT2 partition (LBA 34816)...");
-                vfs_node_t *root_ext2 = ext2_mount_partition(g_installer_ctx.target_dev, 34816);
+                // 2. Mount Root EXT2 Partition (LBA 71680)
+                installer_log_verbose("Mounting Root EXT2 partition (LBA 71680)...");
+                vfs_node_t *root_ext2 = ext2_mount_partition(g_installer_ctx.target_dev, 71680);
 
                 if (!esp_root || !root_ext2) {
                     snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "Failed to mount target volumes!");
@@ -458,9 +457,10 @@ void installer_run(void) {
                     break;
                 }
 
-                // Create ESP Directories: /EFI, /EFI/BOOT, /boot, /sys, /sys/bin
+                // Create ESP Directories: /EFI, /EFI/BOOT, /EFI/equantos, /boot, /sys, /sys/bin
                 vfs_node_t *esp_efi = vfs_create(esp_root, "EFI", FS_DIRECTORY);
                 vfs_node_t *esp_boot = esp_efi ? vfs_create(esp_efi, "BOOT", FS_DIRECTORY) : NULL;
+                vfs_node_t *esp_equantos = esp_efi ? vfs_create(esp_efi, "equantos", FS_DIRECTORY) : NULL;
                 vfs_node_t *esp_boot_dir = vfs_create(esp_root, "boot", FS_DIRECTORY);
                 vfs_node_t *esp_sys = vfs_create(esp_root, "sys", FS_DIRECTORY);
                 vfs_node_t *esp_bin = esp_sys ? vfs_create(esp_sys, "bin", FS_DIRECTORY) : NULL;
@@ -501,34 +501,42 @@ void installer_run(void) {
 
                     if (src && src->length > 0) {
                         // 1. Deploy Boot files to ESP Partition (FAT32)
-                        bool goes_to_esp = (strcmp(fname, "BOOTX64.EFI") == 0 ||
-                                            strcmp(fname, "limine.conf") == 0 ||
-                                            strcmp(fname, "kernel.elf") == 0 ||
-                                            strcmp(fname, "font.psf") == 0);
+                        vfs_node_t *dest_esp = esp_root;
+                        if (strcmp(fname, "BOOTX64.EFI") == 0) dest_esp = esp_boot ? esp_boot : esp_root;
+                        else if (strcmp(fname, "kernel.elf") == 0 || strcmp(fname, "limine.conf") == 0) dest_esp = esp_boot_dir ? esp_boot_dir : esp_root;
+                        else dest_esp = esp_bin ? esp_bin : esp_root;
 
-                        if (goes_to_esp) {
-                            vfs_node_t *dest_esp = esp_root;
-                            if (strcmp(fname, "BOOTX64.EFI") == 0) dest_esp = esp_boot ? esp_boot : esp_root;
-                            else if (strcmp(fname, "kernel.elf") == 0 || strcmp(fname, "limine.conf") == 0) dest_esp = esp_boot_dir ? esp_boot_dir : esp_root;
-                            else if (strcmp(fname, "font.psf") == 0) dest_esp = esp_bin ? esp_bin : esp_root;
+                        vfs_node_t *node_esp = vfs_create(dest_esp, fname, FS_FILE);
+                        if (node_esp) {
+                            uint64_t off = 0;
+                            while (off < src->length) {
+                                uint64_t to_r = src->length - off;
+                                if (to_r > CHUNK_SZ) to_r = CHUNK_SZ;
+                                int64_t r = vfs_read(src, off, to_r, cbuf);
+                                if (r <= 0) break;
+                                vfs_write(node_esp, off, r, cbuf);
+                                off += r;
+                            }
+                        }
 
-                            vfs_node_t *node_esp = vfs_create(dest_esp, fname, FS_FILE);
-                            if (node_esp) {
+                        // Also deploy BOOTX64.EFI to /EFI/equantos/BOOTX64.EFI
+                        if (strcmp(fname, "BOOTX64.EFI") == 0 && esp_equantos) {
+                            vfs_node_t *node_eq = vfs_create(esp_equantos, fname, FS_FILE);
+                            if (node_eq) {
                                 uint64_t off = 0;
                                 while (off < src->length) {
                                     uint64_t to_r = src->length - off;
                                     if (to_r > CHUNK_SZ) to_r = CHUNK_SZ;
                                     int64_t r = vfs_read(src, off, to_r, cbuf);
                                     if (r <= 0) break;
-                                    vfs_write(node_esp, off, r, cbuf);
+                                    vfs_write(node_eq, off, r, cbuf);
                                     off += r;
                                 }
                             }
                         }
 
                         // 2. Deploy OS System files to Root Partition (EXT2)
-                        bool goes_to_ext2 = (strcmp(fname, "BOOTX64.EFI") != 0);
-                        if (goes_to_ext2) {
+                        if (strcmp(fname, "BOOTX64.EFI") != 0) {
                             vfs_node_t *dest_ext2 = (strcmp(fname, "kernel.elf") == 0 || strcmp(fname, "limine.conf") == 0) ? r_boot : r_bin;
                             if (!dest_ext2) dest_ext2 = root_ext2;
 
@@ -563,11 +571,10 @@ void installer_run(void) {
                 tui_draw_box(2, 2, 76, 18, " LIMINE BOOTLOADER DEPLOYMENT ", COLOR_HEADER, COLOR_TUI_BG);
                 g_log_row = 10;
 
-                installer_log_verbose("Configuring Limine v8 Bootloader on ESP & Root...");
+                installer_log_verbose("Deploying Limine v8 'limine.conf' across UEFI search paths...");
 
-                // Standard Limine v8 Configuration Content
                 const char *limine_cfg_content = 
-                    "timeout: 1\n\n"
+                    "timeout: 3\n\n"
                     "/EquantOS\n"
                     "    protocol: limine\n"
                     "    kernel_path: boot():/boot/kernel.elf\n"
@@ -577,16 +584,15 @@ void installer_run(void) {
                     "    module_path: boot():/sys/bin/.bashrc\n"
                     "    module_path: boot():/sys/bin/hello.elf\n";
 
-                // Mount ESP and Root volumes
-                vfs_node_t *esp_root = fat32_mount_partition(g_installer_ctx.target_dev, 2048, 32768);
-                vfs_node_t *root_ext2 = ext2_mount_partition(g_installer_ctx.target_dev, 34816);
+                vfs_node_t *esp_root = fat32_mount_partition(g_installer_ctx.target_dev, 2048, 69632);
+                vfs_node_t *root_ext2 = ext2_mount_partition(g_installer_ctx.target_dev, 71680);
 
                 if (esp_root) {
-                    // Write limine.conf to ESP Root '/'
+                    // 1. ESP Root '/limine.conf'
                     vfs_node_t *cfg_root = vfs_create(esp_root, "limine.conf", FS_FILE);
                     if (cfg_root) vfs_write(cfg_root, 0, strlen(limine_cfg_content), (uint8_t *)limine_cfg_content);
 
-                    // Write limine.conf to ESP '/EFI/BOOT/limine.conf'
+                    // 2. ESP '/EFI/BOOT/limine.conf'
                     vfs_node_t *efi_dir = vfs_finddir(esp_root, "EFI");
                     if (efi_dir) {
                         vfs_node_t *efi_boot = vfs_finddir(efi_dir, "BOOT");
@@ -594,16 +600,23 @@ void installer_run(void) {
                             vfs_node_t *cfg_efi = vfs_create(efi_boot, "limine.conf", FS_FILE);
                             if (cfg_efi) vfs_write(cfg_efi, 0, strlen(limine_cfg_content), (uint8_t *)limine_cfg_content);
                         }
+
+                        // 3. ESP '/EFI/equantos/limine.conf'
+                        vfs_node_t *efi_eq = vfs_finddir(efi_dir, "equantos");
+                        if (efi_eq) {
+                            vfs_node_t *cfg_eq = vfs_create(efi_eq, "limine.conf", FS_FILE);
+                            if (cfg_eq) vfs_write(cfg_eq, 0, strlen(limine_cfg_content), (uint8_t *)limine_cfg_content);
+                        }
                     }
 
-                    // Write limine.conf to ESP '/boot/limine.conf'
+                    // 4. ESP '/boot/limine.conf'
                     vfs_node_t *esp_boot_dir = vfs_finddir(esp_root, "boot");
                     if (esp_boot_dir) {
                         vfs_node_t *cfg_boot = vfs_create(esp_boot_dir, "limine.conf", FS_FILE);
                         if (cfg_boot) vfs_write(cfg_boot, 0, strlen(limine_cfg_content), (uint8_t *)limine_cfg_content);
                     }
 
-                    installer_log_verbose("SUCCESS: Limine v8 'limine.conf' written to ESP partition.");
+                    installer_log_verbose("SUCCESS: 'limine.conf' deployed to /EFI/BOOT, /EFI/equantos, /boot, and /");
                 }
 
                 if (root_ext2) {
@@ -612,7 +625,7 @@ void installer_run(void) {
                         vfs_node_t *cfg_ext2 = vfs_create(r_boot, "limine.conf", FS_FILE);
                         if (cfg_ext2) vfs_write(cfg_ext2, 0, strlen(limine_cfg_content), (uint8_t *)limine_cfg_content);
                     }
-                    installer_log_verbose("SUCCESS: Limine v8 'limine.conf' written to Root EXT2.");
+                    installer_log_verbose("SUCCESS: 'limine.conf' written to Root EXT2.");
                 }
 
                 tui_draw_progress(4, 5, 72, 100, COLOR_HEADER, COLOR_TUI_BG);
