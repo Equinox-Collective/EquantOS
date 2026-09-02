@@ -222,13 +222,14 @@ disks:
 
 limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
 	$(call LOG_MSG,  $(CLR_INFO) Downloading Limine Bootloader binaries...)
-	$(Q)git clone https://github.com/limine-bootloader/limine.git --branch=v8.x-binary --depth=1 _limine_bin
-	$(Q)$(call CP,_limine_bin/limine-bios-cd.bin,limine-bios-cd.bin)
-	$(Q)$(call CP,_limine_bin/limine-bios.sys,limine-bios.sys)
-	$(Q)$(call CP,_limine_bin/limine-uefi-cd.bin,limine-uefi-cd.bin)
-	$(Q)$(call CP,_limine_bin/BOOTX64.EFI,BOOTX64.EFI)
-	$(Q)$(call RMDIR,_limine_bin)
-
+	$(Q)curl -Lo limine-binary.tar.gz https://github.com/limine-bootloader/limine/releases/latest/download/limine-binary.tar.gz
+	$(Q)tar -xzf limine-binary.tar.gz
+	$(Q)$(call CP,limine-binary/limine-bios-cd.bin,limine-bios-cd.bin)
+	$(Q)$(call CP,limine-binary/limine-bios.sys,limine-bios.sys)
+	$(Q)$(call CP,limine-binary/limine-uefi-cd.bin,limine-uefi-cd.bin)
+	$(Q)$(call CP,limine-binary/BOOTX64.EFI,BOOTX64.EFI)
+	$(Q)$(call RMDIR,limine-binary)
+	$(Q)$(call RM,limine-binary.tar.gz)
 # ==============================================================================
 # Final Target: ISO Image Generation
 # ==============================================================================
@@ -289,6 +290,8 @@ clean-all: clean clean-disks
 	$(Q)$(call RM,limine-bios.sys)
 	$(Q)$(call RM,limine-uefi-cd.bin)
 	$(Q)$(call RM,BOOTX64.EFI)
+	$(Q)$(call RM,limine-binary.tar.gz)
+	$(Q)$(call RMDIR,limine-binary)
 
 # ==============================================================================
 # Self-Documenting Help System
