@@ -1,4 +1,4 @@
-// ext2.c - EXT2 Filesystem Driver Implementation with Block Device Abstraction
+// src/kernel/fs/ext2.c - Production-Grade EXT2 Filesystem Driver with Strict Inode & Directory Alignment
 #include "ext2.h"
 #include "mbr.h"
 #include "partition.h"
@@ -19,14 +19,14 @@ typedef struct {
 } ext2_volume_t;
 
 static ext2_volume_t ext2_vol;
+static uint32_t ext2_last_alloc_block = 0;
 
-// Forward declarations
 static int64_t ext2_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index);
 static vfs_node_t *ext2_finddir(vfs_node_t *node, const char *name);
 static vfs_node_t *ext2_create(vfs_node_t *dir, const char *name, uint32_t flags);
-static uint32_t ext2_last_alloc_block = 0;
+
 static vfs_file_operations_t ext2_fops = {
     .read = ext2_read,
     .write = ext2_write,
@@ -130,6 +130,8 @@ static uint32_t ext2_alloc_block(void) {
         ext2_vol.dev.write(ext2_block_to_lba(bitmap_block), ext2_vol.sectors_per_block, bitmap);
         ext2_vol.bg0.bg_free_blocks_count--;
         ext2_vol.sb.s_free_blocks_count--;
+        ext2_write_bgd();
+        ext2_write_superblock();
     }
 
     kfree(bitmap);
@@ -147,7 +149,6 @@ static uint32_t ext2_alloc_inode(void) {
     uint32_t start_ino = ext2_vol.sb.s_first_ino ? (ext2_vol.sb.s_first_ino - 1) : 10;
     uint32_t allocated_inode = 0;
 
-    // Начинаем поиск строго со свободных пользовательских инодов (11+)
     for (uint32_t i = start_ino; i < total_inodes; i++) {
         uint32_t byte_idx = i / 8;
         uint8_t bit_idx = i % 8;
@@ -170,48 +171,9 @@ static uint32_t ext2_alloc_inode(void) {
     return allocated_inode;
 }
 
-static int64_t ext2_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    uint32_t inode_num = (uint32_t)(uintptr_t)node->ptr;
-    ext2_inode_t inode;
-    ext2_read_inode(inode_num, &inode);
-
-    if (offset >= inode.i_size) return 0;
-    uint64_t bytes_to_read = size;
-    if (offset + size > inode.i_size) {
-        bytes_to_read = inode.i_size - offset;
-    }
-
-    uint32_t bs = ext2_vol.block_size;
-    uint8_t *blk_buf = (uint8_t *)kmalloc(bs);
-    if (!blk_buf) return -1;
-    uint64_t bytes_read = 0;
-
-    while (bytes_read < bytes_to_read) {
-        uint64_t file_off = offset + bytes_read;
-        uint32_t block_idx = file_off / bs;
-        uint32_t block_in_ino = inode.i_block[block_idx];
-
-        ext2_vol.dev.read(ext2_block_to_lba(block_in_ino), ext2_vol.sectors_per_block, blk_buf);
-
-        uint64_t chunk_off = file_off % bs;
-        uint64_t chunk_size = bs - chunk_off;
-        if (chunk_size > bytes_to_read - bytes_read) {
-            chunk_size = bytes_to_read - bytes_read;
-        }
-
-        memcpy(buffer + bytes_read, blk_buf + chunk_off, chunk_size);
-        bytes_read += chunk_size;
-    }
-
-    kfree(blk_buf);
-    return bytes_read;
-}
-
-// src/kernel/fs/ext2.c - Indirect & Doubly-Indirect Block Ext2 Support
-
 static uint32_t ext2_get_or_alloc_file_block(uint32_t inode_num, ext2_inode_t *inode, uint32_t block_idx) {
     uint32_t bs = ext2_vol.block_size;
-    uint32_t pointers_per_block = bs / 4; // 256 for 1KB block
+    uint32_t pointers_per_block = bs / 4;
 
     // 1. Direct Blocks (0 .. 11)
     if (block_idx < 12) {
@@ -311,6 +273,44 @@ static uint32_t ext2_get_or_alloc_file_block(uint32_t inode_num, ext2_inode_t *i
     return res_blk;
 }
 
+static int64_t ext2_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    uint32_t inode_num = (uint32_t)(uintptr_t)node->ptr;
+    ext2_inode_t inode;
+    ext2_read_inode(inode_num, &inode);
+
+    if (offset >= inode.i_size) return 0;
+    uint64_t bytes_to_read = size;
+    if (offset + size > inode.i_size) {
+        bytes_to_read = inode.i_size - offset;
+    }
+
+    uint32_t bs = ext2_vol.block_size;
+    uint8_t *blk_buf = (uint8_t *)kmalloc(bs);
+    if (!blk_buf) return -1;
+    uint64_t bytes_read = 0;
+
+    while (bytes_read < bytes_to_read) {
+        uint64_t file_off = offset + bytes_read;
+        uint32_t block_idx = file_off / bs;
+        uint32_t block_num = ext2_get_or_alloc_file_block(inode_num, &inode, block_idx);
+        if (block_num == 0) break;
+
+        ext2_vol.dev.read(ext2_block_to_lba(block_num), ext2_vol.sectors_per_block, blk_buf);
+
+        uint64_t chunk_off = file_off % bs;
+        uint64_t chunk_size = bs - chunk_off;
+        if (chunk_size > bytes_to_read - bytes_read) {
+            chunk_size = bytes_to_read - bytes_read;
+        }
+
+        memcpy(buffer + bytes_read, blk_buf + chunk_off, chunk_size);
+        bytes_read += chunk_size;
+    }
+
+    kfree(blk_buf);
+    return bytes_read;
+}
+
 static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     uint32_t inode_num = (uint32_t)(uintptr_t)node->ptr;
     ext2_inode_t inode;
@@ -329,12 +329,14 @@ static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint
         uint8_t *blk_buf = (uint8_t *)kmalloc(bs);
         if (!blk_buf) break;
 
-        ext2_vol.dev.read(ext2_block_to_lba(block_num), ext2_vol.sectors_per_block, blk_buf);
-
         uint64_t chunk_off = file_off % bs;
         uint64_t chunk_size = bs - chunk_off;
         if (chunk_size > size - bytes_written) {
             chunk_size = size - bytes_written;
+        }
+
+        if (chunk_off != 0 || chunk_size != bs) {
+            ext2_vol.dev.read(ext2_block_to_lba(block_num), ext2_vol.sectors_per_block, blk_buf);
         }
 
         memcpy(blk_buf + chunk_off, buffer + bytes_written, chunk_size);
@@ -352,7 +354,6 @@ static int64_t ext2_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint
     ext2_write_inode(inode_num, &inode);
     node->length = inode.i_size;
 
-    // Flush metadata once at the end of write operation
     ext2_write_bgd();
     ext2_write_superblock();
 
@@ -368,7 +369,7 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
     if (!blk_buf) return 0;
 
     uint8_t name_len = strlen(name);
-    uint16_t required_len = (8 + name_len + 3) & ~3; // 8 bytes header + name aligned to 4
+    uint16_t required_len = (8 + name_len + 3) & ~3;
     int added = 0;
 
     for (int b = 0; b < 12; b++) {
@@ -385,7 +386,7 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
             memset(blk_buf, 0, bs);
             ext2_dir_entry_t *first_entry = (ext2_dir_entry_t *)blk_buf;
             first_entry->inode = new_inode_num;
-            first_entry->rec_len = bs;
+            first_entry->rec_len = bs; // MUST span entire block
             first_entry->name_len = name_len;
             first_entry->file_type = file_type;
             memcpy(first_entry->name, name, name_len);
@@ -399,7 +400,7 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
         uint32_t offset = 0;
         while (offset < bs) {
             ext2_dir_entry_t *entry = (ext2_dir_entry_t *)(blk_buf + offset);
-            if (entry->rec_len == 0) break;
+            if (entry->rec_len == 0 || offset + entry->rec_len > bs) break;
 
             uint16_t actual_entry_len = (8 + entry->name_len + 3) & ~3;
             if (entry->inode == 0) {
@@ -413,7 +414,7 @@ static int ext2_add_dir_entry(uint32_t dir_inode_num, uint32_t new_inode_num, co
                 uint32_t new_entry_offset = offset + actual_entry_len;
                 ext2_dir_entry_t *new_entry = (ext2_dir_entry_t *)(blk_buf + new_entry_offset);
                 new_entry->inode = new_inode_num;
-                new_entry->rec_len = old_rec_len - actual_entry_len;
+                new_entry->rec_len = old_rec_len - actual_entry_len; // MUST claim remaining space
                 new_entry->name_len = name_len;
                 new_entry->file_type = file_type;
                 memcpy(new_entry->name, name, name_len);
@@ -459,7 +460,6 @@ static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index) {
             if (entry->rec_len == 0 || offset + entry->rec_len > bs) break;
 
             if (entry->inode != 0 && entry->name_len > 0) {
-                // Пропускаем '.' и '..'
                 bool is_dot = (entry->name_len == 1 && entry->name[0] == '.');
                 bool is_dotdot = (entry->name_len == 2 && entry->name[0] == '.' && entry->name[1] == '.');
 
@@ -551,8 +551,6 @@ static vfs_node_t *ext2_finddir(vfs_node_t *node, const char *name) {
     return NULL;
 }
 
-
-
 static vfs_node_t *ext2_create(vfs_node_t *dir, const char *name, uint32_t flags) {
     uint32_t dir_inode_num = (uint32_t)(uintptr_t)dir->ptr;
 
@@ -569,11 +567,10 @@ static vfs_node_t *ext2_create(vfs_node_t *dir, const char *name, uint32_t flags
 
         new_inode.i_mode = EXT2_S_IFDIR | 0755;
         new_inode.i_size = ext2_vol.block_size;
-        new_inode.i_links_count = 2; // '.' and parent
+        new_inode.i_links_count = 2;
         new_inode.i_blocks = ext2_vol.sectors_per_block;
         new_inode.i_block[0] = dir_block;
 
-        // Инициализируем блок директории записями '.' и '..'
         uint8_t *blk = (uint8_t *)kzalloc(ext2_vol.block_size);
         if (blk) {
             ext2_dir_entry_t *dot = (ext2_dir_entry_t *)blk;
@@ -639,6 +636,8 @@ vfs_node_t *ext2_mount_partition(block_device_t dev, uint32_t partition_lba) {
     ext2_vol.dev.read(bgd_lba, ext2_vol.sectors_per_block, sector_buf);
     memcpy(&ext2_vol.bg0, sector_buf, sizeof(ext2_bgd_t));
 
+    ext2_last_alloc_block = 0;
+
     vfs_node_t *root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strcpy(root->name, "/");
     root->flags = FS_DIRECTORY;
@@ -654,13 +653,13 @@ void ext2_init(void) {
 }
 
 int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, const char *vol_label) {
-    if (!dev.write || sector_count < 2048) { // Require at least ~1MB size
+    if (!dev.write || sector_count < 2048) {
         serial_puts(COM1, "[MKFS-EXT2 ERROR] Invalid device or sector count too small!\n");
         return -1;
     }
 
-    uint32_t block_size = 1024; // Standard 1KB block size
-    uint32_t sectors_per_block = block_size / 512; // 2 sectors per block
+    uint32_t block_size = 1024;
+    uint32_t sectors_per_block = block_size / 512;
     uint32_t total_blocks = sector_count / sectors_per_block;
 
     if (total_blocks < 100) {
@@ -670,33 +669,19 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
 
     uint32_t blocks_per_group = 8192;
     uint32_t inodes_per_group = 1024;
-    uint32_t num_groups = (total_blocks + blocks_per_group - 1) / blocks_per_group;
-
-    if (num_groups > 1) {
-        // Keep single block group for simplicity during installation target
-        num_groups = 1;
-        total_blocks = blocks_per_group;
-    }
+    uint32_t num_groups = 1;
+    total_blocks = (total_blocks > blocks_per_group) ? blocks_per_group : total_blocks;
 
     uint32_t total_inodes = inodes_per_group * num_groups;
     uint32_t inode_size = 128;
-    uint32_t inode_table_blocks = (inodes_per_group * inode_size) / block_size; // 128 blocks for inodes
-
-    // Layout for Group 0:
-    // Block 0: Reserved for MBR / Bootloader (LBA start_lba .. start_lba+1)
-    // Block 1: Superblock (LBA start_lba + 2)
-    // Block 2: Block Group Descriptor Table (LBA start_lba + 4)
-    // Block 3: Block Bitmap
-    // Block 4: Inode Bitmap
-    // Block 5..(5 + inode_table_blocks - 1): Inode Table (Blocks 5..132)
-    // Block (5 + inode_table_blocks): Root Directory Data Block (#2)
+    uint32_t inode_table_blocks = (inodes_per_group * inode_size) / block_size; // 128 blocks
 
     uint32_t block_bitmap_blk = 3;
     uint32_t inode_bitmap_blk = 4;
     uint32_t inode_table_blk  = 5;
-    uint32_t root_dir_blk     = 5 + inode_table_blocks;
+    uint32_t root_dir_blk     = 5 + inode_table_blocks; // 133
 
-    uint32_t reserved_system_blocks = root_dir_blk + 1; // All blks up to & including root dir data
+    uint32_t reserved_system_blocks = root_dir_blk; // 133 system blocks (Blocks 1..133)
 
     // 1. Prepare Superblock
     ext2_superblock_t sb;
@@ -705,19 +690,19 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
     sb.s_inodes_count       = total_inodes;
     sb.s_blocks_count       = total_blocks;
     sb.s_r_blocks_count     = 0;
-    sb.s_free_blocks_count  = total_blocks - reserved_system_blocks;
-    sb.s_free_inodes_count  = total_inodes - 11; // Reserved inodes 1..10 used, 11 free
-    sb.s_first_data_block   = 1; // 1KB block size offset
-    sb.s_log_block_size     = 0; // 1024 << 0 = 1024
+    sb.s_free_blocks_count  = total_blocks - reserved_system_blocks - 1;
+    sb.s_free_inodes_count  = total_inodes - 11;
+    sb.s_first_data_block   = 1;
+    sb.s_log_block_size     = 0;
     sb.s_log_frag_size      = 0;
     sb.s_blocks_per_group   = blocks_per_group;
     sb.s_frags_per_group    = blocks_per_group;
     sb.s_inodes_per_group   = inodes_per_group;
-    sb.s_magic              = EXT2_SUPER_MAGIC; // 0xEF53
+    sb.s_magic              = EXT2_SUPER_MAGIC;
     sb.s_state              = EXT2_VALID_FS;
-    sb.s_errors             = 1; // Continue on errors
+    sb.s_errors             = 1;
     sb.s_minor_rev_level    = 0;
-    sb.s_rev_level          = 0; // Revision 0
+    sb.s_rev_level          = 0;
     sb.s_first_ino          = 11;
     sb.s_inode_size         = 128;
     sb.s_block_group_nr     = 0;
@@ -728,7 +713,6 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
         strcpy(sb.s_volume_name, "EQUANT_EXT2");
     }
 
-    // Write Superblock to Block 1 (LBA start_lba + 2)
     uint8_t *block_buf = (uint8_t *)kzalloc(block_size);
     if (!block_buf) return -1;
 
@@ -744,7 +728,7 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
     bgd.bg_inode_table       = inode_table_blk;
     bgd.bg_free_blocks_count = (uint16_t)sb.s_free_blocks_count;
     bgd.bg_free_inodes_count = (uint16_t)sb.s_free_inodes_count;
-    bgd.bg_used_dirs_count   = 1; // Root directory
+    bgd.bg_used_dirs_count   = 1;
 
     memset(block_buf, 0, block_size);
     memcpy(block_buf, &bgd, sizeof(ext2_bgd_t));
@@ -752,37 +736,36 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
 
     // 3. Write Block Bitmap
     memset(block_buf, 0, block_size);
-    for (uint32_t i = 0; i < reserved_system_blocks; i++) {
+    for (uint32_t i = 0; i <= reserved_system_blocks - 1; i++) {
         block_buf[i / 8] |= (1 << (i % 8));
     }
     dev.write(start_lba + (block_bitmap_blk * sectors_per_block), sectors_per_block, block_buf);
 
     // 4. Write Inode Bitmap
     memset(block_buf, 0, block_size);
-    // Mark inodes 1..10 as used
     for (uint32_t i = 0; i < 10; i++) {
         block_buf[i / 8] |= (1 << (i % 8));
     }
     dev.write(start_lba + (inode_bitmap_blk * sectors_per_block), sectors_per_block, block_buf);
 
-    // 5. Zero out Inode Table
+    // 5. Zero out Inode Table (STRICT MEMSET TO PREVENT GARBAGE INODES)
     memset(block_buf, 0, block_size);
     for (uint32_t i = 0; i < inode_table_blocks; i++) {
         dev.write(start_lba + ((inode_table_blk + i) * sectors_per_block), sectors_per_block, block_buf);
     }
 
-    // 6. Write Root Inode (#2) into Inode Table Block 5 (Offset 128 bytes)
+    // 6. Write Root Inode (#2)
     ext2_inode_t root_inode;
     memset(&root_inode, 0, sizeof(ext2_inode_t));
 
     root_inode.i_mode        = EXT2_S_IFDIR | 0755;
     root_inode.i_size        = block_size;
-    root_inode.i_links_count = 2; // '.' and '..'
+    root_inode.i_links_count = 2;
     root_inode.i_blocks      = sectors_per_block;
     root_inode.i_block[0]    = root_dir_blk;
 
-    dev.read(start_lba + (inode_table_blk * sectors_per_block), sectors_per_block, block_buf);
-    memcpy(block_buf + inode_size, &root_inode, sizeof(ext2_inode_t)); // Inode 2 is index 1 -> offset 128
+    memset(block_buf, 0, block_size);
+    memcpy(block_buf + inode_size, &root_inode, sizeof(ext2_inode_t));
     dev.write(start_lba + (inode_table_blk * sectors_per_block), sectors_per_block, block_buf);
 
     // 7. Initialize Root Directory Data Block
@@ -791,14 +774,14 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
     ext2_dir_entry_t *entry_dot = (ext2_dir_entry_t *)block_buf;
     entry_dot->inode     = 2;
     entry_dot->rec_len   = 12;
-    entry_dot->name_len = 1;
+    entry_dot->name_len  = 1;
     entry_dot->file_type = EXT2_FT_DIR;
     entry_dot->name[0]   = '.';
 
     ext2_dir_entry_t *entry_dotdot = (ext2_dir_entry_t *)(block_buf + 12);
     entry_dotdot->inode     = 2;
-    entry_dotdot->rec_len   = block_size - 12; // Occupies remaining block space
-    entry_dotdot->name_len = 2;
+    entry_dotdot->rec_len   = block_size - 12;
+    entry_dotdot->name_len  = 2;
     entry_dotdot->file_type = EXT2_FT_DIR;
     entry_dotdot->name[0]   = '.';
     entry_dotdot->name[1]   = '.';
@@ -809,8 +792,6 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
     serial_puts(COM1, "[MKFS-EXT2 SUCCESS] Formatted target partition with Ext2 File System!\n");
     return 0;
 }
-
-// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
 
 static int __init ext2_fs_initcall(void) {
     ext2_init();
