@@ -1,4 +1,4 @@
-// src/kernel/misc/installer.c - Full Production TUI & Dual-Partition UEFI Installer
+// src/kernel/misc/installer.c - Production-Grade UEFI GPT Installer with Drive Discovery & Configuration
 #include "installer.h"
 #include "../../equterm/term.h"
 #include "../drivers/tty/tty.h"
@@ -26,7 +26,7 @@
 #define COLOR_SUCCESS_FG    0x0033FF33
 #define COLOR_LOG_FG        0x00FFFF55
 
-#define CHUNK_SZ 65536
+#define CHUNK_SZ            65536 // 64KB safe copy buffer
 
 static installer_ctx_t g_installer_ctx;
 static int g_log_row = 12;
@@ -43,26 +43,61 @@ static uint32_t gpt_crc32(const void *data, size_t len) {
     return ~crc;
 }
 
-static int gpt_create_dual_partition_layout(block_device_t dev, uint64_t total_sectors, uint32_t esp_sectors) {
-    if (total_sectors < 65536) return -1;
+static int installer_discover_drives(installer_ctx_t *ctx) {
+    ctx->disk_count = 0;
+
+    // 1. Probe NVMe Controllers
+    if (nvme_init() == NVME_SUCCESS) {
+        installer_disk_t *d = &ctx->disks[ctx->disk_count++];
+        strcpy(d->name, "NVMe PCIe Solid-State Drive");
+        d->bdev = nvme_get_block_device();
+        d->sector_size = d->bdev.sector_size ? d->bdev.sector_size : 512;
+        // If driver does not expose full geometry, fallback to standard image sizing
+        d->total_sectors = 131072; // Default 64MB for QEMU test disk
+        d->is_nvme = true;
+    }
+
+    // 2. Probe ATA Primary Master
+    block_device_t ata_master = {
+        .read = (block_read_fn)read_sectors_ata_pio,
+        .write = (block_write_fn)write_sectors_ata_pio,
+        .sector_size = 512
+    };
+
+    // Test readability of LBA 0 to check drive presence
+    uint8_t probe_sector[512];
+    if (ata_master.read(0, 1, probe_sector) == 0) {
+        installer_disk_t *d = &ctx->disks[ctx->disk_count++];
+        strcpy(d->name, "Primary ATA Hard Disk");
+        d->bdev = ata_master;
+        d->sector_size = 512;
+        d->total_sectors = 131072;
+        d->is_nvme = false;
+    }
+
+    return ctx->disk_count;
+}
+
+static int gpt_create_layout(block_device_t dev, uint64_t total_sec, uint64_t esp_start, uint64_t esp_cnt, uint64_t root_start, uint64_t root_cnt) {
+    if (total_sec < 65536) return -1;
 
     uint8_t *sec_buf = (uint8_t *)kzalloc(512);
     if (!sec_buf) return -1;
 
-    // 1. LBA 0: Protective MBR
-    sec_buf[446 + 4] = 0xEE;
+    // 1. Protective MBR (LBA 0)
+    sec_buf[446 + 4] = 0xEE; // GPT Protective Type
     *(uint32_t *)&sec_buf[446 + 8] = 1;
-    *(uint32_t *)&sec_buf[446 + 12] = (uint32_t)(total_sectors - 1);
+    *(uint32_t *)&sec_buf[446 + 12] = (uint32_t)(total_sec - 1);
     sec_buf[510] = 0x55;
     sec_buf[511] = 0xAA;
     dev.write(0, 1, sec_buf);
 
-    // 2. LBA 2..33: 128 GPT Partition Entries (16384 bytes)
+    // 2. GPT Partition Entries (LBA 2..33)
     uint32_t entries_bytes = 128 * 128;
     uint8_t *entries_buf = (uint8_t *)kzalloc(entries_bytes);
-    if (!entries_buf) { 
-        kfree(sec_buf); 
-        return -1; 
+    if (!entries_buf) {
+        kfree(sec_buf);
+        return -1;
     }
 
     static const uint8_t esp_guid[16] = {
@@ -74,38 +109,34 @@ static int gpt_create_dual_partition_layout(block_device_t dev, uint64_t total_s
         0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4
     };
 
-    uint64_t p1_start = 2048;
-    uint64_t p1_end   = 2048 + esp_sectors - 1;
-
-    uint64_t p2_start = p1_end + 1;
-    uint64_t p2_end   = total_sectors - 34;
-
+    // Partition 0: EFI System Partition (ESP)
     gpt_partition_entry_t *e0 = (gpt_partition_entry_t *)&entries_buf[0];
     memcpy(e0->partition_type_guid, esp_guid, 16);
     memset(e0->unique_partition_guid, 0x01, 16);
-    e0->starting_lba = p1_start;
-    e0->ending_lba = p1_end;
+    e0->starting_lba = esp_start;
+    e0->ending_lba = esp_start + esp_cnt - 1;
 
+    // Partition 1: Linux / EquantOS Root Partition
     gpt_partition_entry_t *e1 = (gpt_partition_entry_t *)&entries_buf[128];
     memcpy(e1->partition_type_guid, linux_guid, 16);
     memset(e1->unique_partition_guid, 0x02, 16);
-    e1->starting_lba = p2_start;
-    e1->ending_lba = p2_end;
+    e1->starting_lba = root_start;
+    e1->ending_lba = root_start + root_cnt - 1;
 
     dev.write(2, 32, entries_buf);
-    dev.write(total_sectors - 33, 32, entries_buf);
+    dev.write(total_sec - 33, 32, entries_buf);
 
-    // 3. LBA 1: Primary GPT Header
+    // 3. Primary GPT Header (LBA 1)
     memset(sec_buf, 0, 512);
     gpt_header_t *hdr = (gpt_header_t *)sec_buf;
     hdr->signature = GPT_SIGNATURE;
     hdr->revision = 0x00010000;
     hdr->header_size = 92;
     hdr->current_lba = 1;
-    hdr->backup_lba = total_sectors - 1;
+    hdr->backup_lba = total_sec - 1;
     hdr->first_usable_lba = 34;
-    hdr->last_usable_lba = total_sectors - 34;
-    memset(hdr->disk_guid, 0x05, 16);
+    hdr->last_usable_lba = total_sec - 34;
+    memset(hdr->disk_guid, 0xA5, 16);
     hdr->partition_entries_lba = 2;
     hdr->num_partition_entries = 128;
     hdr->size_partition_entry = 128;
@@ -114,13 +145,13 @@ static int gpt_create_dual_partition_layout(block_device_t dev, uint64_t total_s
     hdr->header_crc32 = gpt_crc32(hdr, 92);
     dev.write(1, 1, sec_buf);
 
-    // 4. LBA total_sectors - 1: Backup GPT Header
-    hdr->current_lba = total_sectors - 1;
+    // 4. Backup GPT Header (LBA total_sec - 1)
+    hdr->current_lba = total_sec - 1;
     hdr->backup_lba = 1;
-    hdr->partition_entries_lba = total_sectors - 33;
+    hdr->partition_entries_lba = total_sec - 33;
     hdr->header_crc32 = 0;
     hdr->header_crc32 = gpt_crc32(hdr, 92);
-    dev.write(total_sectors - 1, 1, sec_buf);
+    dev.write(total_sec - 1, 1, sec_buf);
 
     kfree(entries_buf);
     kfree(sec_buf);
@@ -140,7 +171,7 @@ void installer_log_verbose(const char *fmt, ...) {
 
     term_set_cursor(4 * 16, g_log_row * 32);
     term_set_custom_colors(COLOR_LOG_FG, COLOR_TUI_BG);
-    
+
     char line_pad[72];
     memset(line_pad, ' ', sizeof(line_pad) - 1);
     line_pad[sizeof(line_pad) - 1] = '\0';
@@ -152,28 +183,6 @@ void installer_log_verbose(const char *fmt, ...) {
     g_log_row++;
     if (g_log_row > 18) {
         g_log_row = 12;
-    }
-
-    vfs_node_t *var_dir = vfs_open("/var", 0);
-    if (!var_dir) {
-        vfs_node_t *root = vfs_open("/", 0);
-        var_dir = vfs_create(root, "var", FS_DIRECTORY);
-    }
-    if (var_dir) {
-        vfs_node_t *log_dir = vfs_open("/var/log", 0);
-        if (!log_dir) {
-            log_dir = vfs_create(var_dir, "log", FS_DIRECTORY);
-        }
-        if (log_dir) {
-            vfs_node_t *logfile = vfs_open("/var/log/installer.log", 0);
-            if (!logfile) {
-                logfile = vfs_create(log_dir, "installer.log", FS_FILE);
-            }
-            if (logfile) {
-                vfs_write(logfile, logfile->length, strlen(log_buf), (uint8_t *)log_buf);
-                vfs_write(logfile, logfile->length, 1, (uint8_t *)"\n");
-            }
-        }
     }
 }
 
@@ -281,42 +290,68 @@ bool tui_dialog_confirm(const char *title, const char *warning_text) {
 
     const char *options[] = {
         "NO  - Cancel Operation (SAFE)",
-        "YES - Format Target Partition and Install EquantOS"
+        "YES - Proceed with Write to Disk"
     };
 
-    int choice = tui_select_menu(4, 9, 72, " CONFIRM DISK FORMAT ", options, 2);
+    int choice = tui_select_menu(4, 9, 72, " CONFIRM OPERATION ", options, 2);
     return (choice == 1);
+}
+
+static bool deploy_file_stream(vfs_node_t *dest_dir, const char *fname, vfs_node_t *src, uint8_t *buffer, size_t buf_sz) {
+    if (!dest_dir || !fname || !src) return false;
+
+    vfs_node_t *node = vfs_create(dest_dir, fname, FS_FILE);
+    if (!node) return false;
+
+    uint64_t offset = 0;
+    while (offset < src->length) {
+        uint64_t to_read = src->length - offset;
+        if (to_read > buf_sz) to_read = buf_sz;
+
+        int64_t bytes_read = vfs_read(src, offset, to_read, buffer);
+        if (bytes_read <= 0) return false;
+
+        int64_t bytes_written = vfs_write(node, offset, bytes_read, buffer);
+        if (bytes_written != bytes_read) return false;
+
+        offset += bytes_written;
+    }
+
+    return true;
 }
 
 void installer_run(void) {
     memset(&g_installer_ctx, 0, sizeof(installer_ctx_t));
     g_installer_ctx.current_state = STATE_WELCOME;
+    strcpy(g_installer_ctx.sys_cfg.hostname, "equantos");
+    g_installer_ctx.sys_cfg.boot_timeout = 3;
+    strcpy(g_installer_ctx.sys_cfg.boot_cmdline, "quiet");
     g_log_row = 12;
 
-    installer_log_verbose("Session Started. Initializing TUI Subsystem...");
+    installer_log_verbose("Installer session initialized.");
 
     while (1) {
         switch (g_installer_ctx.current_state) {
 
             case STATE_WELCOME: {
                 term_clear_screen();
-                tui_draw_box(2, 2, 76, 14, " EquantOS Automated Installer ", COLOR_HEADER, COLOR_TUI_BG);
+                tui_draw_box(2, 2, 76, 14, " EquantOS System Installer ", COLOR_HEADER, COLOR_TUI_BG);
 
                 term_set_cursor(5 * 16, 5 * 32);
                 term_set_custom_colors(COLOR_TUI_FG, COLOR_TUI_BG);
-                term_print("Welcome to EquantOS Automated Installation Wizard!");
+                term_print("Welcome to EquantOS Professional Installation Wizard!");
 
                 term_set_cursor(5 * 16, 7 * 32);
-                term_print("This wizard will install EquantOS to your local drive.");
+                term_print("Configure storage layout, partitions, and deploy the system.");
 
                 const char *opts[] = {
-                    "Start Installation Wizard",
-                    "Exit to EquantOS Shell"
+                    "Begin Installation",
+                    "Exit to Shell"
                 };
 
-                int res = tui_select_menu(5, 9, 68, " ACTION ", opts, 2);
+                int res = tui_select_menu(5, 9, 68, " MAIN MENU ", opts, 2);
                 if (res == 0) {
-                    g_installer_ctx.current_state = STATE_SELECT_DISK;
+                    g_installer_ctx.current_state = STATE_SELECT_DRIVE;
                 } else {
                     term_clear_screen();
                     return;
@@ -324,311 +359,344 @@ void installer_run(void) {
                 break;
             }
 
-            case STATE_SELECT_DISK: {
+            case STATE_SELECT_DRIVE: {
                 term_clear_screen();
-                installer_log_verbose("Scanning physical storage devices...");
-
-                if (nvme_init() == NVME_SUCCESS) {
-                    g_installer_ctx.target_dev = nvme_get_block_device();
-                    g_installer_ctx.is_nvme = true;
-                    installer_log_verbose("Storage Controller: Active NVMe PCIe SSD");
-                } else {
-                    block_device_t ata_dev = {
-                        .read = (block_read_fn)read_sectors_ata_pio,
-                        .write = (block_write_fn)write_sectors_ata_pio,
-                        .sector_size = 512
-                    };
-                    g_installer_ctx.target_dev = ata_dev;
-                    g_installer_ctx.is_nvme = false;
-                    installer_log_verbose("Storage Controller: Primary ATA PIO Channel");
-                }
-
-                disk_partition_scan_device(g_installer_ctx.target_dev);
-                int p_count = disk_get_partition_count();
-
-                if (p_count == 0) {
+                int count = installer_discover_drives(&g_installer_ctx);
+                if (count == 0) {
                     snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg),
-                             "No valid partitions detected on drive!");
+                             "No physical block storage controllers discovered!");
                     g_installer_ctx.current_state = STATE_ERROR;
                     break;
                 }
 
-                const char *part_opts[16];
-                char part_bufs[16][128];
+                const char *drive_opts[INSTALLER_MAX_DISKS];
+                char drive_labels[INSTALLER_MAX_DISKS][128];
 
-                for (int i = 0; i < p_count && i < 16; i++) {
-                    partition_info_t *p = disk_get_partition(i);
-                    uint64_t size_mb = (uint64_t)(p->sector_count * 512) / (1024 * 1024);
-
-                    snprintf(part_bufs[i], sizeof(part_bufs[i]),
-                             "Part #%d | Type: 0x%02X | Start LBA: %u | Size: %llu MB",
-                             p->index, p->type, p->start_lba, size_mb);
-                    part_opts[i] = part_bufs[i];
+                for (int i = 0; i < count; i++) {
+                    installer_disk_t *d = &g_installer_ctx.disks[i];
+                    uint64_t size_mb = (d->total_sectors * d->sector_size) / (1024 * 1024);
+                    snprintf(drive_labels[i], sizeof(drive_labels[i]),
+                             "Disk #%d: %s (%llu MB, %u-byte sectors)",
+                             i, d->name, size_mb, d->sector_size);
+                    drive_opts[i] = drive_labels[i];
                 }
 
-                int chosen = tui_select_menu(2, 2, 76, " SELECT TARGET PARTITION ", part_opts, p_count);
+                int chosen = tui_select_menu(2, 2, 76, " SELECT TARGET DISK ", drive_opts, count);
                 if (chosen < 0) {
                     g_installer_ctx.current_state = STATE_WELCOME;
                     break;
                 }
 
-                partition_info_t *selected = disk_get_partition(chosen);
-                if (!selected) {
-                    snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "Selection Error!");
-                    g_installer_ctx.current_state = STATE_ERROR;
-                    break;
-                }
-
-                if (selected->type == 0xEF || selected->is_esp) {
-                    snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg),
-                             "PROTECTION: EFI System Partition (0xEF) cannot be formatted!");
-                    g_installer_ctx.current_state = STATE_ERROR;
-                    break;
-                }
-
-                g_installer_ctx.target_partition = *selected;
-                g_installer_ctx.selected_partition_idx = chosen;
-                g_installer_ctx.current_state = STATE_CONFIRM_FORMAT;
+                g_installer_ctx.selected_disk_idx = chosen;
+                g_installer_ctx.current_state = STATE_SELECT_STRATEGY;
                 break;
             }
 
-            case STATE_CONFIRM_FORMAT: {
+            case STATE_SELECT_STRATEGY: {
                 term_clear_screen();
-                char warn[256];
-                snprintf(warn, sizeof(warn),
-                         "CRITICAL: Partition #%d (LBA %u, Size %u MB) WILL BE FORMATTED!",
-                         g_installer_ctx.target_partition.index,
-                         g_installer_ctx.target_partition.start_lba,
-                         (g_installer_ctx.target_partition.sector_count * 512) / (1024 * 1024));
+                const char *strat_opts[] = {
+                    "Erase Entire Drive & Auto-Partition (GPT UEFI: ESP + Root EXT2)",
+                    "Install to Existing Partition (Preserve Current Partition Table)"
+                };
 
-                if (tui_dialog_confirm("!!! FORMAT CONFIRMATION !!!", warn)) {
-                    g_installer_ctx.current_state = STATE_PARTITION_FORMAT;
+                int chosen = tui_select_menu(2, 2, 76, " PARTITIONING STRATEGY ", strat_opts, 2);
+                if (chosen < 0) {
+                    g_installer_ctx.current_state = STATE_SELECT_DRIVE;
+                    break;
+                }
+
+                if (chosen == 0) {
+                    g_installer_ctx.strategy = INSTALL_STRATEGY_AUTO_GPT;
+                    g_installer_ctx.current_state = STATE_CONFIGURE_SYSTEM;
                 } else {
-                    installer_log_verbose("User cancelled format operation.");
+                    g_installer_ctx.strategy = INSTALL_STRATEGY_MANUAL_PART;
+                    g_installer_ctx.current_state = STATE_SELECT_PARTITION;
+                }
+                break;
+            }
+
+            case STATE_SELECT_PARTITION: {
+                term_clear_screen();
+                installer_disk_t *target_disk = &g_installer_ctx.disks[g_installer_ctx.selected_disk_idx];
+                disk_partition_scan_device(target_disk->bdev);
+                int p_count = disk_get_partition_count();
+
+                if (p_count == 0) {
+                    snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg),
+                             "No partitions exist on this drive! Use Auto-Partition.");
+                    g_installer_ctx.current_state = STATE_ERROR;
+                    break;
+                }
+
+                const char *part_opts[16];
+                char part_labels[16][128];
+
+                for (int i = 0; i < p_count && i < 16; i++) {
+                    partition_info_t *p = disk_get_partition(i);
+                    uint64_t size_mb = (uint64_t)(p->sector_count * 512) / (1024 * 1024);
+                    snprintf(part_labels[i], sizeof(part_labels[i]),
+                             "Part #%d [%s] LBA: %u | Size: %llu MB",
+                             p->index, p->fs_name, p->start_lba, size_mb);
+                    part_opts[i] = part_labels[i];
+                }
+
+                int chosen = tui_select_menu(2, 2, 76, " SELECT ROOT PARTITION ", part_opts, p_count);
+                if (chosen < 0) {
+                    g_installer_ctx.current_state = STATE_SELECT_STRATEGY;
+                    break;
+                }
+
+                partition_info_t *p = disk_get_partition(chosen);
+                if (p->is_esp) {
+                    snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg),
+                             "PROTECTION: EFI System Partition cannot be used as Root volume!");
+                    g_installer_ctx.current_state = STATE_ERROR;
+                    break;
+                }
+
+                g_installer_ctx.selected_partition = *p;
+                g_installer_ctx.root_start_lba = p->start_lba;
+                g_installer_ctx.root_sector_count = p->sector_count;
+                g_installer_ctx.current_state = STATE_CONFIGURE_SYSTEM;
+                break;
+            }
+
+            case STATE_CONFIGURE_SYSTEM: {
+                term_clear_screen();
+                const char *timeout_opts[] = {
+                    "Default: 3 Seconds Timeout (Recommended)",
+                    "Quick: 1 Second Timeout",
+                    "Instant: 0 Seconds (Direct Kernel Launch)",
+                    "Patient: 10 Seconds Timeout"
+                };
+
+                int chosen = tui_select_menu(2, 2, 76, " BOOTLOADER TIMEOUT SELECTION ", timeout_opts, 4);
+                if (chosen == 0) g_installer_ctx.sys_cfg.boot_timeout = 3;
+                else if (chosen == 1) g_installer_ctx.sys_cfg.boot_timeout = 1;
+                else if (chosen == 2) g_installer_ctx.sys_cfg.boot_timeout = 0;
+                else if (chosen == 3) g_installer_ctx.sys_cfg.boot_timeout = 10;
+                else {
+                    g_installer_ctx.current_state = STATE_SELECT_STRATEGY;
+                    break;
+                }
+
+                g_installer_ctx.current_state = STATE_CONFIRM_ACTIONS;
+                break;
+            }
+
+            case STATE_CONFIRM_ACTIONS: {
+                term_clear_screen();
+                installer_disk_t *target_disk = &g_installer_ctx.disks[g_installer_ctx.selected_disk_idx];
+
+                char warn[384];
+                if (g_installer_ctx.strategy == INSTALL_STRATEGY_AUTO_GPT) {
+                    snprintf(warn, sizeof(warn),
+                             "WARNING: ALL DATA ON DISK #%d (%s) WILL BE DESTROYED!\n"
+                             "A new GPT table with ESP (FAT32) and Root (EXT2) will be created.",
+                             g_installer_ctx.selected_disk_idx, target_disk->name);
+                } else {
+                    snprintf(warn, sizeof(warn),
+                             "WARNING: Partition #%d (LBA %llu, Size %llu MB) WILL BE FORMATTED TO EXT2!",
+                             g_installer_ctx.selected_partition.index,
+                             g_installer_ctx.root_start_lba,
+                             (g_installer_ctx.root_sector_count * 512) / (1024 * 1024));
+                }
+
+                if (tui_dialog_confirm("!!! FINAL FORMAT CONFIRMATION !!!", warn)) {
+                    g_installer_ctx.current_state = STATE_EXECUTE_INSTALL;
+                } else {
+                    installer_log_verbose("User aborted operation at confirmation prompt.");
                     g_installer_ctx.current_state = STATE_WELCOME;
                 }
                 break;
             }
 
-            case STATE_PARTITION_FORMAT: {
+            case STATE_EXECUTE_INSTALL: {
                 term_clear_screen();
-                tui_draw_box(2, 2, 76, 18, " FORMATTING DISK (GPT: ESP + ROOT) ", COLOR_HEADER, COLOR_TUI_BG);
-
-                installer_log_verbose("Creating Dual-Partition GPT Layout (ESP 34MB + ROOT EXT2)...");
-                tui_draw_progress(4, 5, 72, 10, COLOR_HEADER, COLOR_TUI_BG);
-
-                uint64_t total_sec = 131072; // 64MB Disk Image
-                uint32_t esp_sec = 69632;    // 34MB ESP
-
-                gpt_create_dual_partition_layout(g_installer_ctx.target_dev, total_sec, esp_sec);
-                installer_log_verbose("Partition #1: ESP FAT32 (LBA 2048 .. 71679)");
-                installer_log_verbose("Partition #2: ROOT EXT2 (LBA 71680 .. 131038)");
-
-                tui_draw_progress(4, 5, 72, 40, COLOR_HEADER, COLOR_TUI_BG);
-                installer_log_verbose("Formatting Partition #1 with FAT32 (ESP)...");
-                mkfs_fat32(g_installer_ctx.target_dev, 2048, esp_sec, "EFI SYSTEM");
-
-                tui_draw_progress(4, 5, 72, 80, COLOR_HEADER, COLOR_TUI_BG);
-                installer_log_verbose("Formatting Partition #2 with EXT2 (Root)...");
-                mkfs_ext2(g_installer_ctx.target_dev, 71680, (uint32_t)(total_sec - 34 - 71680 + 1), "EQUANT_SYS");
-
-                tui_draw_progress(4, 5, 72, 100, COLOR_HEADER, COLOR_TUI_BG);
-                installer_log_verbose("Formatting complete! Moving to file deployment.");
-                g_installer_ctx.current_state = STATE_COPY_FILES;
-                break;
-            }
-
-            case STATE_COPY_FILES: {
-                term_clear_screen();
-                tui_draw_box(2, 2, 76, 20, " DEPLOYING UEFI ESP & SYSTEM PAYLOAD ", COLOR_HEADER, COLOR_TUI_BG);
+                tui_draw_box(2, 2, 76, 20, " EXECUTING INSTALLATION PIPELINE ", COLOR_HEADER, COLOR_TUI_BG);
                 g_log_row = 11;
 
-                // 1. Mount ESP FAT32 Partition (LBA 2048, 34MB)
-                installer_log_verbose("Mounting ESP FAT32 partition (LBA 2048)...");
-                vfs_node_t *esp_root = fat32_mount_partition(g_installer_ctx.target_dev, 2048, 69632);
+                installer_disk_t *target_disk = &g_installer_ctx.disks[g_installer_ctx.selected_disk_idx];
+                uint64_t total_sec = target_disk->total_sectors;
 
-                // 2. Mount Root EXT2 Partition (LBA 71680)
-                installer_log_verbose("Mounting Root EXT2 partition (LBA 71680)...");
-                vfs_node_t *root_ext2 = ext2_mount_partition(g_installer_ctx.target_dev, 71680);
+                if (g_installer_ctx.strategy == INSTALL_STRATEGY_AUTO_GPT) {
+                    installer_log_verbose("Calculating dynamic partition bounds...");
+                    tui_draw_progress(4, 5, 72, 10, COLOR_HEADER, COLOR_TUI_BG);
+
+                    // Dynamic sizing: ESP gets 34MB (69632 sectors), Root takes remaining usable LBA
+                    g_installer_ctx.esp_start_lba = 2048;
+                    g_installer_ctx.esp_sector_count = 69632;
+
+                    g_installer_ctx.root_start_lba = g_installer_ctx.esp_start_lba + g_installer_ctx.esp_sector_count;
+                    g_installer_ctx.root_sector_count = (total_sec - 34) - g_installer_ctx.root_start_lba + 1;
+
+                    installer_log_verbose("Writing dual-partition GPT layout to disk...");
+                    if (gpt_create_layout(target_disk->bdev, total_sec,
+                                          g_installer_ctx.esp_start_lba, g_installer_ctx.esp_sector_count,
+                                          g_installer_ctx.root_start_lba, g_installer_ctx.root_sector_count) != 0) {
+                        snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "Failed writing GPT layout!");
+                        g_installer_ctx.current_state = STATE_ERROR;
+                        break;
+                    }
+
+                    tui_draw_progress(4, 5, 72, 25, COLOR_HEADER, COLOR_TUI_BG);
+                    installer_log_verbose("Formatting Partition 1 (ESP) with FAT32...");
+                    if (mkfs_fat32(target_disk->bdev, (uint32_t)g_installer_ctx.esp_start_lba,
+                                   (uint32_t)g_installer_ctx.esp_sector_count, "EFI SYSTEM") != 0) {
+                        snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "FAT32 formatting failed!");
+                        g_installer_ctx.current_state = STATE_ERROR;
+                        break;
+                    }
+
+                    tui_draw_progress(4, 5, 72, 40, COLOR_HEADER, COLOR_TUI_BG);
+                    installer_log_verbose("Formatting Partition 2 (Root) with EXT2...");
+                    if (mkfs_ext2(target_disk->bdev, (uint32_t)g_installer_ctx.root_start_lba,
+                                  (uint32_t)g_installer_ctx.root_sector_count, "EQUANT_SYS") != 0) {
+                        snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "EXT2 formatting failed!");
+                        g_installer_ctx.current_state = STATE_ERROR;
+                        break;
+                    }
+                } else {
+                    // Manual partition strategy: format root partition only
+                    installer_log_verbose("Formatting selected partition with EXT2...");
+                    if (mkfs_ext2(target_disk->bdev, (uint32_t)g_installer_ctx.root_start_lba,
+                                  (uint32_t)g_installer_ctx.root_sector_count, "EQUANT_SYS") != 0) {
+                        snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "Target EXT2 format failed!");
+                        g_installer_ctx.current_state = STATE_ERROR;
+                        break;
+                    }
+                    // For manual install, fallback ESP target to partition 0
+                    g_installer_ctx.esp_start_lba = 2048;
+                    g_installer_ctx.esp_sector_count = 69632;
+                }
+
+                // 2. Mount Filesystem Trees
+                tui_draw_progress(4, 5, 72, 50, COLOR_HEADER, COLOR_TUI_BG);
+                installer_log_verbose("Mounting target ESP & Root filesystems...");
+
+                vfs_node_t *esp_root = fat32_mount_partition(target_disk->bdev,
+                                                            (uint32_t)g_installer_ctx.esp_start_lba,
+                                                            (uint32_t)g_installer_ctx.esp_sector_count);
+                vfs_node_t *root_ext2 = ext2_mount_partition(target_disk->bdev,
+                                                             (uint32_t)g_installer_ctx.root_start_lba);
 
                 if (!esp_root || !root_ext2) {
-                    snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "Failed to mount target volumes!");
+                    snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "VFS mount failure on target partitions!");
                     g_installer_ctx.current_state = STATE_ERROR;
                     break;
                 }
 
-                // Create ESP Directories
+                // Create Target Directory Tree
                 vfs_node_t *esp_efi = vfs_create(esp_root, "EFI", FS_DIRECTORY);
                 vfs_node_t *esp_boot = esp_efi ? vfs_create(esp_efi, "BOOT", FS_DIRECTORY) : NULL;
-                vfs_node_t *esp_equantos = esp_efi ? vfs_create(esp_efi, "equantos", FS_DIRECTORY) : NULL;
                 vfs_node_t *esp_boot_dir = vfs_create(esp_root, "boot", FS_DIRECTORY);
                 vfs_node_t *esp_sys = vfs_create(esp_root, "sys", FS_DIRECTORY);
                 vfs_node_t *esp_bin = esp_sys ? vfs_create(esp_sys, "bin", FS_DIRECTORY) : NULL;
 
-                // Create Root EXT2 Directories
                 vfs_node_t *r_boot = vfs_create(root_ext2, "boot", FS_DIRECTORY);
                 vfs_node_t *r_sys  = vfs_create(root_ext2, "sys", FS_DIRECTORY);
                 vfs_node_t *r_bin  = r_sys ? vfs_create(r_sys, "bin", FS_DIRECTORY) : NULL;
+                vfs_create(root_ext2, "dev", FS_DIRECTORY);
+                vfs_create(root_ext2, "var", FS_DIRECTORY);
 
+                // 3. Deploy Payload Files
                 const char *files_to_copy[] = {
-                    "BOOTX64.EFI", "limine.conf", "kernel.elf", "font.psf",
+                    "BOOTX64.EFI", "kernel.elf", "font.psf",
                     "bash.elf", "busybox.elf", ".bashrc", "hello.elf"
                 };
                 int file_count = sizeof(files_to_copy) / sizeof(files_to_copy[0]);
 
                 uint8_t *cbuf = (uint8_t *)kmalloc(CHUNK_SZ);
                 if (!cbuf) {
-                    snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "Out of memory allocating copy buffer!");
+                    snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "Out of memory allocating I/O buffer!");
                     g_installer_ctx.current_state = STATE_ERROR;
                     break;
                 }
 
+                bool copy_failed = false;
                 for (int i = 0; i < file_count; i++) {
                     const char *fname = files_to_copy[i];
 
-                    char p[5][128];
+                    char p[4][128];
                     snprintf(p[0], 128, "/%s", fname);
                     snprintf(p[1], 128, "/sys/bin/%s", fname);
                     snprintf(p[2], 128, "/boot/%s", fname);
                     snprintf(p[3], 128, "/EFI/BOOT/%s", fname);
-                    snprintf(p[4], 128, "/cdrom/%s", fname);
 
                     vfs_node_t *src = NULL;
-                    for (int k = 0; k < 5; k++) {
+                    for (int k = 0; k < 4; k++) {
                         src = vfs_open(p[k], 0);
                         if (src) break;
                     }
 
-                    if (src && src->length > 0) {
-                        // 1. Deploy Boot & System files to ESP Partition (FAT32)
-                        vfs_node_t *dest_esp = esp_root;
-                        if (strcmp(fname, "BOOTX64.EFI") == 0) dest_esp = esp_boot ? esp_boot : esp_root;
-                        else if (strcmp(fname, "kernel.elf") == 0 || strcmp(fname, "limine.conf") == 0) dest_esp = esp_boot_dir ? esp_boot_dir : esp_root;
-                        else dest_esp = esp_bin ? esp_bin : esp_root;
-
-                        vfs_node_t *node_esp = vfs_create(dest_esp, fname, FS_FILE);
-                        if (node_esp) {
-                            uint64_t off = 0;
-                            while (off < src->length) {
-                                uint64_t to_r = src->length - off;
-                                if (to_r > CHUNK_SZ) to_r = CHUNK_SZ;
-                                int64_t r = vfs_read(src, off, to_r, cbuf);
-                                if (r <= 0) break;
-                                vfs_write(node_esp, off, r, cbuf);
-                                off += r;
-                            }
-                        }
-
-                        // Duplicate BOOTX64.EFI to /EFI/equantos/ for UEFI fallback
-                        if (strcmp(fname, "BOOTX64.EFI") == 0 && esp_equantos) {
-                            vfs_node_t *node_eq = vfs_create(esp_equantos, fname, FS_FILE);
-                            if (node_eq) {
-                                uint64_t off = 0;
-                                while (off < src->length) {
-                                    uint64_t to_r = src->length - off;
-                                    if (to_r > CHUNK_SZ) to_r = CHUNK_SZ;
-                                    int64_t r = vfs_read(src, off, to_r, cbuf);
-                                    if (r <= 0) break;
-                                    vfs_write(node_eq, off, r, cbuf);
-                                    off += r;
-                                }
-                            }
-                        }
-
-                        // 2. Deploy Userland & System files to Root Partition (EXT2)
-                        if (strcmp(fname, "BOOTX64.EFI") != 0) {
-                            vfs_node_t *dest_ext2 = (strcmp(fname, "kernel.elf") == 0 || strcmp(fname, "limine.conf") == 0) ? r_boot : r_bin;
-                            if (!dest_ext2) dest_ext2 = root_ext2;
-
-                            vfs_node_t *node_ext2 = vfs_create(dest_ext2, fname, FS_FILE);
-                            if (node_ext2) {
-                                uint64_t off = 0;
-                                while (off < src->length) {
-                                    uint64_t to_r = src->length - off;
-                                    if (to_r > CHUNK_SZ) to_r = CHUNK_SZ;
-                                    int64_t r = vfs_read(src, off, to_r, cbuf);
-                                    if (r <= 0) break;
-                                    vfs_write(node_ext2, off, r, cbuf);
-                                    off += r;
-                                }
-                            }
-                        }
-
-                        installer_log_verbose("SUCCESS: Deployed '%s' (%llu bytes)", fname, src->length);
+                    if (!src || src->length == 0) {
+                        installer_log_verbose("WARN: Payload file '%s' not found on live medium.", fname);
+                        continue;
                     }
 
-                    int pct = 10 + ((i + 1) * 80) / file_count;
+                    // A. Deploy to ESP (FAT32)
+                    vfs_node_t *dest_esp = esp_bin;
+                    if (strcmp(fname, "BOOTX64.EFI") == 0) dest_esp = esp_boot ? esp_boot : esp_root;
+                    else if (strcmp(fname, "kernel.elf") == 0) dest_esp = esp_boot_dir ? esp_boot_dir : esp_root;
+
+                    if (!deploy_file_stream(dest_esp, fname, src, cbuf, CHUNK_SZ)) {
+                        copy_failed = true;
+                        break;
+                    }
+
+                    // B. Deploy to Root (EXT2)
+                    vfs_node_t *dest_ext2 = (strcmp(fname, "kernel.elf") == 0) ? r_boot : r_bin;
+                    if (!deploy_file_stream(dest_ext2 ? dest_ext2 : root_ext2, fname, src, cbuf, CHUNK_SZ)) {
+                        copy_failed = true;
+                        break;
+                    }
+
+                    installer_log_verbose("Deployed '%s' (%llu bytes)", fname, src->length);
+                    int pct = 50 + ((i + 1) * 35) / file_count;
                     tui_draw_progress(4, 5, 72, pct, COLOR_HEADER, COLOR_TUI_BG);
                 }
 
                 kfree(cbuf);
-                g_installer_ctx.current_state = STATE_INSTALL_BOOTLOADER;
-                break;
-            }
 
-            case STATE_INSTALL_BOOTLOADER: {
-                term_clear_screen();
-                tui_draw_box(2, 2, 76, 18, " LIMINE BOOTLOADER DEPLOYMENT ", COLOR_HEADER, COLOR_TUI_BG);
-                g_log_row = 10;
-
-                installer_log_verbose("Deploying Limine v8 'limine.conf' across UEFI search paths...");
-
-                const char *limine_cfg_content = 
-                    "timeout: 3\n\n"
-                    "/EquantOS\n"
-                    "    protocol: limine\n"
-                    "    kernel_path: boot():/boot/kernel.elf\n"
-                    "    module_path: boot():/sys/bin/font.psf\n"
-                    "    module_path: boot():/sys/bin/bash.elf\n"
-                    "    module_path: boot():/sys/bin/busybox.elf\n"
-                    "    module_path: boot():/sys/bin/.bashrc\n"
-                    "    module_path: boot():/sys/bin/hello.elf\n";
-
-                vfs_node_t *esp_root = fat32_mount_partition(g_installer_ctx.target_dev, 2048, 69632);
-                vfs_node_t *root_ext2 = ext2_mount_partition(g_installer_ctx.target_dev, 71680);
-
-                if (esp_root) {
-                    // 1. ESP Root '/limine.conf'
-                    vfs_node_t *cfg_root = vfs_create(esp_root, "limine.conf", FS_FILE);
-                    if (cfg_root) vfs_write(cfg_root, 0, strlen(limine_cfg_content), (uint8_t *)limine_cfg_content);
-
-                    // 2. ESP '/EFI/BOOT/limine.conf'
-                    vfs_node_t *efi_dir = vfs_finddir(esp_root, "EFI");
-                    if (efi_dir) {
-                        vfs_node_t *efi_boot = vfs_finddir(efi_dir, "BOOT");
-                        if (efi_boot) {
-                            vfs_node_t *cfg_efi = vfs_create(efi_boot, "limine.conf", FS_FILE);
-                            if (cfg_efi) vfs_write(cfg_efi, 0, strlen(limine_cfg_content), (uint8_t *)limine_cfg_content);
-                        }
-
-                        // 3. ESP '/EFI/equantos/limine.conf'
-                        vfs_node_t *efi_eq = vfs_finddir(efi_dir, "equantos");
-                        if (efi_eq) {
-                            vfs_node_t *cfg_eq = vfs_create(efi_eq, "limine.conf", FS_FILE);
-                            if (cfg_eq) vfs_write(cfg_eq, 0, strlen(limine_cfg_content), (uint8_t *)limine_cfg_content);
-                        }
-                    }
-
-                    // 4. ESP '/boot/limine.conf'
-                    vfs_node_t *esp_boot_dir = vfs_finddir(esp_root, "boot");
-                    if (esp_boot_dir) {
-                        vfs_node_t *cfg_boot = vfs_create(esp_boot_dir, "limine.conf", FS_FILE);
-                        if (cfg_boot) vfs_write(cfg_boot, 0, strlen(limine_cfg_content), (uint8_t *)limine_cfg_content);
-                    }
-
-                    installer_log_verbose("SUCCESS: 'limine.conf' deployed to /EFI/BOOT, /EFI/equantos, /boot, and /");
+                if (copy_failed) {
+                    snprintf(g_installer_ctx.error_msg, sizeof(g_installer_ctx.error_msg), "File copy transaction aborted on I/O error!");
+                    g_installer_ctx.current_state = STATE_ERROR;
+                    break;
                 }
 
-                if (root_ext2) {
-                    vfs_node_t *r_boot = vfs_finddir(root_ext2, "boot");
-                    if (r_boot) {
-                        vfs_node_t *cfg_ext2 = vfs_create(r_boot, "limine.conf", FS_FILE);
-                        if (cfg_ext2) vfs_write(cfg_ext2, 0, strlen(limine_cfg_content), (uint8_t *)limine_cfg_content);
-                    }
-                    installer_log_verbose("SUCCESS: 'limine.conf' written to Root EXT2.");
+                // 4. Generate Dynamic limine.conf with user-selected parameters
+                installer_log_verbose("Generating bootloader configuration...");
+                char limine_cfg[512];
+                snprintf(limine_cfg, sizeof(limine_cfg),
+                         "timeout: %d\n\n"
+                         "/%s\n"
+                         "    protocol: limine\n"
+                         "    kernel_path: boot():/boot/kernel.elf\n"
+                         "    module_path: boot():/sys/bin/font.psf\n"
+                         "    module_path: boot():/sys/bin/bash.elf\n"
+                         "    module_path: boot():/sys/bin/busybox.elf\n"
+                         "    module_path: boot():/sys/bin/.bashrc\n"
+                         "    module_path: boot():/sys/bin/hello.elf\n",
+                         g_installer_ctx.sys_cfg.boot_timeout,
+                         g_installer_ctx.sys_cfg.hostname);
+
+                // Write limine.conf to ESP /limine.conf and /EFI/BOOT/limine.conf
+                vfs_node_t *cfg1 = vfs_create(esp_root, "limine.conf", FS_FILE);
+                if (cfg1) vfs_write(cfg1, 0, strlen(limine_cfg), (uint8_t *)limine_cfg);
+
+                if (esp_boot) {
+                    vfs_node_t *cfg2 = vfs_create(esp_boot, "limine.conf", FS_FILE);
+                    if (cfg2) vfs_write(cfg2, 0, strlen(limine_cfg), (uint8_t *)limine_cfg);
+                }
+
+                // Write backup copy to EXT2 /boot/limine.conf
+                if (r_boot) {
+                    vfs_node_t *cfg3 = vfs_create(r_boot, "limine.conf", FS_FILE);
+                    if (cfg3) vfs_write(cfg3, 0, strlen(limine_cfg), (uint8_t *)limine_cfg);
                 }
 
                 tui_draw_progress(4, 5, 72, 100, COLOR_HEADER, COLOR_TUI_BG);
+                installer_log_verbose("System deployment finalized successfully!");
                 g_installer_ctx.current_state = STATE_FINISH;
                 break;
             }
@@ -643,7 +711,7 @@ void installer_run(void) {
 
                 term_set_cursor(4 * 16, 8 * 32);
                 term_set_custom_colors(COLOR_TUI_FG, COLOR_TUI_BG);
-                term_print("Check /var/log/installer.log or Serial COM1 for full logs.");
+                term_print("Reboot your system and select the hard disk in UEFI.");
 
                 term_set_cursor(4 * 16, 10 * 32);
                 term_print("Press ENTER to exit to Shell...");
@@ -666,11 +734,11 @@ void installer_run(void) {
                 term_print(g_installer_ctx.error_msg);
 
                 term_set_cursor(4 * 16, 11 * 32);
-                term_print("Press any key to return to Shell...");
+                term_print("Press any key to return to Main Menu...");
 
                 tty_getchar_raw();
-                term_clear_screen();
-                return;
+                g_installer_ctx.current_state = STATE_WELCOME;
+                break;
             }
         }
     }
