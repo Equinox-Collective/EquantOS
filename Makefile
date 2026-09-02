@@ -28,7 +28,6 @@ QEMU      := qemu-system-x86_64
 QEMUFLAGS := -m 512M \
              -vga std \
              -boot d \
-			 -bios OVMF.fd \
              -device qemu-xhci,id=xhci \
              -device usb-kbd,bus=xhci.0 \
              -device usb-mouse,bus=xhci.0 \
