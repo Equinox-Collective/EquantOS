@@ -16,7 +16,7 @@
 ~~Musl/mlibc, LABI (POSIX syscalls)~~
 ~~Busybox / Bash~~
 ~~USB~~
-Installer <
+~~Installer~~
 
 # ENTERING THE LONG TERM ZONE (OS DONE AS USABLE)
 
