@@ -25,6 +25,7 @@
 #include "../kernel/core/gen/cpu.h"
 #include "../kernel/core/gen/io.h"
 #include "../kernel/misc/installer.h"
+#include "../kernel/misc/user.h"
 
 extern uint64_t free_memory;
 extern uint64_t total_pages;
@@ -98,6 +99,11 @@ static void cmd_xhcitest(int argc, char **argv);
 static void cmd_pcipeek(int argc, char **argv);
 static void cmd_inbtest(int argc, char **argv);
 static void cmd_installer(int argc, char **argv);
+static void cmd_whoami(int argc, char **argv);
+static void cmd_su(int argc, char **argv);
+static void cmd_passwd(int argc, char **argv);
+static void cmd_useradd(int argc, char **argv);
+static void cmd_login(int argc, char **argv);
 
 static const shell_command_t commands[] = {
     { "help",       "List all diagnostic & stress commands",  cmd_help },
@@ -152,6 +158,11 @@ static const shell_command_t commands[] = {
     { "pcipeek",    "Read PCI register: pcipeek <b> <s> <f> <o>", cmd_pcipeek },
     { "inbtest",    "Read raw hardware I/O port: inbtest <hex_port>", cmd_inbtest },
     { "installer",   "Run interactive Archinstall-style OS Installer", cmd_installer },
+    { "whoami",   "Print current logged in user identity",             cmd_whoami },
+    { "su",       "Switch user: su [username]",               cmd_su },
+    { "passwd",   "Change user password: passwd [user]",      cmd_passwd },
+    { "useradd",  "Create a new user account: useradd <user>",cmd_useradd },
+    { "login",    "Lock terminal and show login prompt",      cmd_login },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -184,10 +195,32 @@ static int tokenize(char *line, char **argv, int max_args) {
 }
 
 static void print_prompt(void) {
-    uint32_t prev = term_get_color();
-    term_set_color(SHELL_PROMPT_COLOR);
-    term_print("EquantOS> ");
-    term_set_color(prev);
+    user_account_t *u = user_get_current();
+    const char *uname = u ? u->username : "unknown";
+    bool is_root = user_is_root();
+
+    // root in Red (\033[31m), regular user in Yellow (\033[33m)
+    if (is_root) {
+        term_print("\033[31m");
+    } else {
+        term_print("\033[33m");
+    }
+    term_print(uname);
+
+    // @equant in Green (\033[32m)
+    term_print("\033[0m@\033[32mequant\033[0m:");
+
+    // Current working directory in Blue (\033[34m)
+    term_print("\033[34m");
+    term_print(current_dir);
+    term_print("\033[0m");
+
+    // '#' for root, '$' for unprivileged users
+    if (is_root) {
+        term_print("# ");
+    } else {
+        term_print("$ ");
+    }
 }
 
 void shell_init(void) {
@@ -1431,4 +1464,186 @@ static void cmd_inbtest(int argc, char **argv) {
 static void cmd_installer(int argc, char **argv) {
     (void)argc; (void)argv;
     installer_run();
+}
+
+static void shell_read_password(const char *prompt, char *buf, size_t max_len) {
+    term_print(prompt);
+    size_t idx = 0;
+    while (1) {
+        char c = tty_getchar();
+        if (c == '\n' || c == '\r') {
+            term_putchar_raw('\n');
+            break;
+        } else if (c == '\b' || c == 127) {
+            if (idx > 0) {
+                idx--;
+                term_putchar_raw('\b');
+                term_putchar_raw(' ');
+                term_putchar_raw('\b');
+            }
+        } else if ((unsigned char)c >= 32 && idx + 1 < max_len) {
+            buf[idx++] = c;
+            term_putchar_raw('*'); // Masked password echo
+        }
+    }
+    buf[idx] = '\0';
+}
+
+static void cmd_whoami(int argc, char **argv) {
+    (void)argc; (void)argv;
+    user_account_t *u = user_get_current();
+    if (!u) {
+        term_print("unknown\n");
+        return;
+    }
+    char buf[16];
+    term_print(u->username);
+    term_print(" (uid=");
+    itoa(u->uid, 10, buf);
+    term_print(buf);
+    term_print(" gid=");
+    itoa(u->gid, 10, buf);
+    term_print(buf);
+    term_print(")\n");
+}
+
+static void cmd_su(int argc, char **argv) {
+    const char *target_user = "root";
+    if (argc >= 2) {
+        target_user = argv[1];
+    }
+
+    user_account_t *target = user_find_by_name(target_user);
+    if (!target) {
+        term_print("su: user '");
+        term_print(target_user);
+        term_print("' does not exist\n");
+        return;
+    }
+
+    // Root can switch without entering password
+    if (user_is_root()) {
+        user_switch(target_user, "");
+        term_print("Switched to user: ");
+        term_print(target_user);
+        term_print("\n");
+        return;
+    }
+
+    char pass[64];
+    shell_read_password("Password: ", pass, sizeof(pass));
+
+    if (user_switch(target_user, pass)) {
+        term_print("Authentication successful.\n");
+    } else {
+        term_print("su: Authentication failure\n");
+    }
+}
+
+static void cmd_passwd(int argc, char **argv) {
+    user_account_t *cur = user_get_current();
+    const char *target_user = cur ? cur->username : "root";
+
+    if (argc >= 2) {
+        if (!user_is_root() && strcmp(cur->username, argv[1]) != 0) {
+            term_print("passwd: Only root can change other users' passwords\n");
+            return;
+        }
+        target_user = argv[1];
+    }
+
+    char pass1[64];
+    char pass2[64];
+
+    shell_read_password("New password: ", pass1, sizeof(pass1));
+    shell_read_password("Retype new password: ", pass2, sizeof(pass2));
+
+    if (strcmp(pass1, pass2) != 0) {
+        term_print("passwd: Passwords do not match\n");
+        return;
+    }
+
+    if (user_set_password(target_user, pass1)) {
+        term_print("passwd: Password updated successfully for ");
+        term_print(target_user);
+        term_print("\n");
+    } else {
+        term_print("passwd: Failed to update password\n");
+    }
+}
+
+static void cmd_useradd(int argc, char **argv) {
+    if (!user_is_root()) {
+        term_print("useradd: Permission denied (must be root)\n");
+        return;
+    }
+
+    if (argc < 2) {
+        term_print("Usage: useradd <username>\n");
+        return;
+    }
+
+    const char *name = argv[1];
+    if (user_find_by_name(name)) {
+        term_print("useradd: User already exists\n");
+        return;
+    }
+
+    char pass1[64];
+    shell_read_password("Initial password: ", pass1, sizeof(pass1));
+
+    // Next free unprivileged UID (>= 1000)
+    uint32_t new_uid = 1000;
+    while (user_find_by_uid(new_uid)) {
+        new_uid++;
+    }
+
+    if (user_add(name, pass1, new_uid, new_uid)) {
+        term_print("User '");
+        term_print(name);
+        term_print("' created successfully.\n");
+    } else {
+        term_print("useradd: Table full or system error\n");
+    }
+}
+
+static void cmd_login(int argc, char **argv) {
+    (void)argc; (void)argv;
+    term_clear();
+    term_print("\n=== EquantOS Console Login ===\n\n");
+
+    char username[USER_NAME_MAX];
+    term_print("login: ");
+    
+    // Read username line
+    size_t idx = 0;
+    while (1) {
+        char c = tty_getchar();
+        if (c == '\n' || c == '\r') {
+            term_putchar_raw('\n');
+            break;
+        } else if (c == '\b' || c == 127) {
+            if (idx > 0) {
+                idx--;
+                term_putchar_raw('\b');
+                term_putchar_raw(' ');
+                term_putchar_raw('\b');
+            }
+        } else if ((unsigned char)c >= 32 && idx + 1 < sizeof(username)) {
+            username[idx++] = c;
+            term_putchar_raw(c);
+        }
+    }
+    username[idx] = '\0';
+
+    char password[64];
+    shell_read_password("Password: ", password, sizeof(password));
+
+    // Force check and login
+    if (user_authenticate(username, password)) {
+        user_switch_force(user_find_by_name(username)->uid);
+        term_print("\nWelcome to EquantOS!\n\n");
+    } else {
+        term_print("\nLogin incorrect\n\n");
+    }
 }

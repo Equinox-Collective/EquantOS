@@ -1595,9 +1595,13 @@ void syscall_handler(void *regs_ptr) {
             ret = sys_times_handler((struct tms *)regs->rdi);
             break;
         case SYS_GETUID:
-        case SYS_GETGID:
         case SYS_GETEUID:
+            ret = (current_task && current_task->process) ? (int64_t)current_task->process->uid : 0;
+            break;
+        case SYS_GETGID:
         case SYS_GETEGID:
+            ret = (current_task && current_task->process) ? (int64_t)current_task->process->gid : 0;
+            break;
             ret = 0;
             break;
         case SYS_GETPPID:

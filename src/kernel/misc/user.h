@@ -1,44 +1,46 @@
-// src/kernel/misc/user.h - User Accounts, Authentication & Security Core
+// src/kernel/misc/user.h - Modular User & Authentication Management
 #ifndef USER_H
 #define USER_H
 
 #include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
 
-#define MAX_USERS        16
-#define USERNAME_MAX_LEN 32
-#define HASH_HEX_LEN     65
-#define SALT_HEX_LEN     17
+#define MAX_USERS         16
+#define USER_NAME_MAX     32
+#define USER_PASS_MAX     64
+#define USER_HASH_LEN     65 // 64 hex chars + null terminator
 
-#define UID_ROOT         0
-#define UID_FIRST_USER   1000
+#define UID_ROOT          0
+#define GID_ROOT          0
+#define UID_DEFAULT_USER  1000
+#define GID_DEFAULT_USER  1000
 
 typedef struct {
     uint32_t uid;
     uint32_t gid;
-    char username[USERNAME_MAX_LEN];
-    char password_hash[HASH_HEX_LEN]; // Hex-encoded SHA-256
-    char salt[SALT_HEX_LEN];          // Hex-encoded 8-byte salt
-    char home[64];
-    char shell[32];
+    char username[USER_NAME_MAX];
+    char password_hash[USER_HASH_LEN];
+    char home_dir[64];
+    char shell_path[32];
     bool active;
 } user_account_t;
 
-void user_init(void);
+// Initialization & Core API
+void user_subsys_init(void);
 user_account_t *user_get_current(void);
 user_account_t *user_find_by_name(const char *username);
 user_account_t *user_find_by_uid(uint32_t uid);
 
 bool user_authenticate(const char *username, const char *password);
-bool user_login(const char *username, const char *password);
-bool user_su(const char *username, const char *password);
-void user_logout(void);
+bool user_switch(const char *username, const char *password);
+bool user_switch_force(uint32_t uid); // For root/kernel privilege transitions
 
 bool user_add(const char *username, const char *password, uint32_t uid, uint32_t gid);
 bool user_set_password(const char *username, const char *new_password);
+bool user_is_root(void);
 
-// Low-Level SHA-256 Hashing API
-void sha256_hash_string(const char *input, const char *salt, char *output_hex);
+// Password Hashing (Salted SHA-256)
+void user_hash_password(const char *password, const char *salt, char *output_hash);
 
 #endif // USER_H
