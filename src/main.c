@@ -26,6 +26,8 @@ volatile struct limine_framebuffer_request framebuffer_request = {
     .revision = 0
 };
 
+struct limine_framebuffer *kernel_fb = NULL;
+
 uint64_t hhdm_offset = 0;
 
 __attribute__((used, section(".requests")))
@@ -55,8 +57,8 @@ void _start(void) {
 
     // 2. Graphical Terminal Display & TTY System
     if (framebuffer_request.response != NULL && framebuffer_request.response->framebuffer_count > 0) {
-        struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
-        tty_init(fb->address, fb->width, fb->height, fb->pitch);
+        kernel_fb = framebuffer_request.response->framebuffers[0];
+        tty_init(kernel_fb->address, kernel_fb->width, kernel_fb->height, kernel_fb->pitch);
     }
 
     // 3. Buddy Memory & Slab Allocators
