@@ -17,12 +17,12 @@ typedef struct window {
     bool is_focused;
     bool is_closed;
     
-    widget_t widgets[MAX_WINDOW_WIDGETS];
+    widget_t *widgets[MAX_WINDOW_WIDGETS];
     int widget_count;
 } window_t;
 
 void window_init(window_t *win, int x, int y, int w, int h, const char *title);
-void window_add_widget(window_t *win, widget_t w);
+void window_add_widget(window_t *win, widget_t *w);
 void window_render(surface_t *surf, window_t *win);
 bool window_handle_mouse(window_t *win, int mx, int my, bool mouse_down);
 void window_handle_key(window_t *win, char c, bool is_backspace);

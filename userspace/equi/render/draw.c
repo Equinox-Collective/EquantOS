@@ -108,3 +108,62 @@ void draw_gradient_v(surface_t *surf, int x, int y, int w, int h, uint32_t color
         draw_fill_rect(surf, x, y + cy, w, 1, row_color);
     }
 }
+
+void draw_rounded_rect(surface_t *surf, int x, int y, int w, int h, int r, uint32_t color) {
+    if (w <= 0 || h <= 0) return;
+    if (r * 2 > w) r = w / 2;
+    if (r * 2 > h) r = h / 2;
+    if (r <= 0) {
+        draw_rect(surf, x, y, w, h, color);
+        return;
+    }
+
+    // 1. Draw 4 straight line segments
+    draw_fill_rect(surf, x + r, y, w - (2 * r), 1, color);             // Top border
+    draw_fill_rect(surf, x + r, y + h - 1, w - (2 * r), 1, color);     // Bottom border
+    draw_fill_rect(surf, x, y + r, 1, h - (2 * r), color);             // Left border
+    draw_fill_rect(surf, x + w - 1, y + r, 1, h - (2 * r), color);     // Right border
+
+    // 2. Draw 4 corner arcs via Midpoint Arc Algorithm
+    int f = 1 - r;
+    int ddF_x = 1;
+    int ddF_y = -2 * r;
+    int cx = 0;
+    int cy = r;
+
+    int x_tl = x + r;
+    int y_tl = y + r;
+    int x_tr = x + w - r - 1;
+    int y_tr = y + r;
+    int x_bl = x + r;
+    int y_bl = y + h - r - 1;
+    int x_br = x + w - r - 1;
+    int y_br = y + h - r - 1;
+
+    while (cx <= cy) {
+        // Top-Left corner
+        draw_pixel(surf, x_tl - cx, y_tl - cy, color);
+        draw_pixel(surf, x_tl - cy, y_tl - cx, color);
+
+        // Top-Right corner
+        draw_pixel(surf, x_tr + cx, y_tr - cy, color);
+        draw_pixel(surf, x_tr + cy, y_tr - cx, color);
+
+        // Bottom-Left corner
+        draw_pixel(surf, x_bl - cx, y_bl + cy, color);
+        draw_pixel(surf, x_bl - cy, y_bl + cx, color);
+
+        // Bottom-Right corner
+        draw_pixel(surf, x_br + cx, y_br + cy, color);
+        draw_pixel(surf, x_br + cy, y_br + cx, color);
+
+        if (f >= 0) {
+            cy--;
+            ddF_y += 2;
+            f += ddF_y;
+        }
+        cx++;
+        ddF_x += 2;
+        f += ddF_x;
+    }
+}

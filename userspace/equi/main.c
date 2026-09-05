@@ -1,3 +1,4 @@
+// userspace/equi/main.c - Master UI Showcase Workbench
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -12,7 +13,15 @@
 #include "render/font.h"
 #include "wm/cursor.h"
 #include "wm/window.h"
+
+// Modular OOP Widgets
 #include "widgets/widget.h"
+#include "widgets/button.h"
+#include "widgets/checkbox.h"
+#include "widgets/slider.h"
+#include "widgets/progress.h"
+#include "widgets/input.h"
+#include "widgets/label.h"
 
 #define FBIOGET_VSCREENINFO 0x4600
 
@@ -38,7 +47,6 @@ typedef struct {
 #define KEY_LEFTSHIFT 0x2A
 #define KEY_RIGHTSHIFT 0x36
 
-// Global Showcase Widgets
 static window_t gallery_win;
 static window_t status_win;
 static int button_click_count = 0;
@@ -46,13 +54,15 @@ static widget_t *dyn_progress_ref = NULL;
 
 static void on_test_button_click(widget_t *w) {
     button_click_count++;
-    snprintf(w->text, sizeof(w->text), "Clicked: %d times", button_click_count);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Clicked: %d times", button_click_count);
+    button_set_text(w, buf);
 }
 
 static void on_slider_move(widget_t *w, int new_val) {
     (void)w;
     if (dyn_progress_ref) {
-        dyn_progress_ref->value = new_val; // Real-time sync!
+        progress_set_value(dyn_progress_ref, new_val); // Synchronous real-time progress update
     }
 }
 
@@ -123,46 +133,31 @@ int main(int argc, char **argv) {
     int input_fd = open("/dev/input0", O_RDONLY | O_NONBLOCK);
 
     // ========================================================================
-    // Setup Showcase Windows & Widgets
+    // Setup Modular Showcase Windows & Dynamic Widgets
     // ========================================================================
-    window_init(&gallery_win, 80, 60, 480, 360, "EquantOS UI Elements Gallery");
+    window_init(&gallery_win, 80, 60, 480, 360, "EquantOS Modular UI Gallery");
 
-    widget_t lbl_btn, btn, lbl_chk, chk, lbl_sld, sld, prg, lbl_inp, inp;
-    widget_init_label(&lbl_btn, 20, 16, "1. Interactive Push Button:");
-    widget_init_button(&btn, 20, 38, 200, 32, "Click Me!", on_test_button_click);
+    window_add_widget(&gallery_win, label_create(20, 16, "1. Interactive Push Button:", COLOR_RGB(220, 225, 235)));
+    window_add_widget(&gallery_win, button_create(20, 38, 200, 32, "Click Me!", on_test_button_click));
 
-    widget_init_label(&lbl_chk, 20, 84, "2. Checkbox Component:");
-    widget_init_checkbox(&chk, 20, 106, "Enable Hardware Acceleration", true, NULL);
+    window_add_widget(&gallery_win, label_create(20, 84, "2. Checkbox Component:", COLOR_RGB(220, 225, 235)));
+    window_add_widget(&gallery_win, checkbox_create(20, 106, "Enable Hardware Acceleration", true, NULL));
 
-    widget_init_label(&lbl_sld, 20, 140, "3. Real-time Slider & Sync Progress:");
-    widget_init_slider(&sld, 20, 164, 260, 0, 100, 45, on_slider_move);
-    widget_init_progress(&prg, 295, 158, 160, 24, 45);
+    window_add_widget(&gallery_win, label_create(20, 140, "3. Real-time Slider & Sync Progress:", COLOR_RGB(220, 225, 235)));
+    window_add_widget(&gallery_win, slider_create(20, 164, 260, 0, 100, 45, on_slider_move));
+    
+    dyn_progress_ref = progress_create(295, 158, 160, 24, 45);
+    window_add_widget(&gallery_win, dyn_progress_ref);
 
-    widget_init_label(&lbl_inp, 20, 204, "4. Editable Text Input Field:");
-    widget_init_input(&inp, 20, 226, 435, 36, "Click here and start typing...");
+    window_add_widget(&gallery_win, label_create(20, 204, "4. Editable Text Input Field:", COLOR_RGB(220, 225, 235)));
+    window_add_widget(&gallery_win, input_create(20, 226, 435, 36, "Click here and start typing..."));
 
-    window_add_widget(&gallery_win, lbl_btn);
-    window_add_widget(&gallery_win, btn);
-    window_add_widget(&gallery_win, lbl_chk);
-    window_add_widget(&gallery_win, chk);
-    window_add_widget(&gallery_win, lbl_sld);
-    window_add_widget(&gallery_win, sld);
-    window_add_widget(&gallery_win, prg);
-    window_add_widget(&gallery_win, lbl_inp);
-    window_add_widget(&gallery_win, inp);
-
-    // Link progress bar for dynamic slider updates
-    dyn_progress_ref = &gallery_win.widgets[6];
-
-    // Second Window: System Monitor
-    window_init(&status_win, 590, 60, 320, 220, "System Kernel Metrics");
-    widget_t st_lbl1, st_lbl2, st_lbl3;
-    widget_init_label(&st_lbl1, 16, 20, "Architecture: x86_64 Long Mode");
-    widget_init_label(&st_lbl2, 16, 50, "Security: Salted SHA-256 (Ring 3)");
-    widget_init_label(&st_lbl3, 16, 80, "Video: Limine GOP (Linear FB)");
-    window_add_widget(&status_win, st_lbl1);
-    window_add_widget(&status_win, st_lbl2);
-    window_add_widget(&status_win, st_lbl3);
+    // Second Window: System Metrics
+    window_init(&status_win, 590, 60, 320, 200, "Kernel & Video Pipeline");
+    window_add_widget(&status_win, label_create(16, 20, "Architecture: x86_64 Long Mode", COLOR_RGB(255, 255, 255)));
+    window_add_widget(&status_win, label_create(16, 50, "Security: Salted SHA-256 Auth", COLOR_RGB(200, 205, 215)));
+    window_add_widget(&status_win, label_create(16, 80, "Renderer: Porter-Duff Alpha Blend", COLOR_RGB(87, 242, 135)));
+    window_add_widget(&status_win, label_create(16, 110, "Widgets: Fully Modular C OOP", COLOR_RGB(88, 101, 242)));
 
     int mouse_x = vinfo.xres / 2;
     int mouse_y = vinfo.yres / 2;
@@ -214,14 +209,13 @@ int main(int argc, char **argv) {
         window_render(&canvas, &status_win);
         window_render(&canvas, &gallery_win);
 
-        // 3. Render Taskbar
+        // 3. Render Modern Taskbar
         draw_fill_rect(&canvas, 0, canvas.height - 42, canvas.width, 42, COLOR_RGB(28, 30, 36));
         draw_rect(&canvas, 0, canvas.height - 42, canvas.width, 1, COLOR_RGB(45, 48, 56));
         
-        draw_fill_rect(&canvas, 8, canvas.height - 36, 86, 30, COLOR_RGB(88, 101, 242));
+        draw_fill_rounded_rect(&canvas, 8, canvas.height - 36, 86, 30, 6, COLOR_RGB(88, 101, 242));
         font_draw_string(&canvas, 24, canvas.height - 29, "Equant", COLOR_RGB(255, 255, 255), 1);
 
-        // Taskbar Clock
         font_draw_string(&canvas, canvas.width - 64, canvas.height - 29, "12:00", COLOR_RGB(200, 205, 215), 1);
 
         // 4. Render Mouse Pointer
