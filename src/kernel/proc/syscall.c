@@ -86,6 +86,31 @@ static bool tty_has_input(void) {
 // ============================================================================
 // 1. File Descriptor & I/O Handlers
 // ============================================================================
+static int64_t sys_kill_handler(int pid, int sig) {
+    if (sig < 0 || sig >= NSIG) return -EINVAL;
+    extern task_t *task_list;
+    if (!task_list) return -ESRCH;
+
+    task_t *curr = task_list;
+    bool found = false;
+    do {
+        if (curr->process && (pid <= 0 || (int)curr->process->pid == pid)) {
+            found = true;
+            if (sig == SIGKILL || sig == SIGTERM) {
+                curr->process->exit_code = 128 + sig;
+                curr->process->exited = true;
+                curr->state = TASK_STATE_ZOMBIE;
+            } else if (sig == SIGSTOP) {
+                sched_block(curr);
+            } else if (sig == SIGCONT) {
+                sched_unblock(curr);
+            }
+        }
+        curr = curr->next;
+    } while (curr && curr != task_list);
+
+    return found ? 0 : -ESRCH;
+}
 
 static int64_t sys_read_handler(int fd, void *buf, size_t count) {
     if (count == 0) return 0;
@@ -94,6 +119,22 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
     if (fd == 0) {
         char *out = (char *)buf;
         char c = tty_getchar();
+
+        // Handle Ctrl+C (Interrupt Signal)
+        if (c == 0x03) {
+            if (current_task && current_task->process) {
+                // Trigger SIGINT to foreground process group
+                extern int64_t sys_kill_handler(int pid, int sig);
+                sys_kill_handler((int)current_task->process->pid, SIGINT);
+            }
+            return -EINTR;
+        }
+
+        // Handle Ctrl+D (End of File / EOF)
+        if (c == 0x04) {
+            return 0; // Return 0 bytes to signal EOF to Bash/Readline
+        }
+
         if (c == '\r') c = '\n';
         out[0] = c;
         return 1;
@@ -1041,32 +1082,6 @@ static int64_t sys_rt_sigprocmask_handler(int how, const uint64_t *set, uint64_t
         else return -EINVAL;
     }
     return 0;
-}
-
-static int64_t sys_kill_handler(int pid, int sig) {
-    if (sig < 0 || sig >= NSIG) return -EINVAL;
-    extern task_t *task_list;
-    if (!task_list) return -ESRCH;
-
-    task_t *curr = task_list;
-    bool found = false;
-    do {
-        if (curr->process && (pid <= 0 || (int)curr->process->pid == pid)) {
-            found = true;
-            if (sig == SIGKILL || sig == SIGTERM) {
-                curr->process->exit_code = 128 + sig;
-                curr->process->exited = true;
-                curr->state = TASK_STATE_ZOMBIE;
-            } else if (sig == SIGSTOP) {
-                sched_block(curr);
-            } else if (sig == SIGCONT) {
-                sched_unblock(curr);
-            }
-        }
-        curr = curr->next;
-    } while (curr && curr != task_list);
-
-    return found ? 0 : -ESRCH;
 }
 
 static int64_t sys_futex_handler(uint32_t *uaddr, int op, uint32_t val, const struct linux_timespec *timeout, uint32_t *uaddr2, uint32_t val3) {

@@ -16,9 +16,6 @@ typedef struct {
     bool active;
     bool initialized;
 
-    // Mode: false = Kernel handles line editing; true = raw bytes to userspace (Bash/Readline)
-    bool raw_mode;
-
     char line_buf[TTY_BUF_SIZE];
     int line_len;
     int cursor_pos;
@@ -46,10 +43,6 @@ void tty_clear(void);
 void tty_poll_input(void);
 char input_code_to_ascii(uint16_t code, bool shift);
 char tty_getchar(void);
-
-// Terminal control mode
-void tty_set_raw_mode(bool enable);
-bool tty_is_raw_mode(void);
 
 // Raw Input API for TUI
 uint16_t tty_getchar_raw(void);

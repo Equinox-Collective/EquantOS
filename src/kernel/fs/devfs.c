@@ -13,6 +13,7 @@
 #include "../core/mem/pmm.h"
 #include "../proc/task.h"
 #include "../proc/syscall.h"
+#include "../drivers/tty/tty.h"
 
 static vfs_node_t *devfs_root = NULL;
 extern struct limine_framebuffer *kernel_fb;
@@ -161,16 +162,34 @@ static vfs_file_operations_t fb_fops = {
     .mmap = dev_fb_mmap
 };
 
+// Handler for /dev/tty read/write
+static int64_t dev_tty_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)node; (void)offset;
+    if (size == 0 || !buffer) return 0;
+    
+    char c = tty_getchar();
+    if (c == 0x04) return 0; // EOF
+    buffer[0] = (uint8_t)c;
+    return 1;
+}
+
+static vfs_file_operations_t tty_device_fops = {
+    .read = dev_tty_read,
+    .write = dev_tty_write,
+    .ioctl = NULL
+};
+
 void devfs_init(void) {
     devfs_root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strcpy(devfs_root->name, "dev");
     devfs_root->flags = FS_DIRECTORY;
     devfs_root->ops = &devfs_root_fops;
 
-    // Register Default Core Devices
+    // Register Devices
     devfs_register_device("null", &null_fops, NULL, 0);
     devfs_register_device("input0", &input_fops, NULL, 0);
     devfs_register_device("tty0", &tty_fops, NULL, 0);
+    devfs_register_device("tty", &tty_device_fops, NULL, 0); // Crucial for Bash!
     devfs_register_device("fb0", &fb_fops, NULL, 0);
 
     // Mount /dev onto VFS root
@@ -180,9 +199,14 @@ void devfs_init(void) {
             dev_dir->flags |= FS_MOUNTPOINT;
             dev_dir->ptr = (struct vfs_node *)devfs_root;
         }
+
+        // Ensure /tmp exists for Bash heredocs and temp scripts
+        if (!vfs_finddir(vfs_root, "tmp")) {
+            ramfs_create_directory(vfs_root, "tmp");
+        }
     }
 
-    serial_puts(COM1, "[DEVFS] Dynamic DevFS mounted at '/dev' with /dev/null, /dev/input0, /dev/tty0.\n");
+    serial_puts(COM1, "[DEVFS] Nodes /dev/null, /dev/tty, /dev/tty0, /dev/fb0 and /tmp registered.\n");
 }
 
 static int __init devfs_initcall(void) {

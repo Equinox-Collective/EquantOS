@@ -16,6 +16,7 @@
 #include "equterm/shell.h"
 #include "kernel/drivers/display/psf2.h"
 #include "string.h"
+#include "kernel/proc/initproc.h"
 
 __attribute__((used, section(".requests")))
 volatile uint64_t base_revision[3] = LIMINE_BASE_REVISION(3);
@@ -96,7 +97,8 @@ void _start(void) {
 
     tty_print("\nWelcome to EquantOS!\n\n");
     shell_init(); // <-- Print prompt RIGHT HERE after boot logs finish!
-
+    // Launch Ring 3 Bash (or Rescue Shell on fallback)
+    kernel_start_userland();
     for (;;) {
         tty_poll_input();
         asm volatile ("hlt");

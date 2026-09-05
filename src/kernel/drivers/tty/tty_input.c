@@ -1,3 +1,4 @@
+// src/kernel/drivers/tty/tty_input.c - Extended input processor with Control keys
 #include "tty.h"
 #include "../input.h"
 #include "../serial/serial.h"
@@ -5,8 +6,10 @@
 #include <stdbool.h>
 
 static bool shift_held = false;
+static bool ctrl_held = false;
 static bool caps_locked = false;
 
+// Standard US QWERTY lower translation
 static const char keymap_ascii_lower[128] = {
     [KEY_1] = '1', [KEY_2] = '2', [KEY_3] = '3', [KEY_4] = '4', [KEY_5] = '5',
     [KEY_6] = '6', [KEY_7] = '7', [KEY_8] = '8', [KEY_9] = '9', [KEY_0] = '0',
@@ -40,8 +43,13 @@ static const char keymap_ascii_upper[128] = {
 char input_event_to_ascii(input_event_t ev) {
     if (ev.type != EV_KEY) return 0;
 
+    // Track Modifier Keys
     if (ev.code == KEY_LEFTSHIFT || ev.code == KEY_RIGHTSHIFT) {
         shift_held = (ev.value == KEY_PRESS || ev.value == KEY_REPEAT);
+        return 0;
+    }
+    if (ev.code == KEY_LEFTCTRL || ev.code == KEY_RIGHTCTRL) {
+        ctrl_held = (ev.value == KEY_PRESS || ev.value == KEY_REPEAT);
         return 0;
     }
     if (ev.code == KEY_CAPSLOCK && ev.value == KEY_PRESS) {
@@ -53,29 +61,35 @@ char input_event_to_ascii(input_event_t ev) {
         return 0;
     }
 
+    // Handle Control Sequences for Bash (Ctrl+C = 0x03, Ctrl+D = 0x04, etc.)
+    if (ctrl_held && ev.code < 128) {
+        char base = keymap_ascii_lower[ev.code];
+        if (base >= 'a' && base <= 'z') {
+            return (char)(base - 'a' + 1); // 1 = Ctrl+A, 3 = Ctrl+C, 4 = Ctrl+D
+        }
+    }
+
     if (ev.code < 128) {
         bool uppercase = shift_held ^ caps_locked;
-        char c = uppercase ? keymap_ascii_upper[ev.code] : keymap_ascii_lower[ev.code];
-        return c;
+        return uppercase ? keymap_ascii_upper[ev.code] : keymap_ascii_lower[ev.code];
     }
     return 0;
 }
 
-/// Blocking character read (Keyboard + Serial) without forced kernel echo
 char tty_getchar(void) {
     input_event_t ev;
 
     for (;;) {
         __asm__ volatile("sti");
 
-        // 1. Serial (COM1)
+        // 1. Check Serial Port (COM1)
         if (serial_received(COM1)) {
             char c = serial_getchar(COM1);
             if (c == '\r') c = '\n';
             return c;
         }
 
-        // 2. PS/2 or USB Keyboard
+        // 2. Check PS/2 and USB Keyboard Queue
         if (input_pop_event(&ev)) {
             char c = input_event_to_ascii(ev);
             if (c != 0) {
