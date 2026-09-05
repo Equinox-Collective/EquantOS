@@ -19,4 +19,11 @@ size_t term_get_cursor_x(void);
 size_t term_get_cursor_y(void);
 void term_set_cursor(size_t x, size_t y);
 
+uint64_t term_get_fb_width(void);
+uint64_t term_get_fb_height(void);
+int term_get_glyph_width(void);
+int term_get_glyph_height(void);
+void term_print_raw(const char *str);
+void term_draw_rect(size_t x, size_t y, size_t w, size_t h, uint32_t color);
+
 #endif // TERM_H

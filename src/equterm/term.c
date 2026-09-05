@@ -256,6 +256,17 @@ void term_putchar_raw(char c) {
         term_advance_line();
     }
 
+    // Fill glyph bounding box with term_bg_color
+    for (size_t y = 0; y < (size_t)gh; y++) {
+        size_t py = cursor_y + y;
+        if (py >= term_height) break;
+        for (size_t x = 0; x < (size_t)gw; x++) {
+            size_t px = cursor_x + x;
+            if (px >= term_width) break;
+            term_fb_address[py * term_pitch + px] = term_bg_color;
+        }
+    }
+
     if (kernel_psf2_font.loaded && kernel_psf2_font.hdr) {
         int drawn_width = psf2_draw_char(&kernel_psf2_font, term_fb_address, 
                                          (int)term_pitch, (int)term_height, 
@@ -292,6 +303,13 @@ void term_print(const char *str) {
     tty_print(str);
 }
 
+void term_print_raw(const char *str) {
+    if (!str) return;
+    while (*str) {
+        term_putchar_raw(*str++);
+    }
+}
+
 void term_clear(void) {
     tty_clear();
 }
@@ -312,4 +330,33 @@ void term_set_cursor(size_t x, size_t y) {
 void term_set_custom_colors(uint32_t fg, uint32_t bg) {
     term_fg_color = fg;
     term_bg_color = bg;
+}
+
+uint64_t term_get_fb_width(void) {
+    return term_width;
+}
+
+uint64_t term_get_fb_height(void) {
+    return term_height;
+}
+
+int term_get_glyph_width(void) {
+    return get_glyph_width();
+}
+
+int term_get_glyph_height(void) {
+    return get_glyph_height();
+}
+
+void term_draw_rect(size_t x, size_t y, size_t w, size_t h, uint32_t color) {
+    if (!term_fb_address) return;
+    for (size_t r = 0; r < h; r++) {
+        size_t py = y + r;
+        if (py >= term_height) break;
+        for (size_t c = 0; c < w; c++) {
+            size_t px = x + c;
+            if (px >= term_width) break;
+            term_fb_address[py * term_pitch + px] = color;
+        }
+    }
 }

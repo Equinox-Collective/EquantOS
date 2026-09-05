@@ -25,3 +25,4 @@ GPU (Through LinuxKPI)
 Own Package Manager
 Sound
 GUI (Qt, WebView (NEVER), GTK, X11/Wayland, Your own) | OR | Eon (GRAPHICAL DSL LANGUAGE)
+Root / User / Passwords

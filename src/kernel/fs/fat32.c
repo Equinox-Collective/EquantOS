@@ -824,7 +824,7 @@ int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, co
     uint32_t bytes_per_sector = 512;
     uint32_t sectors_per_cluster = 1;
     uint16_t reserved_sectors = 32;
-    uint8_t num_fats = 2;
+    uint8_t  num_fats = 2;
     uint32_t root_cluster = 2;
 
     uint32_t total_clusters = (sector_count - reserved_sectors) / sectors_per_cluster;
@@ -834,32 +834,43 @@ int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, co
     if (!sec_buf) return -1;
 
     // 1. Write Volume Boot Record (VBR / Sector 0 & Backup Sector 6)
-    fat32_bpb_t *bpb = (fat32_bpb_t *)sec_buf;
-    bpb->jmp[0] = 0xEB; bpb->jmp[1] = 0x58; bpb->jmp[2] = 0x90;
-    memcpy(bpb->oem, "MSWIN4.1", 8);
-    bpb->bytes_per_sector = (uint16_t)bytes_per_sector;
-    bpb->sectors_per_cluster = (uint8_t)sectors_per_cluster;
-    bpb->reserved_sectors = reserved_sectors;
-    bpb->num_fats = num_fats;
-    bpb->root_entry_count = 0;
-    bpb->total_sectors_16 = 0;
-    bpb->media_type = 0xF8;
-    bpb->fat_size_16 = 0;
-    bpb->sectors_per_track = 32;
-    bpb->num_heads = 64;
-    bpb->hidden_sectors = start_lba;
-    bpb->total_sectors_32 = sector_count;
-    bpb->table_size_32 = fat_size_sectors;
-    bpb->ext_flags = 0;
-    bpb->fs_version = 0;
-    bpb->root_cluster = root_cluster;
-    bpb->fs_info = 1;
-    bpb->backup_boot_sector = 6;
-    bpb->drive_num = 0x80;
-    bpb->boot_signature = 0x29;
-    bpb->volume_id = 0x12345678;
-    memcpy(bpb->volume_label, label ? label : "EFI SYSTEM ", 11);
-    memcpy(bpb->file_system_type, "FAT32   ", 8);
+    memset(sec_buf, 0, 512);
+    sec_buf[0] = 0xEB; sec_buf[1] = 0x58; sec_buf[2] = 0x90; // BS_jmpBoot (x86 short jump)
+    memcpy(&sec_buf[3], "MSWIN4.1", 8);                      // BS_OEMName
+    *(uint16_t *)&sec_buf[11] = (uint16_t)bytes_per_sector;   // BPB_BytsPerSec (512)
+    sec_buf[13] = (uint8_t)sectors_per_cluster;              // BPB_SecPerClus (1)
+    *(uint16_t *)&sec_buf[14] = reserved_sectors;            // BPB_RsvdSecCnt (32)
+    sec_buf[16] = num_fats;                                  // BPB_NumFATs (2)
+    *(uint16_t *)&sec_buf[17] = 0;                           // BPB_RootEntCnt (0 for FAT32)
+    *(uint16_t *)&sec_buf[19] = 0;                           // BPB_TotSec16 (0)
+    sec_buf[21] = 0xF8;                                      // BPB_Media (Fixed disk)
+    *(uint16_t *)&sec_buf[22] = 0;                           // BPB_FATSz16 (0)
+    *(uint16_t *)&sec_buf[24] = 32;                          // BPB_SecPerTrk
+    *(uint16_t *)&sec_buf[26] = 64;                          // BPB_NumHeads
+    *(uint32_t *)&sec_buf[28] = start_lba;                   // BPB_HiddSec
+    *(uint32_t *)&sec_buf[32] = sector_count;                // BPB_TotSec32
+    *(uint32_t *)&sec_buf[36] = fat_size_sectors;            // BPB_FATSz32
+    *(uint16_t *)&sec_buf[40] = 0;                           // BPB_ExtFlags
+    *(uint16_t *)&sec_buf[42] = 0;                           // BPB_FSVer
+    *(uint32_t *)&sec_buf[44] = root_cluster;                // BPB_RootClus (2)
+    *(uint16_t *)&sec_buf[48] = 1;                           // BPB_FSInfo (Sector 1)
+    *(uint16_t *)&sec_buf[50] = 6;                           // BPB_BkBootSec (Sector 6)
+    // sec_buf[52..63] reserved (12 bytes, already 0)
+    sec_buf[64] = 0x80;                                      // BS_DrvNum (0x80)
+    sec_buf[65] = 0x00;                                      // BS_Reserved1
+    sec_buf[66] = 0x29;                                      // BS_BootSig (0x29)
+    *(uint32_t *)&sec_buf[67] = 0x12345678;                  // BS_VolID
+    
+    memset(&sec_buf[71], ' ', 11);
+    if (label) {
+        size_t llen = strlen(label);
+        if (llen > 11) llen = 11;
+        memcpy(&sec_buf[71], label, llen);
+    } else {
+        memcpy(&sec_buf[71], "EFI SYSTEM ", 11);
+    }
+    
+    memcpy(&sec_buf[82], "FAT32   ", 8);                     // BS_FilSysType (8 bytes)
     sec_buf[510] = 0x55;
     sec_buf[511] = 0xAA;
 
@@ -868,24 +879,25 @@ int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, co
 
     // 2. Write Mandatory UEFI FSInfo Sector (Sector 1 & Backup Sector 7)
     memset(sec_buf, 0, 512);
-    fat32_fsinfo_t *fsinfo = (fat32_fsinfo_t *)sec_buf;
-    fsinfo->lead_sig = 0x41615252;
-    fsinfo->struct_sig = 0x61417272;
-    fsinfo->free_count = total_clusters - 1;
-    fsinfo->next_free = 3;
-    fsinfo->trail_sig = 0xAA550000;
-
+    *(uint32_t *)&sec_buf[0] = 0x41615252;                   // FSI_LeadSig ("RRaA")
+    *(uint32_t *)&sec_buf[484] = 0x61417272;                 // FSI_StrucSig ("rrAa")
+    *(uint32_t *)&sec_buf[488] = total_clusters - 1;         // FSI_Free_Count
+    *(uint32_t *)&sec_buf[492] = 3;                          // FSI_Nxt_Free
+    *(uint32_t *)&sec_buf[508] = 0xAA550000;                 // FSI_TrailSig (0x00, 0x00, 0x55, 0xAA)
     dev.write(start_lba + 1, 1, sec_buf);
     dev.write(start_lba + 7, 1, sec_buf);
 
-    // 3. Initialize BOTH FAT Tables (Cluster 0, 1, 2)
+    // 3. Initialize Both FAT Tables (Media Descriptor, EOC, Root Cluster)
     for (uint32_t f = 0; f < num_fats; f++) {
         uint32_t fat_start = start_lba + reserved_sectors + (f * fat_size_sectors);
         
         memset(sec_buf, 0, 512);
-        sec_buf[0] = 0xF8; sec_buf[1] = 0xFF; sec_buf[2] = 0xFF; sec_buf[3] = 0x0F; // Media
-        sec_buf[4] = 0xFF; sec_buf[5] = 0xFF; sec_buf[6] = 0xFF; sec_buf[7] = 0x0F; // Clean/EOC
-        sec_buf[8] = 0xFF; sec_buf[9] = 0xFF; sec_buf[10] = 0xFF; sec_buf[11] = 0x0F; // Root Dir
+        // Cluster 0: Media byte (0xF8) with high reserved bits set
+        sec_buf[0] = 0xF8; sec_buf[1] = 0xFF; sec_buf[2] = 0xFF; sec_buf[3] = 0x0F;
+        // Cluster 1: EOC / Clean shutdown bit
+        sec_buf[4] = 0xFF; sec_buf[5] = 0xFF; sec_buf[6] = 0xFF; sec_buf[7] = 0x0F;
+        // Cluster 2: Root Directory End of Cluster Chain (EOC)
+        sec_buf[8] = 0xFF; sec_buf[9] = 0xFF; sec_buf[10] = 0xFF; sec_buf[11] = 0x0F;
         dev.write(fat_start, 1, sec_buf);
 
         memset(sec_buf, 0, 512);
@@ -894,7 +906,7 @@ int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, co
         }
     }
 
-    // 4. Clear Root Directory Cluster
+    // 4. Clear Root Directory Cluster (Cluster 2)
     uint32_t first_data_sec = start_lba + reserved_sectors + (num_fats * fat_size_sectors);
     memset(sec_buf, 0, 512);
     for (uint32_t s = 0; s < sectors_per_cluster; s++) {

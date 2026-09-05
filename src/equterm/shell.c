@@ -151,7 +151,7 @@ static const shell_command_t commands[] = {
     { "xhcitest",   "Show USB xHCI controller & port status", cmd_xhcitest },
     { "pcipeek",    "Read PCI register: pcipeek <b> <s> <f> <o>", cmd_pcipeek },
     { "inbtest",    "Read raw hardware I/O port: inbtest <hex_port>", cmd_inbtest },
-    { "installer", "Run interactive Archinstall-style OS Installer", cmd_installer },
+    { "installer",   "Run interactive Archinstall-style OS Installer", cmd_installer },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))

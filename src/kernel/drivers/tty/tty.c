@@ -133,7 +133,7 @@ tty_t *tty_get_current(void) {
     return &ttys[current_tty_id];
 }
 
-static char input_code_to_ascii(uint16_t code, bool shift) {
+char input_code_to_ascii(uint16_t code, bool shift) {
     if (shift) {
         switch (code) {
             case KEY_1: return '!'; case KEY_2: return '@'; case KEY_3: return '#';

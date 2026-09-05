@@ -41,7 +41,7 @@ void tty_set_color(uint32_t color);
 void tty_set_colors(uint32_t fg_color, uint32_t bg_color);
 void tty_clear(void);
 void tty_poll_input(void);
-char input_event_to_ascii(input_event_t ev);
+char input_code_to_ascii(uint16_t code, bool shift);
 char tty_getchar(void);
 
 // Raw Input API for TUI

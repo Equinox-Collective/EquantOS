@@ -60,9 +60,9 @@ def create_mbr_fat32_disk(filename="disk_mbr_fat32.img", size_mb=64):
 
 def create_gpt_ext2_disk(filename="disk_gpt_ext2.img", size_mb=64):
     """Generates a 64MB disk image formatted with GPT partition table and a standard EXT2 filesystem."""
-    # Удаляем старый поврежденный образ, если был
     if os.path.exists(filename):
-        os.remove(filename)
+        print(f"[SKIP] Disk image '{filename}' already exists. Preserving data.")
+        return
 
     print(f"[CREATE] Generating valid {size_mb}MB EXT2 disk image: '{filename}'...")
     img_size = size_mb * 1024 * 1024
