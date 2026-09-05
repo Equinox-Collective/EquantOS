@@ -397,6 +397,16 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
         }
         return 0;
     }
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    if (node->ops && node->ops->ioctl) {
+        return node->ops->ioctl(node, req, arg);
+    }
+    
     return -ENOTTY;
 }
 
@@ -678,7 +688,6 @@ static int64_t sys_brk_handler(uint64_t new_brk) {
 }
 
 static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {
-    (void)prot;
     if (length == 0) return -EINVAL;
 
     size_t page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -690,6 +699,15 @@ static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flag
         mmap_virtual_base += aligned_len;
     }
 
+    // Check if mapping a device node (e.g. /dev/fb0)
+    if (fd >= 0 && fd < MAX_OPEN_FILES && current_task->process->files[fd]) {
+        vfs_node_t *node = current_task->process->files[fd];
+        if (node->ops && node->ops->mmap) {
+            return node->ops->mmap(node, virt_addr, length, prot, flags, offset);
+        }
+    }
+
+    // Default Anonymous/File Paging Logic
     if (!current_task || !current_task->process) return -EINVAL;
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
 
