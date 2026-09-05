@@ -14,8 +14,7 @@ else
     Q := @
 endif
 
-# Flags
-# CRITICAL: -MMD -MP generate header dependency files (.d) automatically
+# Kernel Flags
 CFLAGS := -Wall -Wextra -O2 -g -pipe -ffreestanding -fno-stack-protector \
           -fno-pie -fno-pic -mno-red-zone -mcmodel=kernel \
           -mno-sse -mno-mmx -mno-sse2 -MMD -MP
@@ -23,7 +22,16 @@ CFLAGS := -Wall -Wextra -O2 -g -pipe -ffreestanding -fno-stack-protector \
 ASMFLAGS := -f elf64
 LDFLAGS  := -nostdlib -static -z max-page-size=0x1000 -T src/linker.ld
 
-# QEMU Flags
+# Userspace SDK Flags (Musl Libc Integration)
+USER_LDFLAGS  := -static -nostdlib -z max-page-size=0x1000 -z noexecstack -Ttext-segment 0x400000
+USER_CRT_PRE   := sdk/sysroot/lib/crt1.o sdk/sysroot/lib/crti.o
+USER_CRT_POST  := sdk/sysroot/lib/libc.a sdk/sysroot/lib/crtn.o
+
+# GUI (Equi) Specific Compiler Flags: Full SSE2 Enabled, High Optimization
+UI_CFLAGS     := -static -nostdinc -isystem sdk/sysroot/include -Iuserspace/equi \
+                 -O3 -msse2 -Wall -Wextra -fno-pie -fno-pic -MMD -MP
+
+# QEMU Hardware Emulation Flags
 QEMU      := qemu-system-x86_64
 QEMUFLAGS := -m 512M \
              -vga std \
@@ -37,19 +45,19 @@ QEMUFLAGS := -m 512M \
              -device ide-hd,drive=fat0 \
              -serial stdio
 
-# Hard-Disk Boot Flags (512MB RAM, Full VGA, Filtered Logging)
+# Hard-Disk Boot Flags
 QEMUBDFLAGS := -m 512M \
-             -vga std \
-             -boot c \
-			 -bios OVMF.fd \
-             -device qemu-xhci,id=xhci \
-             -device usb-kbd,bus=xhci.0 \
-             -device usb-mouse,bus=xhci.0 \
-             -drive file=disk_gpt_ext2.img,format=raw,if=none,id=hd0 \
-             -device ide-hd,drive=hd0,bootindex=1 \
-             -serial stdio \
-             -d guest_errors,unimp -D qemu_bd.log \
-			 
+               -vga std \
+               -boot c \
+               -bios OVMF.fd \
+               -device qemu-xhci,id=xhci \
+               -device usb-kbd,bus=xhci.0 \
+               -device usb-mouse,bus=xhci.0 \
+               -drive file=disk_gpt_ext2.img,format=raw,if=none,id=hd0 \
+               -device ide-hd,drive=hd0,bootindex=1 \
+               -serial stdio \
+               -d guest_errors,unimp -D qemu_bd.log
+
 # ==============================================================================
 # Environment & Shell Detection
 # ==============================================================================
@@ -71,7 +79,7 @@ ifeq ($(USE_POSIX),1)
     CP    = cp "$1" "$2"
     DEV_NULL := > /dev/null 2>&1
     
-    # ANSI Color Palette for POSIX terminals
+    # ANSI Color Palette
     CLR_RESET   := \033[0m
     CLR_CC      := \033[1;34m
     CLR_ASM     := \033[1;35m
@@ -80,7 +88,6 @@ ifeq ($(USE_POSIX),1)
     CLR_OK      := \033[1;92m
     CLR_INFO    := \033[1;36m
 
-    # POSIX uses printf for clean formatted/colored output
     LOG_STEP = @printf "  %b  %s\n" "$1" "$2"
     LOG_MSG  = @printf "%b\n" "$1"
 else
@@ -99,7 +106,6 @@ else
     CLR_OK      := [SUCCESS]
     CLR_INFO    := [INFO]
 
-    # Windows CMD uses native echo
     LOG_STEP = @echo   $1 $2
     LOG_MSG  = @echo $1
 endif
@@ -107,16 +113,15 @@ endif
 # Recursive wildcard function
 rwildcard = $(foreach d,$(wildcard $(1:=/*)),$(call rwildcard,$d,$2) $(filter $(subst *,%,$2),$d))
 
-# Include directories
+# Include directories for Kernel
 INC_DIRS := $(sort $(dir $(call rwildcard,src,*)))
 CFLAGS   += $(addprefix -I, $(INC_DIRS))
 
-# Source Files
+# Kernel Sources and Objects
 C_SOURCES   := $(call rwildcard,src,*.c)
 ASM_SOURCES := $(call rwildcard,src,*.asm)
 S_SOURCES   := $(call rwildcard,src,*.s)
 
-# Object Files
 C_OBJECTS   := $(patsubst src/%.c, build/obj/%.o, $(C_SOURCES))
 ASM_OBJECTS := $(patsubst src/%.asm, build/obj/%.o, $(ASM_SOURCES))
 S_OBJECTS   := $(patsubst src/%.s, build/obj/%.o, $(S_SOURCES))
@@ -124,36 +129,47 @@ S_OBJECTS   := $(patsubst src/%.s, build/obj/%.o, $(S_SOURCES))
 ALL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(S_OBJECTS)
 DEP_FILES   := $(ALL_OBJECTS:.o=.d)
 
-# Target list
+# GUI Server (Equi) Multi-File Sources and Objects
+UI_DIR      := userspace/equi
+UI_SOURCES  := $(call rwildcard,$(UI_DIR),*.c)
+UI_OBJECTS  := $(patsubst $(UI_DIR)/%.c, build/obj/ui/%.o, $(UI_SOURCES))
+UI_DEPS     := $(UI_OBJECTS:.o=.d)
+
+# Userspace Target List (Integrated into ISO)
 ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/musltest.elf \
                  build/iso/equantmemtest.elf \
                  build/iso/busybox.elf \
                  build/iso/font.psf \
-				 build/iso/.bashrc \
-				 build/iso/bash.elf
+                 build/iso/.bashrc \
+                 build/iso/bash.elf \
+                 build/iso/equi.elf
 
 # ==============================================================================
-# Build Rules
+# Master Targets
 # ==============================================================================
 
-.PHONY: all run debug disks clean clean-disks clean-all help
+.PHONY: all ui run runbd debug disks clean clean-disks clean-all help
 
 all: build/equantos.iso
 
-# Compile C Sources
+# Compile Master UI Binary Standalone
+ui: build/iso/equi.elf
+	$(call LOG_MSG,$(CLR_OK) Userspace GUI Compositor successfully built: build/iso/equi.elf)
+
+# Compile Kernel C Sources
 build/obj/%.o: src/%.c
 	@$(call MKDIR,$(dir $@))
 	$(call LOG_STEP,$(CLR_CC),$<)
 	$(Q)$(CC) $(CFLAGS) -c $< -o $@
 
-# Compile NASM Sources
+# Compile Kernel NASM Sources
 build/obj/%.o: src/%.asm
 	@$(call MKDIR,$(dir $@))
 	$(call LOG_STEP,$(CLR_ASM),$<)
 	$(Q)$(ASM) $(ASMFLAGS) $< -o $@
 
-# Compile GAS Sources
+# Compile Kernel GAS Sources
 build/obj/%.o: src/%.s
 	@$(call MKDIR,$(dir $@))
 	$(call LOG_STEP,$(CLR_CC),$<)
@@ -165,11 +181,22 @@ build/kernel.elf: $(ALL_OBJECTS) src/linker.ld
 	$(call LOG_STEP,$(CLR_LD),$@)
 	$(Q)$(LD) $(LDFLAGS) $(ALL_OBJECTS) -o $@
 
-# Automatically Include Header Dependency Files
--include $(DEP_FILES)
+# ==============================================================================
+# GUI Compositor (Equi) Compilation Rules
+# ==============================================================================
+
+build/obj/ui/%.o: $(UI_DIR)/%.c
+	@$(call MKDIR,$(dir $@))
+	$(call LOG_STEP,$(CLR_CC),$<)
+	$(Q)$(CC) $(UI_CFLAGS) -c $< -o $@
+
+build/iso/equi.elf: $(UI_OBJECTS)
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_LD),$@)
+	$(Q)$(LD) $(USER_LDFLAGS) $(USER_CRT_PRE) $(UI_OBJECTS) $(USER_CRT_POST) -o $@
 
 # ==============================================================================
-# Userspace Programs Build Rules
+# Generic Userspace Applications
 # ==============================================================================
 
 build/iso/equantmemtest.elf: userspace/equantmemtest.c
@@ -178,11 +205,6 @@ build/iso/equantmemtest.elf: userspace/equantmemtest.c
 	$(call LOG_STEP,$(CLR_CC),$<)
 	$(Q)$(CC) -g -ffreestanding -fno-pie -fno-pic -nostdlib -c $< -o build/obj/userspace/equantmemtest.o
 	$(Q)$(LD) -Ttext 0x400000 build/obj/userspace/equantmemtest.o -o $@
-
-# Generic Musl/SDK Userspace Program Recipe
-USER_LDFLAGS := -static -nostdlib -z max-page-size=0x1000 -z noexecstack -Ttext-segment 0x400000
-USER_CRT_PRE  := sdk/sysroot/lib/crt1.o sdk/sysroot/lib/crti.o
-USER_CRT_POST := sdk/sysroot/lib/libc.a sdk/sysroot/lib/crtn.o
 
 build/iso/%.elf: userspace/%.c
 	@$(call MKDIR,build/obj/userspace)
@@ -211,8 +233,12 @@ build/iso/.bashrc: res/.bashrc
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/.bashrc,$@)
 
+# Auto-Dependency Inclusion
+-include $(DEP_FILES)
+-include $(UI_DEPS)
+
 # ==============================================================================
-# Disk & Bootloader Assets
+# Bootable ISO & Disks Construction
 # ==============================================================================
 
 disks:
@@ -229,9 +255,6 @@ limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
 	$(Q)$(call CP,limine-binary/BOOTX64.EFI,BOOTX64.EFI)
 	$(Q)$(call RMDIR,limine-binary)
 	$(Q)$(call RM,limine-binary.tar.gz)
-# ==============================================================================
-# Final Target: ISO Image Generation
-# ==============================================================================
 
 build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd.bin limine-uefi-cd.bin
 	$(call LOG_MSG,  $(CLR_ISO) Constructing bootable ISO image...)
@@ -256,7 +279,7 @@ build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd
 	$(call LOG_MSG,$(CLR_OK) EquantOS ISO successfully built at build/equantos.iso)
 
 # ==============================================================================
-# Execution & Debug Rules
+# Emulation & Debug
 # ==============================================================================
 
 run: build/equantos.iso disks
@@ -272,7 +295,7 @@ debug: build/equantos.iso disks
 	$(Q)$(QEMU) -cdrom build/equantos.iso $(QEMUFLAGS) -s -S
 
 # ==============================================================================
-# Cleanup
+# Clean
 # ==============================================================================
 
 clean:
@@ -292,18 +315,9 @@ clean-all: clean clean-disks
 	$(Q)$(call RM,limine-binary.tar.gz)
 	$(Q)$(call RMDIR,limine-binary)
 
-# ==============================================================================
-# Self-Documenting Help System
-# ==============================================================================
-
 help:
-	@echo EquantOS Build System Overview:
-	@echo   make             - Builds the complete EquantOS ISO image
-	@echo   make run         - Builds and runs EquantOS inside QEMU
-	@echo   make debug       - Runs QEMU paused (-S) with GDB server enabled (-s)
-	@echo   make disks       - Generates test disk images
-	@echo   make clean       - Removes the build/ directory
-	@echo   make clean-all   - Removes build artifacts, disks, and bootloader cache
-	@echo.
-	@echo Advanced Options:
-	@echo   make V=1         - Enables verbose mode (prints actual GCC/LD commands)
+	@echo EquantOS Build System:
+	@echo   make             - Builds full ISO image
+	@echo   make ui          - Compiles standalone GUI compositor (equi.elf)
+	@echo   make run         - Runs ISO in QEMU with NVMe and XHCI
+	@echo   make clean       - Cleans build directory
