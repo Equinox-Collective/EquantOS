@@ -6,48 +6,35 @@
 #include <stddef.h>
 #include "../render/draw.h"
 
-typedef enum {
-    WIDGET_LABEL,
-    WIDGET_BUTTON,
-    WIDGET_CHECKBOX,
-    WIDGET_SLIDER,
-    WIDGET_PROGRESS,
-    WIDGET_INPUT
-} widget_type_t;
+struct widget;
+
+typedef struct widget_ops {
+    void (*render)(surface_t *surf, struct widget *w, int abs_x, int abs_y);
+    bool (*on_mouse)(struct widget *w, int abs_x, int abs_y, int mx, int my, bool down);
+    void (*on_key)(struct widget *w, char c, bool backspace);
+    void (*destroy)(struct widget *w);
+} widget_ops_t;
 
 typedef struct widget {
-    widget_type_t type;
-    int x, y, w, h;       // Local coordinates relative to window
-    char text[64];
-    
-    // Values for Checkbox (0/1), Slider (min..max), Progress (0..100)
-    int value;
-    int min_val;
-    int max_val;
-    
-    // Text input buffer
-    char input_buf[64];
-    size_t input_len;
-    
-    // Interactive states
+    int x, y, w, h;
     bool hovered;
     bool pressed;
     bool focused;
+    bool visible;
     
-    // Callbacks
-    void (*on_click)(struct widget *w);
-    void (*on_change)(struct widget *w, int new_val);
+    const widget_ops_t *ops;
+    void *priv_data; // Custom widget state (allocated or mapped)
 } widget_t;
 
-void widget_init_button(widget_t *w, int x, int y, int width, int height, const char *text, void (*on_click)(widget_t *));
-void widget_init_checkbox(widget_t *w, int x, int y, const char *label, bool checked, void (*on_change)(widget_t *, int));
-void widget_init_slider(widget_t *w, int x, int y, int width, int min, int max, int val, void (*on_change)(widget_t *, int));
-void widget_init_progress(widget_t *w, int x, int y, int width, int height, int val);
-void widget_init_input(widget_t *w, int x, int y, int width, int height, const char *placeholder);
-void widget_init_label(widget_t *w, int x, int y, const char *text);
+// Universal Widget Event Dispatchers
+void widget_base_init(widget_t *w, int x, int y, int width, int height, const widget_ops_t *ops);
+void widget_render(surface_t *surf, widget_t *w, int abs_x, int abs_y);
+bool widget_dispatch_mouse(widget_t *w, int abs_x, int abs_y, int mx, int my, bool down);
+void widget_dispatch_key(widget_t *w, char c, bool backspace);
 
-void widget_render(surface_t *surf, widget_t *w, int win_abs_x, int win_abs_y);
-bool widget_handle_mouse(widget_t *w, int win_abs_x, int win_abs_y, int mx, int my, bool mouse_down);
-void widget_handle_key(widget_t *w, char c, bool is_backspace);
+// Hit-testing helper
+static inline bool widget_contains_point(int px, int py, int rx, int ry, int rw, int rh) {
+    return (px >= rx && px < rx + rw && py >= ry && py < ry + rh);
+}
 
 #endif // EQUI_WIDGET_H
