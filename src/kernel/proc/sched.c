@@ -21,6 +21,7 @@ static uint32_t active_priority_bitmap = 0; // 32-bit Mask for non-empty queues
 
 static task_t *sleep_queue_head = NULL;
 extern task_t *current_task;
+extern task_t *idle_task;
 
 void sched_init(task_t *initial_task) {
     __asm__ volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
@@ -157,21 +158,24 @@ uint64_t sched_switch(uint64_t current_rsp) {
     current_task->rsp = current_rsp;
     task_t *prev_task = current_task;
 
-    // Если задача завершилась (ZOMBIE) или заблокирована — удаляем её из очереди
-    if (current_task->state != TASK_STATE_RUNNABLE) {
-        sched_dequeue(current_task);
-    } else {
-        // Ротация текущей активной задачи
-        sched_dequeue(current_task);
-        sched_enqueue(current_task);
+    // Do not enqueue idle_task or non-runnable tasks into priority queues
+    if (current_task != idle_task) {
+        if (current_task->state != TASK_STATE_RUNNABLE) {
+            sched_dequeue(current_task);
+        } else {
+            sched_dequeue(current_task);
+            sched_enqueue(current_task);
+        }
     }
 
+    // If no tasks are ready to run, switch directly to the idle task
     if (active_priority_bitmap == 0) {
-        return current_rsp;
+        if (!idle_task) return current_rsp;
+        current_task = idle_task;
+    } else {
+        uint32_t highest_prio = (uint32_t)__builtin_ctz(active_priority_bitmap);
+        current_task = run_queues[highest_prio];
     }
-
-    uint32_t highest_prio = (uint32_t)__builtin_ctz(active_priority_bitmap);
-    current_task = run_queues[highest_prio];
 
     if (!current_task) return current_rsp;
 
