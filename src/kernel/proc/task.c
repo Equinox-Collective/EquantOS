@@ -8,6 +8,7 @@
 #include "../drivers/serial/serial.h"
 
 task_t *current_task = NULL;
+task_t *idle_task = NULL;
 task_t *task_list = NULL;  // Убрали static для использования в syscall.c (fork)
 uint64_t next_pid = 1;
 
@@ -18,6 +19,45 @@ void task_init_fpu(task_t *task) {
     fpu_cw[2] = 0xFFFF; // Default FPU Tag Word
     uint32_t *fpu_mxcsr = (uint32_t *)((uint8_t *)task_fpu_area(task) + 24);
     *fpu_mxcsr = 0x1F80; // Default MXCSR state for SSE
+}
+
+static void idle_thread_entry(void) {
+    for (;;) {
+        __asm__ volatile("sti; hlt");
+    }
+}
+
+void task_create_idle(void) {
+    idle_task = (task_t *)kmalloc(sizeof(task_t));
+    memset(idle_task, 0, sizeof(task_t));
+
+    task_init_fpu(idle_task);
+
+    idle_task->id = 0;
+    idle_task->priority = PRIO_BACKGROUND;
+    idle_task->time_slice = 1;
+    idle_task->running = true;
+    idle_task->state = TASK_STATE_RUNNABLE;
+    idle_task->kstack_at_bottom = (uint64_t)kmalloc(16384) + 16384;
+
+    uint64_t *stack = (uint64_t *)idle_task->kstack_at_bottom;
+
+    *--stack = 0x10;                                // SS (Kernel Data)
+    *--stack = idle_task->kstack_at_bottom;         // RSP
+    *--stack = 0x202;                               // RFLAGS (IF=1)
+    *--stack = 0x08;                                // CS (Kernel Code)
+    *--stack = (uint64_t)idle_thread_entry;         // RIP
+
+    *--stack = 0;                                   // Error code
+    *--stack = 0;                                   // Interrupt number
+
+    for (int i = 0; i < 15; i++) {
+        *--stack = 0;
+    }
+
+    idle_task->rsp = (uint64_t)stack;
+    idle_task->next = idle_task;
+    idle_task->prev = idle_task;
 }
 
 void task_init(void) {
