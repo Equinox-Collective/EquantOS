@@ -86,3 +86,10 @@ widget_t *button_create(int x, int y, int w, int h, const char *text, void (*on_
     btn->priv_data = data;
     return btn;
 }
+
+void button_set_text(widget_t *w, const char *text) {
+    if (!w || !w->priv_data || !text) return;
+    button_data_t *data = (button_data_t *)w->priv_data;
+    strncpy(data->text, text, sizeof(data->text) - 1);
+    data->text[sizeof(data->text) - 1] = '\0';
+}
