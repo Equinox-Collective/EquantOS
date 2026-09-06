@@ -143,7 +143,8 @@ ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/font.psf \
                  build/iso/.bashrc \
                  build/iso/bash.elf \
-                 build/iso/equi.elf
+                 build/iso/equi.elf \
+				 build/iso/kdiag.elf
 
 # ==============================================================================
 # Master Targets

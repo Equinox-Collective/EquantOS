@@ -16,7 +16,7 @@ void task_init_fpu(task_t *task) {
     memset(task->fpu_state, 0, sizeof(task->fpu_state));
     uint16_t *fpu_cw = (uint16_t *)task_fpu_area(task);
     fpu_cw[0] = 0x037F; // Default FPU Control Word
-    fpu_cw[2] = 0xFFFF; // Default FPU Tag Word
+    fpu_cw[2] = 0x00FF; // Strict FTW byte (Reserved Byte 5 must remain 0x00!)
     uint32_t *fpu_mxcsr = (uint32_t *)((uint8_t *)task_fpu_area(task) + 24);
     *fpu_mxcsr = 0x1F80; // Default MXCSR state for SSE
 }
@@ -121,13 +121,14 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2) {
 }
 
 void yield(void) {
-    __asm__ volatile ("int $32");
+    sched_yield();
 }
 
 // // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
 
 static int __init tasking_subsys_initcall(void) {
     task_init();
+    task_create_idle(); // <- GUARANTEE IDLE THREAD EXISTS!
     sched_init(current_task);
     serial_puts(COM1, "[KERNEL] Multithreading & O(1) Scheduler Subsystem Initialized.\n");
     return 0;

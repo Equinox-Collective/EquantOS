@@ -96,11 +96,12 @@ void _start(void) {
     asm volatile ("sti");
 
     tty_print("\nWelcome to EquantOS!\n\n");
-    shell_init(); // <-- Print prompt RIGHT HERE after boot logs finish!
-    // Launch Ring 3 Bash (or Rescue Shell on fallback)
+
+    // Launch Ring 3 Bash (or Rescue Shell fallback)
     kernel_start_userland();
+
+    // Kernel Idle Loop: execution only reaches here if userland exited completely
     for (;;) {
-        tty_poll_input();
         asm volatile ("hlt");
     }
 }

@@ -20,6 +20,21 @@ static vfs_node_t tty_stdin_node  = { .name = "stdin",  .flags = FS_FILE, .lengt
 static vfs_node_t tty_stdout_node = { .name = "stdout", .flags = FS_FILE, .length = 0 };
 static vfs_node_t tty_stderr_node = { .name = "stderr", .flags = FS_FILE, .length = 0 };
 
+extern vfs_file_operations_t g_tty_fops;
+
+static vfs_node_t dev_tty_master_node = {
+    .name = "tty",
+    .flags = FS_FILE,
+    .permissions = 0666,
+    .length = 0,
+    .inode = 1,
+    .ops = &g_tty_fops,
+    .ptr = NULL,
+    .parent = NULL,
+    .children = NULL,
+    .next = NULL
+};
+
 bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     if (!elf_data || size < sizeof(Elf64_Ehdr)) return false;
 
@@ -165,9 +180,9 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     strcpy(proc->cwd, "/");
 
     // Initialize FDs 0, 1, 2
-    proc->files[0] = &tty_stdin_node;
-    proc->files[1] = &tty_stdout_node;
-    proc->files[2] = &tty_stderr_node;
+    proc->files[0] = &dev_tty_master_node; // STDIN  -> /dev/tty
+proc->files[1] = &dev_tty_master_node; // STDOUT -> /dev/tty
+proc->files[2] = &dev_tty_master_node; // STDERR -> /dev/tty
 
     task_t *task = (task_t *)kmalloc(sizeof(task_t));
     if (!task) return false;

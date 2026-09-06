@@ -150,6 +150,20 @@ irq0_handler_asm:
     add rsp, 16       
     iretq
 
+[global sched_yield_asm]
+sched_yield_asm:
+    push qword 0          ; Fake error code for System V ABI alignment
+    push qword 0x82       ; Vector 0x82 (Yield)
+    SAVE_REGS
+
+    mov rdi, rsp          ; Pass current task RSP to schedule()
+    call schedule
+    mov rsp, rax          ; Switch to target task RSP!
+
+    RESTORE_REGS
+    add rsp, 16           ; Pop vector and fake error code
+    iretq
+
 [global syscall_interrupt_asm]
 syscall_interrupt_asm:
     push rax

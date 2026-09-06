@@ -179,6 +179,49 @@ static vfs_file_operations_t tty_device_fops = {
     .ioctl = NULL
 };
 
+static int64_t devfs_tty_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)node; (void)offset;
+    if (!buffer || size == 0) return 0;
+
+    size_t bytes_read = 0;
+    while (bytes_read < size) {
+        char c = tty_getchar();
+        if (c == 0x04) { // Ctrl+D (EOF)
+            break;
+        }
+        buffer[bytes_read++] = (uint8_t)c;
+        if (c == '\n') {
+            break;
+        }
+    }
+    return (int64_t)bytes_read;
+}
+
+// Canonical TTY write implementation (Outputs to Display and Serial)
+static int64_t devfs_tty_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)node; (void)offset;
+    if (!buffer || size == 0) return 0;
+
+    for (size_t i = 0; i < size; i++) {
+        char c = (char)buffer[i];
+        serial_putchar(COM1, c);
+        term_putchar_raw(c);
+    }
+    return (int64_t)size;
+}
+
+vfs_file_operations_t g_tty_fops = {
+    .read = devfs_tty_read,
+    .write = devfs_tty_write,
+    .open = NULL,
+    .close = NULL,
+    .readdir = NULL,
+    .finddir = NULL,
+    .create = NULL,
+    .ioctl = NULL,
+    .mmap = NULL
+};
+
 void devfs_init(void) {
     devfs_root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strcpy(devfs_root->name, "dev");

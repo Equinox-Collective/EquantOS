@@ -1,4 +1,4 @@
-// vfs.h - Virtual File System abstract layer for EquantOS
+// src/kernel/fs/vfs.h - Virtual File System abstract layer for EquantOS
 #ifndef VFS_H
 #define VFS_H
 
@@ -9,6 +9,21 @@
 #define FS_DIRECTORY   0x02
 #define FS_MOUNTPOINT  0x08
 #define FBIOGET_VSCREENINFO 0x4600
+
+// Standard POSIX File Open & Access Flags
+#ifndef O_RDONLY
+#define O_RDONLY                 00
+#define O_WRONLY                 01
+#define O_RDWR                   02
+#define O_CREAT                0100
+#define O_EXCL                 0200
+#define O_NOCTTY               0400
+#define O_TRUNC               01000
+#define O_APPEND              02000
+#define O_NONBLOCK            04000
+#define O_DIRECTORY         0200000
+#define O_CLOEXEC          02000000
+#endif
 
 struct vfs_node;
 
@@ -35,7 +50,7 @@ typedef struct vfs_file_operations {
     struct vfs_node* (*finddir)(struct vfs_node *node, const char *name);
     struct vfs_node* (*create)(struct vfs_node *dir, const char *name, uint32_t flags);
     
-    // NEW METHODS FOR HARDWARE DEVICES & DRIVERS
+    // Hardware & Device Methods
     int (*ioctl)(struct vfs_node *node, uint64_t request, void *arg);
     int64_t (*mmap)(struct vfs_node *node, uint64_t addr, size_t length, int prot, int flags, int64_t offset);
 } vfs_file_operations_t;
@@ -47,7 +62,7 @@ typedef struct vfs_node {
     uint64_t length;
     uint64_t inode;
     vfs_file_operations_t *ops;
-    struct vfs_node *ptr; // Used for mountpoints
+    struct vfs_node *ptr; // Used for mountpoints or private driver data
     
     // Tree hierarchy links
     struct vfs_node *parent;

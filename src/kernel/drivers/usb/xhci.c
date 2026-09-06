@@ -256,18 +256,6 @@ void xhci_handle_events(void) {
                 }
             }
         }
-        else if (trb_type == TRB_TYPE_TRANSFER_EVENT) {
-            if (slot_id < XHCI_MAX_SLOTS_SUPPORTED) {
-                xhci_slot_device_t *slot = &g_slots[slot_id];
-
-                uint32_t residual = event->status & 0x00FFFFFF;
-                size_t bytes_transferred = (residual < 8) ? (8 - residual) : 8;
-                if (bytes_transferred == 0) bytes_transferred = 8;
-
-                usb_hid_parse_report(slot->report_buf_virt, bytes_transferred);
-                xhci_arm_hid_endpoint(slot);
-            }
-        }
 
         g_xhci.event_dequeue_idx++;
         if (g_xhci.event_dequeue_idx >= XHCI_TRB_RING_SIZE) {

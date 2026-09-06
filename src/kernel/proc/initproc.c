@@ -42,10 +42,6 @@ void kernel_start_userland(void) {
         return;
     }
 
-    serial_puts(COM1, "[INIT] Found interactive shell: ");
-    serial_puts(COM1, selected_path);
-    serial_puts(COM1, ". Loading into Ring 3...\n");
-
     uint8_t *elf_buffer = (uint8_t *)kmalloc(shell_file->length);
     if (!elf_buffer) {
         serial_puts(COM1, "[INIT ERROR] Out of memory reading shell ELF.\n");
@@ -62,10 +58,12 @@ void kernel_start_userland(void) {
     }
 
     // Configure argv for Bash
-    char *argv[] = { (char *)selected_path, "--login", NULL };
-    int argc = 2;
-
-    term_print("Booting into GNU Bash (Ring 3 Userland)...\n\n");
+    char *argv[] = {
+        (char *)selected_path,
+        "-i",
+        NULL
+    };
+    int argc = 2; 
 
     last_spawned_task = NULL;
 
@@ -81,6 +79,8 @@ void kernel_start_userland(void) {
 
     // Monitor shell lifecycle: if user types 'exit' or Bash faults, drop to Rescue Shell
     while (last_spawned_task && last_spawned_task->state != TASK_STATE_ZOMBIE) {
+        current_task->state = TASK_STATE_BLOCKED;
+        sched_dequeue(current_task);
         sched_yield();
     }
 

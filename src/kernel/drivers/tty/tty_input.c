@@ -1,4 +1,4 @@
-// src/kernel/drivers/tty/tty_input.c - Extended input processor with Control keys
+// src/kernel/drivers/tty/tty_input.c
 #include "tty.h"
 #include "../input.h"
 #include "../serial/serial.h"
@@ -9,7 +9,11 @@ static bool shift_held = false;
 static bool ctrl_held = false;
 static bool caps_locked = false;
 
-// Standard US QWERTY lower translation
+// ANSI escape sequence queue for Arrow Keys & Special Keys
+static char escape_seq_buf[8];
+static int escape_seq_len = 0;
+static int escape_seq_pos = 0;
+
 static const char keymap_ascii_lower[128] = {
     [KEY_1] = '1', [KEY_2] = '2', [KEY_3] = '3', [KEY_4] = '4', [KEY_5] = '5',
     [KEY_6] = '6', [KEY_7] = '7', [KEY_8] = '8', [KEY_9] = '9', [KEY_0] = '0',
@@ -40,10 +44,17 @@ static const char keymap_ascii_upper[128] = {
     [KEY_SPACE] = ' ', [KEY_KPENTER] = '\n'
 };
 
+static void queue_escape_seq(const char *seq) {
+    escape_seq_len = 0;
+    escape_seq_pos = 0;
+    while (*seq && escape_seq_len < (int)sizeof(escape_seq_buf)) {
+        escape_seq_buf[escape_seq_len++] = *seq++;
+    }
+}
+
 char input_event_to_ascii(input_event_t ev) {
     if (ev.type != EV_KEY) return 0;
 
-    // Track Modifier Keys
     if (ev.code == KEY_LEFTSHIFT || ev.code == KEY_RIGHTSHIFT) {
         shift_held = (ev.value == KEY_PRESS || ev.value == KEY_REPEAT);
         return 0;
@@ -61,11 +72,37 @@ char input_event_to_ascii(input_event_t ev) {
         return 0;
     }
 
-    // Handle Control Sequences for Bash (Ctrl+C = 0x03, Ctrl+D = 0x04, etc.)
+    // Translate Hardware Arrow Keys into standard VT100 / ANSI Escape Sequences for Bash Readline!
+    if (ev.code == KEY_UP) {
+        queue_escape_seq("\033[A");
+        return 0;
+    }
+    if (ev.code == KEY_DOWN) {
+        queue_escape_seq("\033[B");
+        return 0;
+    }
+    if (ev.code == KEY_RIGHT) {
+        queue_escape_seq("\033[C");
+        return 0;
+    }
+    if (ev.code == KEY_LEFT) {
+        queue_escape_seq("\033[D");
+        return 0;
+    }
+    if (ev.code == KEY_HOME) {
+        queue_escape_seq("\033[H");
+        return 0;
+    }
+    if (ev.code == KEY_END) {
+        queue_escape_seq("\033[F");
+        return 0;
+    }
+
+    // Handle Ctrl key combinations (Ctrl+C = 0x03, Ctrl+D = 0x04)
     if (ctrl_held && ev.code < 128) {
         char base = keymap_ascii_lower[ev.code];
         if (base >= 'a' && base <= 'z') {
-            return (char)(base - 'a' + 1); // 1 = Ctrl+A, 3 = Ctrl+C, 4 = Ctrl+D
+            return (char)(base - 'a' + 1);
         }
     }
 
@@ -77,11 +114,14 @@ char input_event_to_ascii(input_event_t ev) {
 }
 
 char tty_getchar(void) {
+    // If pending escape sequence bytes exist in queue (e.g. \033[A), emit them first
+    if (escape_seq_pos < escape_seq_len) {
+        return escape_seq_buf[escape_seq_pos++];
+    }
+
     input_event_t ev;
 
     for (;;) {
-        __asm__ volatile("sti");
-
         // 1. Check Serial Port (COM1)
         if (serial_received(COM1)) {
             char c = serial_getchar(COM1);
@@ -89,16 +129,19 @@ char tty_getchar(void) {
             return c;
         }
 
-        // 2. Check PS/2 and USB Keyboard Queue
+        // 2. Check PS/2 & USB Keyboard
         if (input_pop_event(&ev)) {
             char c = input_event_to_ascii(ev);
+            if (escape_seq_pos < escape_seq_len) {
+                return escape_seq_buf[escape_seq_pos++];
+            }
             if (c != 0) {
                 if (c == '\r') c = '\n';
                 return c;
             }
         }
 
-        __asm__ volatile("pause");
-        sched_yield();
+        // Put CPU to sleep until next hardware interrupt (Zero CPU waste!)
+        __asm__ volatile("sti; hlt");
     }
 }

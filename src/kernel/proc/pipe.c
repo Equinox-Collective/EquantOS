@@ -1,49 +1,33 @@
-// src/kernel/proc/pipe.c - Kernel Pipe (FIFO) Subsystem Implementation
-//
-// Архитектура:
-//   pipe_t: кольцевой буфер 4KB в ядровой куче
-//   read_node / write_node: два VFS-нода с кастомными ops
-//   pipe_t хранится в node->ptr (у обоих нодов)
-//
-// Блокирующее чтение: если буфер пуст и write-end открыт —
-//   задача блокируется (sched_block) и запоминается в p->blocked_reader.
-//   Пишущий конец будит её через sched_unblock.
-//
-
+// src/kernel/proc/pipe.c - Production-Grade POSIX Blocking FIFO Subsystem
 #include "pipe.h"
 #include "task.h"
 #include "sched.h"
+#include "syscall.h"
 #include "../core/mem/memory.h"
 #include "string.h"
 #include "../fs/vfs.h"
 
-// === Операции чтения из пайпа ===
-
 static int64_t pipe_read_op(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)offset;
-    if (!node || !node->ptr || !buffer || size == 0) return -9; // -EBADF
+    if (!node || !node->ptr || !buffer || size == 0) return -EBADF;
 
     pipe_t *p = (pipe_t *)node->ptr;
 
-    // Блокирующее ожидание: ждём пока есть что читать или write-end закрыт
+    // Wait until there is data to read or the write end has been completely closed
     while (p->count == 0) {
         if (p->write_closed) {
-            return 0; // EOF — писатель закрылся, данных больше не будет
+            return 0; // EOF (End of File)
         }
-
-        // Блокируемся: запоминаем себя как blocked_reader
         if (current_task) {
             p->blocked_reader = current_task;
             sched_block(current_task);
-            sched_yield(); // Уступаем процессор
+            sched_yield();
             p->blocked_reader = NULL;
         } else {
-            // В ядровом контексте без задачи — спинлок
             __asm__ volatile("pause");
         }
     }
 
-    // Читаем из кольцевого буфера
     uint64_t to_read = (size < (uint64_t)p->count) ? size : (uint64_t)p->count;
     for (uint64_t i = 0; i < to_read; i++) {
         buffer[i] = p->buf[p->read_pos];
@@ -51,174 +35,161 @@ static int64_t pipe_read_op(vfs_node_t *node, uint64_t offset, uint64_t size, ui
         p->count--;
     }
 
+    // Wake up blocked writer if space is now available in buffer
+    if (p->blocked_writer) {
+        sched_unblock(p->blocked_writer);
+        p->blocked_writer = NULL;
+    }
+
     return (int64_t)to_read;
 }
 
-// === Операции записи в пайп ===
-
 static int64_t pipe_write_op(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)offset;
-    if (!node || !node->ptr || !buffer || size == 0) return -9; // -EBADF
+    if (!node || !node->ptr || !buffer || size == 0) return -EBADF;
 
     pipe_t *p = (pipe_t *)node->ptr;
 
-    // Если read-end закрыт — SIGPIPE/EPIPE
     if (p->read_closed) {
-        return -32; // -EPIPE
+        return -EPIPE; // Broken Pipe
     }
 
-    // Пишем сколько влезает (без блокировки на переполнение для простоты)
-    uint64_t written = 0;
-    for (uint64_t i = 0; i < size; i++) {
-        if (p->count >= PIPE_BUF_SIZE) break; // Буфер полон
+    uint64_t total_written = 0;
 
-        p->buf[p->write_pos] = buffer[i];
+    while (total_written < size) {
+        // If pipe buffer is full, block the writing task until reader drains bytes
+        while (p->count >= PIPE_BUF_SIZE) {
+            if (p->read_closed) {
+                return total_written > 0 ? (int64_t)total_written : -EPIPE;
+            }
+            if (current_task) {
+                p->blocked_writer = current_task;
+                sched_block(current_task);
+                sched_yield();
+                p->blocked_writer = NULL;
+            } else {
+                __asm__ volatile("pause");
+            }
+        }
+
+        p->buf[p->write_pos] = buffer[total_written++];
         p->write_pos = (p->write_pos + 1) % PIPE_BUF_SIZE;
         p->count++;
-        written++;
+
+        // Wake up blocked reader immediately on newly available bytes
+        if (p->blocked_reader) {
+            sched_unblock(p->blocked_reader);
+            p->blocked_reader = NULL;
+        }
     }
 
-    // Будим заблокированного читателя (если есть)
-    if (p->blocked_reader) {
-        sched_unblock(p->blocked_reader);
-        p->blocked_reader = NULL;
-    }
-
-    return (int64_t)written;
+    return (int64_t)total_written;
 }
-
-// === Close-операции ===
 
 static void pipe_read_close_op(vfs_node_t *node) {
     if (!node || !node->ptr) return;
     pipe_t *p = (pipe_t *)node->ptr;
-    pipe_close_read(p);
+    p->read_closed = true;
+    p->ref_count--;
+
+    if (p->blocked_writer) {
+        sched_unblock(p->blocked_writer);
+        p->blocked_writer = NULL;
+    }
+    if (p->ref_count <= 0) {
+        kfree(p);
+    }
 }
 
 static void pipe_write_close_op(vfs_node_t *node) {
     if (!node || !node->ptr) return;
     pipe_t *p = (pipe_t *)node->ptr;
-    pipe_close_write(p);
-}
-
-// === VFS операции для read-end ===
-static vfs_file_operations_t pipe_read_ops = {
-    .read    = pipe_read_op,
-    .write   = NULL,
-    .open    = NULL,
-    .close   = pipe_read_close_op,
-    .readdir = NULL,
-    .finddir = NULL,
-    .create  = NULL,
-};
-
-// === VFS операции для write-end ===
-static vfs_file_operations_t pipe_write_ops = {
-    .read    = NULL,
-    .write   = pipe_write_op,
-    .open    = NULL,
-    .close   = pipe_write_close_op,
-    .readdir = NULL,
-    .finddir = NULL,
-    .create  = NULL,
-};
-
-// === Управление ref_count ===
-
-void pipe_close_read(pipe_t *p) {
-    if (!p) return;
-    p->read_closed = true;
-    p->ref_count--;
-
-    // Будим заблокированного читателя (чтобы он увидел EOF)
-    if (p->blocked_reader) {
-        sched_unblock(p->blocked_reader);
-        p->blocked_reader = NULL;
-    }
-
-    if (p->ref_count <= 0) {
-        kfree(p);
-    }
-}
-
-void pipe_close_write(pipe_t *p) {
-    if (!p) return;
     p->write_closed = true;
     p->ref_count--;
 
-    // Будим читателя — он увидит write_closed и вернёт EOF
     if (p->blocked_reader) {
         sched_unblock(p->blocked_reader);
         p->blocked_reader = NULL;
     }
-
     if (p->ref_count <= 0) {
         kfree(p);
     }
 }
 
-// === Создание пайпа ===
+static vfs_file_operations_t pipe_read_ops = {
+    .read = pipe_read_op,
+    .write = NULL,
+    .open = NULL,
+    .close = pipe_read_close_op,
+    .readdir = NULL,
+    .finddir = NULL,
+    .create = NULL,
+    .ioctl = NULL,
+    .mmap = NULL
+};
 
-// Вспомогательная функция: выделяем FD начиная с fd_start (включая 0,1,2 для inherit)
-static int alloc_fd_from(vfs_node_t *node, int fd_start) {
-    if (!current_task || !current_task->process) return -24; // -EMFILE
-    for (int i = fd_start; i < MAX_OPEN_FILES; i++) {
-        if (current_task->process->files[i] == NULL) {
-            current_task->process->files[i] = node;
-            return i;
-        }
-    }
-    return -24; // -EMFILE
-}
+static vfs_file_operations_t pipe_write_ops = {
+    .read = NULL,
+    .write = pipe_write_op,
+    .open = NULL,
+    .close = pipe_write_close_op,
+    .readdir = NULL,
+    .finddir = NULL,
+    .create = NULL,
+    .ioctl = NULL,
+    .mmap = NULL
+};
 
 int pipe_create(int pipefd[2]) {
-    if (!pipefd) return -22; // -EINVAL
+    if (!pipefd || !current_task || !current_task->process) return -EINVAL;
 
-    // Выделяем буфер пайпа
     pipe_t *p = (pipe_t *)kmalloc(sizeof(pipe_t));
-    if (!p) return -12; // -ENOMEM
+    if (!p) return -ENOMEM;
 
     memset(p, 0, sizeof(pipe_t));
-    p->ref_count   = 2;   // read-end + write-end
-    p->write_closed = false;
-    p->read_closed  = false;
+    p->ref_count = 2;
     p->blocked_reader = NULL;
+    p->blocked_writer = NULL;
 
-    // Создаём read-end VFS нод
-    vfs_node_t *read_node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
-    if (!read_node) { kfree(p); return -12; }
-    memset(read_node, 0, sizeof(vfs_node_t));
-    memcpy(read_node->name, "pipe:r", 7);
-    read_node->flags = FS_FILE;
-    read_node->ops   = &pipe_read_ops;
-    read_node->ptr   = (vfs_node_t *)p; // Храним pipe_t в ptr
-
-    // Создаём write-end VFS нод
-    vfs_node_t *write_node = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
-    if (!write_node) { kfree(read_node); kfree(p); return -12; }
-    memset(write_node, 0, sizeof(vfs_node_t));
-    memcpy(write_node->name, "pipe:w", 7);
-    write_node->flags = FS_FILE;
-    write_node->ops   = &pipe_write_ops;
-    write_node->ptr   = (vfs_node_t *)p;
-
-    // Выделяем FD (начиная с 3, stdin/stdout/stderr уже заняты)
-    int rfd = alloc_fd_from(read_node, 3);
-    if (rfd < 0) {
-        kfree(read_node);
-        kfree(write_node);
+    vfs_node_t *r_node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    vfs_node_t *w_node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!r_node || !w_node) {
+        if (r_node) kfree(r_node);
+        if (w_node) kfree(w_node);
         kfree(p);
-        return rfd;
+        return -ENOMEM;
     }
 
-    int wfd = alloc_fd_from(write_node, 3);
-    if (wfd < 0) {
-        current_task->process->files[rfd] = NULL;
-        kfree(read_node);
-        kfree(write_node);
-        kfree(p);
-        return wfd;
+    strcpy(r_node->name, "pipe:r");
+    r_node->flags = FS_FILE;
+    r_node->ops = &pipe_read_ops;
+    r_node->ptr = (struct vfs_node *)p;
+
+    strcpy(w_node->name, "pipe:w");
+    w_node->flags = FS_FILE;
+    w_node->ops = &pipe_write_ops;
+    w_node->ptr = (struct vfs_node *)p;
+
+    int rfd = -1, wfd = -1;
+    for (int i = 3; i < MAX_OPEN_FILES; i++) {
+        if (!current_task->process->files[i]) {
+            if (rfd == -1) rfd = i;
+            else if (wfd == -1) { wfd = i; break; }
+        }
     }
+
+    if (rfd == -1 || wfd == -1) {
+        kfree(r_node); kfree(w_node); kfree(p);
+        return -EMFILE;
+    }
+
+    current_task->process->files[rfd] = r_node;
+    current_task->process->file_offsets[rfd] = 0;
+    current_task->process->file_flags[rfd] = O_RDONLY;
+
+    current_task->process->files[wfd] = w_node;
+    current_task->process->file_offsets[wfd] = 0;
+    current_task->process->file_flags[wfd] = O_WRONLY;
 
     pipefd[0] = rfd;
     pipefd[1] = wfd;

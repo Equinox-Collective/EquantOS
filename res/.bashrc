@@ -19,7 +19,7 @@ unset app EQ_BUSYBOX_APPLETS
 EQ_KERNEL_TOOLS="pciscan mem memstress diskinfo hexdump sysinfo ataread nvmeread atastress nvmestress fstest gptdump mbrdump devtest cpuinfo vmstress pmmbench schedtest msrtest ioperf fatinfo ext2info xhcitest pcipeek inbtest installer colortest fonttest ttytest mkfstest su passwd useradd"
 
 for tool in $EQ_KERNEL_TOOLS; do
-    alias $tool="/bin/kdiag $tool"
+    alias $tool="/kdiag $tool"
 done
 unset tool EQ_KERNEL_TOOLS
 

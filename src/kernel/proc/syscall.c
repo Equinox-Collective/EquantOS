@@ -113,42 +113,29 @@ static int64_t sys_kill_handler(int pid, int sig) {
     return found ? 0 : -ESRCH;
 }
 
+static inline bool validate_user_memory(const void *addr, size_t size, bool writeable) {
+    (void)writeable;
+    if (!addr) return false;
+    uintptr_t uaddr = (uintptr_t)addr;
+    // Canonical user-space boundary check for x86_64
+    if (uaddr >= 0x0000800000000000ULL || (uaddr + size) > 0x0000800000000000ULL) {
+        return false;
+    }
+    return true;
+}
+
 static int64_t sys_read_handler(int fd, void *buf, size_t count) {
     if (count == 0) return 0;
-    if (!buf) return -EFAULT;
-
-    if (fd == 0) {
-        char *out = (char *)buf;
-        char c = tty_getchar();
-
-        // Handle Ctrl+C (Interrupt Signal)
-        if (c == 0x03) {
-            if (current_task && current_task->process) {
-                // Trigger SIGINT to foreground process group
-                extern int64_t sys_kill_handler(int pid, int sig);
-                sys_kill_handler((int)current_task->process->pid, SIGINT);
-            }
-            return -EINTR;
-        }
-
-        // Handle Ctrl+D (End of File / EOF)
-        if (c == 0x04) {
-            return 0; // Return 0 bytes to signal EOF to Bash/Readline
-        }
-
-        if (c == '\r') c = '\n';
-        out[0] = c;
-        return 1;
-    }
-
+    if (!validate_user_memory(buf, count, true)) return -EFAULT;
     if (!current_task || !current_task->process) return -EBADF;
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
-    if (!node) return -EBADF;
+    if (!node || !node->ops || !node->ops->read) return -EBADF;
 
     uint64_t offset = current_task->process->file_offsets[fd];
     int64_t bytes = vfs_read(node, offset, count, (uint8_t *)buf);
+    
     if (bytes > 0) {
         current_task->process->file_offsets[fd] += bytes;
     }
@@ -157,23 +144,12 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
 
 static int64_t sys_write_handler(int fd, const void *user_buf, size_t count) {
     if (count == 0) return 0;
-    if (!user_buf) return -EFAULT;
-
-    if (fd == 1 || fd == 2) {
-        const char *buf = (const char *)user_buf;
-        for (size_t i = 0; i < count; i++) {
-            char c = buf[i];
-            serial_putchar(COM1, c);
-            term_putchar_raw(c);
-        }
-        return count;
-    }
-
+    if (!validate_user_memory(user_buf, count, false)) return -EFAULT;
     if (!current_task || !current_task->process) return -EBADF;
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
-    if (!node) return -EBADF;
+    if (!node || !node->ops || !node->ops->write) return -EBADF;
 
     uint64_t offset = current_task->process->file_offsets[fd];
     if (current_task->process->file_flags[fd] & O_APPEND) {
@@ -409,21 +385,23 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
             return 0;
         }
         if (req == TIOCGPGRP && arg) {
-    uint64_t pgid = (current_task && current_task->process) ? current_task->process->pgid : 1;
-    *(int *)arg = (int)(pgid ? pgid : 1);
-    return 0;
-}
-if (req == TIOCSPGRP) {
-    if (arg && current_task && current_task->process) {
-        int new_pgid = *(int *)arg;
-        current_task->process->pgid = (uint64_t)(new_pgid > 0 ? new_pgid : current_task->process->pid);
-    }
-    return 0;
-}
+            uint64_t pgid = (current_task && current_task->process && current_task->process->pgid) 
+                            ? current_task->process->pgid : 1;
+            *(int *)arg = (int)(pgid ? pgid : 1);
+            return 0;
+        }
+        if (req == TIOCSPGRP) {
+            if (arg && current_task && current_task->process) {
+                int new_pgid = *(int *)arg;
+                current_task->process->pgid = (uint64_t)(new_pgid > 0 ? new_pgid : current_task->process->pid);
+            }
+            return 0;
+        }
         if (req == FIONREAD && arg) {
             *(int *)arg = tty_has_input() ? 1 : 0;
             return 0;
         }
+        // This makes isatty(0) report TRUE to Bash!
         if (req == TCGETS && arg) {
             struct termios *tio = (struct termios *)arg;
             memset(tio, 0, sizeof(struct termios));
@@ -438,19 +416,8 @@ if (req == TIOCSPGRP) {
         }
         return 0;
     }
-    if (!current_task || !current_task->process) return -EBADF;
-    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
-
-    vfs_node_t *node = current_task->process->files[fd];
-    if (!node) return -EBADF;
-
-    if (node->ops && node->ops->ioctl) {
-        return node->ops->ioctl(node, req, arg);
-    }
-    
     return -ENOTTY;
 }
-
 // ============================================================================
 // 2. Filesystem Metadata & Directory Navigation
 // ============================================================================
@@ -850,7 +817,7 @@ static int64_t sys_exit_handler(int code) {
 
         current_task->state = TASK_STATE_ZOMBIE;
         current_task->running = false;
-        // REMOVED redundant sched_dequeue(current_task); sched_switch handles this safely!
+        // sched_switch will automatically dequeue this task safely!
     }
 
     sched_yield();
@@ -861,10 +828,12 @@ static int64_t sys_exit_handler(int code) {
 static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent_tid, int *child_tid, uint64_t tls, syscall_regs_t *regs) {
     if (!current_task || !current_task->process) return -EAGAIN;
 
-    // Fail-fast Fork Guard: Prevent Fork Bombs from starving Kernel RAM
     if (pmm_get_free_pages() < PMM_RESERVE_PAGES) {
-        return -EAGAIN; // Standard Linux behavior for fork bombs
+        return -EAGAIN;
     }
+
+    // 1. Force save the current live FPU/SSE registers into current_task before cloning!
+    __asm__ volatile("fxsave64 (%0)" :: "r"(task_fpu_area(current_task)) : "memory");
 
     page_table_t *child_pml4 = NULL;
     if (flags & CLONE_VM) {
@@ -907,8 +876,13 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
     }
     memset(child_task, 0, sizeof(task_t));
 
+    // Initialize FPU safely and copy verified parent state
     task_init_fpu(child_task);
     memcpy(task_fpu_area(child_task), task_fpu_area(current_task), 512);
+
+    // Sanitize MXCSR to prevent #GP on fxrstor64
+    uint32_t *mxcsr = (uint32_t *)((uint8_t *)task_fpu_area(child_task) + 24);
+    *mxcsr &= 0xFFBF; // Mask out any illegal reserved bits
 
     child_task->id = (flags & CLONE_THREAD) ? next_pid++ : child_proc->pid;
     child_task->state = TASK_STATE_RUNNABLE;
@@ -928,11 +902,11 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
 
     uint64_t *stack = (uint64_t *)child_task->kstack_at_bottom;
 
-    *--stack = 0x1B;                                // SS
+    *--stack = 0x1B;                                // SS (User Data)
     *--stack = stack_top ? stack_top : regs->rsp;   // RSP
     *--stack = 0x202;                               // RFLAGS (IF=1)
-    *--stack = 0x23;                                // CS
-    *--stack = (regs->rcx != 0) ? regs->rcx : regs->rip; // RIP
+    *--stack = 0x23;                                // CS (User Code)
+    *--stack = (regs->rcx != 0) ? regs->rcx : regs->rip; // RIP (Return address from syscall)
 
     *--stack = 0; // int_no
     *--stack = 0; // error_code
@@ -950,7 +924,7 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
     *--stack = regs->rdx;
     *--stack = regs->rcx;
     *--stack = regs->rbx;
-    *--stack = 0; // RAX = 0 in child
+    *--stack = 0; // RAX = 0 in child process (Standard POSIX fork return value)
 
     child_task->rsp = (uint64_t)stack;
 
@@ -1701,8 +1675,8 @@ void syscall_handler(void *regs_ptr) {
             ret = -EFAULT;
             break;
         }
-        // Safely execute kernel diagnostic command from userland
-        shell_execute(user_cmd);
+        // Execute cleanly without spilling the kernel prompt into Bash
+        shell_execute_diag(user_cmd);
         ret = 0;
         break;
     }

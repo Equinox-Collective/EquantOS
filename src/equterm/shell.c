@@ -1648,7 +1648,7 @@ static void cmd_login(int argc, char **argv) {
     }
 }
 
-void shell_execute_single(const char *cmd_line_in) {
+void shell_execute_diag(const char *cmd_line_in) {
     char line[LINE_BUF_SIZE];
     size_t len = strlen(cmd_line_in);
     if (len >= sizeof(line)) len = sizeof(line) - 1;
@@ -1673,4 +1673,5 @@ void shell_execute_single(const char *cmd_line_in) {
             term_print("\n");
         }
     }
+    // NO print_prompt() here! Control returns cleanly to Bash!
 }
