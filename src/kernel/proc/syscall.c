@@ -17,6 +17,7 @@
 #include "../fs/ramfs.h"
 #include "../core/initcall.h"
 #include "../drivers/tty/tty.h"
+#include "../../equterm/shell.h"
 
 __attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
 
@@ -408,18 +409,17 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
             return 0;
         }
         if (req == TIOCGPGRP && arg) {
-            uint64_t pgid = (current_task && current_task->process && current_task->process->pgid) 
-                            ? current_task->process->pgid 
-                            : (current_task ? current_task->process->pid : 1);
-            *(int *)arg = (int)pgid;
-            return 0;
-        }
-        if (req == TIOCSPGRP) {
-            if (arg && current_task && current_task->process) {
-                current_task->process->pgid = (uint64_t)(*(int *)arg);
-            }
-            return 0;
-        }
+    uint64_t pgid = (current_task && current_task->process) ? current_task->process->pgid : 1;
+    *(int *)arg = (int)(pgid ? pgid : 1);
+    return 0;
+}
+if (req == TIOCSPGRP) {
+    if (arg && current_task && current_task->process) {
+        int new_pgid = *(int *)arg;
+        current_task->process->pgid = (uint64_t)(new_pgid > 0 ? new_pgid : current_task->process->pid);
+    }
+    return 0;
+}
         if (req == FIONREAD && arg) {
             *(int *)arg = tty_has_input() ? 1 : 0;
             return 0;
@@ -850,7 +850,7 @@ static int64_t sys_exit_handler(int code) {
 
         current_task->state = TASK_STATE_ZOMBIE;
         current_task->running = false;
-        sched_dequeue(current_task);
+        // REMOVED redundant sched_dequeue(current_task); sched_switch handles this safely!
     }
 
     sched_yield();
@@ -1695,6 +1695,17 @@ void syscall_handler(void *regs_ptr) {
         case SYS_PRLIMIT64:
             ret = sys_prlimit64_handler((int)regs->rdi, (int)regs->rsi, (const struct linux_rlimit *)regs->rdx, (struct linux_rlimit *)regs->r10);
             break;
+        case SYS_EQUANT_KDIAG: {
+        const char *user_cmd = (const char *)regs->rdi;
+        if (!user_cmd) {
+            ret = -EFAULT;
+            break;
+        }
+        // Safely execute kernel diagnostic command from userland
+        shell_execute(user_cmd);
+        ret = 0;
+        break;
+    }
         default:
             ret = -ENOSYS;
             break;

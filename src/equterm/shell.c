@@ -1647,3 +1647,30 @@ static void cmd_login(int argc, char **argv) {
         term_print("\nLogin incorrect\n\n");
     }
 }
+
+void shell_execute_single(const char *cmd_line_in) {
+    char line[LINE_BUF_SIZE];
+    size_t len = strlen(cmd_line_in);
+    if (len >= sizeof(line)) len = sizeof(line) - 1;
+    for (size_t i = 0; i < len; i++) line[i] = cmd_line_in[i];
+    line[len] = '\0';
+
+    char *argv[MAX_ARGS];
+    int argc = tokenize(line, argv, MAX_ARGS);
+
+    if (argc > 0) {
+        int found = 0;
+        for (size_t i = 0; i < NUM_COMMANDS; i++) {
+            if (strcmp(argv[0], commands[i].name) == 0) {
+                commands[i].handler(argc, argv);
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            term_print("kdiag: unknown kernel command: ");
+            term_print(argv[0]);
+            term_print("\n");
+        }
+    }
+}

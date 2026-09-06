@@ -82,7 +82,6 @@
 #define SYS_MADVISE             28
 #define SYS_SHMGET              29
 #define SYS_SHMAT               30
-#define SYS_SHMDT               67
 #define SYS_DUP                 32
 #define SYS_DUP2                33
 #define SYS_PAUSE               34
@@ -111,6 +110,7 @@
 #define SYS_WAIT4               61
 #define SYS_KILL                62
 #define SYS_UNAME               63
+#define SYS_SHMDT               67
 #define SYS_FCNTL               72
 #define SYS_FSYNC               74
 #define SYS_FDATASYNC           75
@@ -181,6 +181,7 @@
 #define SYS_DUP3               292
 #define SYS_PIPE2              293
 #define SYS_PRLIMIT64          302
+#define SYS_EQUANT_KDIAG       400
 
 // ============================================================================
 // 3. Flags & Constants
