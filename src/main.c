@@ -96,6 +96,7 @@ void _start(void) {
     asm volatile ("sti");
 
     tty_print("\nWelcome to EquantOS!\n\n");
+    shell_init();
 
     // Launch Ring 3 Bash (or Rescue Shell fallback)
     kernel_start_userland();

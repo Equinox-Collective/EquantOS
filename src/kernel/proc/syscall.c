@@ -378,10 +378,14 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
     if (fd >= 0 && fd <= 2) {
         if (req == TIOCGWINSZ && arg) {
             struct winsize *ws = (struct winsize *)arg;
-            ws->ws_row = 25;
-            ws->ws_col = 80;
-            ws->ws_xpixel = 640;
-            ws->ws_ypixel = 480;
+            uint64_t gw = (uint64_t)term_get_glyph_width();
+            uint64_t gh = (uint64_t)term_get_glyph_height();
+            if (gw == 0) gw = 8;
+            if (gh == 0) gh = 16;
+            ws->ws_col = (unsigned short)(term_get_fb_width() / gw);
+            ws->ws_row = (unsigned short)(term_get_fb_height() / gh);
+            ws->ws_xpixel = (unsigned short)term_get_fb_width();
+            ws->ws_ypixel = (unsigned short)term_get_fb_height();
             return 0;
         }
         if (req == TIOCGPGRP && arg) {
@@ -900,31 +904,34 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
         return -ENOMEM;
     }
 
+    // Exact System V AMD64 context switch frame matching RESTORE_REGS order
     uint64_t *stack = (uint64_t *)child_task->kstack_at_bottom;
 
     *--stack = 0x1B;                                // SS (User Data)
     *--stack = stack_top ? stack_top : regs->rsp;   // RSP
     *--stack = 0x202;                               // RFLAGS (IF=1)
     *--stack = 0x23;                                // CS (User Code)
-    *--stack = (regs->rcx != 0) ? regs->rcx : regs->rip; // RIP (Return address from syscall)
+    *--stack = (regs->rcx != 0) ? regs->rcx : regs->rip; // RIP
 
-    *--stack = 0; // int_no
-    *--stack = 0; // error_code
-    *--stack = regs->r15;
-    *--stack = regs->r14;
-    *--stack = regs->r13;
-    *--stack = regs->r12;
-    *--stack = regs->r11;
-    *--stack = regs->r10;
-    *--stack = regs->r9;
-    *--stack = regs->r8;
-    *--stack = regs->rdi;
-    *--stack = regs->rsi;
-    *--stack = regs->rbp;
-    *--stack = regs->rdx;
-    *--stack = regs->rcx;
+    *--stack = 0;                                   // error_code
+    *--stack = 0;                                   // int_no
+
+    // GPRs: High address to low address (so pop r15 is popped first!)
+    *--stack = 0;                                   // RAX = 0 in child process (POSIX fork)
     *--stack = regs->rbx;
-    *--stack = 0; // RAX = 0 in child process (Standard POSIX fork return value)
+    *--stack = regs->rcx;
+    *--stack = regs->rdx;
+    *--stack = regs->rbp;
+    *--stack = regs->rsi;
+    *--stack = regs->rdi;
+    *--stack = regs->r8;
+    *--stack = regs->r9;
+    *--stack = regs->r10;
+    *--stack = regs->r11;
+    *--stack = regs->r12;
+    *--stack = regs->r13;
+    *--stack = regs->r14;
+    *--stack = regs->r15;
 
     child_task->rsp = (uint64_t)stack;
 
