@@ -23,8 +23,8 @@ jobs:
               libxau-dev libxdmcp-dev libxfont2-dev xorgproto xtrans \
               autoconf automake libtool util-macros pkgconf bison flex wget tar
 
-            # 1. Build Xfbdev using official TinyCore TinyX (fully compatible with modern xtrans)
-            git clone https://github.com/tinycorelinux/tinyx.git
+            # 1. Build Xfbdev using modern libXfont2-compatible TinyX fork
+            git clone https://github.com/keshto/tinyx.git
             cd tinyx
             ./autogen.sh
             ./configure --prefix=/usr --enable-xfbdev --disable-xvesa LDFLAGS='-static' CFLAGS='-static -O2'
