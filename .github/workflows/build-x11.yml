@@ -36,6 +36,13 @@ jobs:
             mkdir -p /usr/include/X11/extensions
             touch /usr/include/X11/extensions/panoramiXext.h
 
+            # Link Xtrans headers so they are visible under <X11/Xtrans.h> and <X11/Xtrans/Xtrans.h>
+            mkdir -p /usr/include/X11
+            cp -r /usr/include/X11/Xtrans/* /usr/include/X11/ 2>/dev/null || true
+            mkdir -p include/X11
+            cp -r /usr/include/X11/Xtrans/* include/X11/ 2>/dev/null || true
+            cp -r /usr/include/X11/Xtrans include/X11/ 2>/dev/null || true
+
             make Xfbdev EXTRA_CFLAGS='-static -D_GNU_SOURCE' LDFLAGS='-static'
             strip hw/kdrive/fbdev/Xfbdev 2>/dev/null || strip Xfbdev 2>/dev/null || true
             cp hw/kdrive/fbdev/Xfbdev /dist/Xfbdev.elf 2>/dev/null || cp Xfbdev /dist/Xfbdev.elf
