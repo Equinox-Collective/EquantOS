@@ -18,6 +18,7 @@
 #include "../core/initcall.h"
 #include "../drivers/tty/tty.h"
 #include "../../equterm/shell.h"
+#include "../ipc/af_unix.h"
 
 __attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
 
@@ -1136,42 +1137,78 @@ static int64_t sys_nanosleep_handler(const struct linux_timespec *req, struct li
     return 0;
 }
 
-static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int timeout) {
-    if (!fds && nfds > 0) return -EFAULT;
-
+static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
     int ready = 0;
+
     for (uint64_t i = 0; i < nfds; i++) {
         fds[i].revents = 0;
-        if (fds[i].fd == 0) {
-            if (tty_has_input()) {
-                fds[i].revents |= (fds[i].events & POLLIN);
-                if (fds[i].revents) ready++;
+        int fd = fds[i].fd;
+        if (fd < 0) continue;
+
+        // 1. Check Terminal Standard Input (fd 0)
+        if (fd == 0) {
+            if ((fds[i].events & POLLIN) && tty_has_input()) {
+                fds[i].revents |= POLLIN;
+                ready++;
             }
-        } else if (fds[i].fd == 1 || fds[i].fd == 2) {
-            fds[i].revents |= (fds[i].events & POLLOUT);
-            if (fds[i].revents) ready++;
+        } 
+        // 2. Check Terminal Output (fd 1, 2)
+        else if (fd == 1 || fd == 2) {
+            if (fds[i].events & POLLOUT) {
+                fds[i].revents |= POLLOUT;
+                ready++;
+            }
+        }
+
+        // 3. Check UNIX Domain Sockets
+        if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
+            vfs_node_t *node = current_task->process->files[fd];
+            if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
+                unix_socket_t *s = (unix_socket_t *)node->ptr;
+
+                if ((fds[i].events & POLLIN) && unix_socket_can_read(s)) {
+                    fds[i].revents |= POLLIN;
+                    ready++;
+                }
+                if ((fds[i].events & POLLOUT) && unix_socket_can_write(s)) {
+                    fds[i].revents |= POLLOUT;
+                    ready++;
+                }
+                if (s->peer_closed) {
+                    fds[i].revents |= POLLHUP;
+                }
+            }
         }
     }
 
-    if (ready > 0 || timeout == 0) return ready;
+    return ready;
+}
+
+static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int timeout) {
+    if (!fds && nfds > 0) return -EFAULT;
+
+    // Fast path: Check immediately without sleeping
+    int ready = poll_scan_fds(fds, nfds);
+    if (ready > 0 || timeout == 0) {
+        return ready;
+    }
 
     uint64_t start_tick = tick;
     uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : ((uint64_t)timeout / 10);
 
+    // Sleep path: Yield until events occur or timeout expires
     while (ready == 0) {
-        if (timeout >= 0 && (tick - start_tick) >= max_ticks) break;
-        if (tty_has_input()) {
-            for (uint64_t i = 0; i < nfds; i++) {
-                if (fds[i].fd == 0) {
-                    fds[i].revents |= (fds[i].events & POLLIN);
-                    if (fds[i].revents) ready++;
-                }
-            }
+        if (timeout >= 0 && (tick - start_tick) >= max_ticks) {
             break;
         }
+
         __asm__ volatile("sti; pause");
         sched_yield();
+
+        // Re-scan both TTY and Sockets on each iteration
+        ready = poll_scan_fds(fds, nfds);
     }
+
     return ready;
 }
 
@@ -1288,12 +1325,98 @@ static int64_t sys_getpgid_handler(int pid) {
 }
 
 static int64_t sys_socket_handler(int domain, int type, int protocol) {
-    (void)domain; (void)type; (void)protocol;
-    int pipefd[2];
-    if (pipe_create(pipefd) == 0) {
-        return pipefd[0];
+    (void)protocol;
+    if (domain != AF_UNIX) {
+        return -EAFNOSUPPORT; // Only UNIX domain sockets for local GUI IPC right now
     }
-    return -EAFNOSUPPORT;
+
+    unix_socket_t *sock = unix_socket_create(type);
+    if (!sock) return -ENOMEM;
+
+    vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!node) {
+        unix_socket_close(sock);
+        return -ENOMEM;
+    }
+
+    strcpy(node->name, "socket:unix");
+    node->flags = FS_FILE;
+    node->ops = &unix_socket_vfs_ops;
+    node->ptr = (struct vfs_node *)sock;
+
+    int fd = alloc_fd(node, O_RDWR);
+    if (fd < 0) {
+        kfree(node);
+        unix_socket_close(sock);
+        return fd;
+    }
+
+    return fd;
+}
+
+static int64_t sys_bind_handler(int fd, const struct sockaddr_un *addr, uint32_t addrlen) {
+    (void)addrlen;
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES || !current_task->process->files[fd]) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (node->ops != &unix_socket_vfs_ops || !node->ptr) return -ENOTSOCK;
+
+    return unix_socket_bind((unix_socket_t *)node->ptr, addr);
+}
+
+static int64_t sys_listen_handler(int fd, int backlog) {
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES || !current_task->process->files[fd]) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (node->ops != &unix_socket_vfs_ops || !node->ptr) return -ENOTSOCK;
+
+    return unix_socket_listen((unix_socket_t *)node->ptr, backlog);
+}
+
+static int64_t sys_accept_handler(int fd, struct sockaddr_un *addr, uint32_t *addrlen) {
+    (void)addr; (void)addrlen;
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES || !current_task->process->files[fd]) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (node->ops != &unix_socket_vfs_ops || !node->ptr) return -ENOTSOCK;
+
+    unix_socket_t *client_sock = NULL;
+    int err = unix_socket_accept((unix_socket_t *)node->ptr, &client_sock);
+    if (err < 0) return err;
+
+    vfs_node_t *client_node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!client_node) {
+        unix_socket_close(client_sock);
+        return -ENOMEM;
+    }
+
+    strcpy(client_node->name, "socket:unix_client");
+    client_node->flags = FS_FILE;
+    client_node->ops = &unix_socket_vfs_ops;
+    client_node->ptr = (struct vfs_node *)client_sock;
+
+    int new_fd = alloc_fd(client_node, O_RDWR);
+    if (new_fd < 0) {
+        kfree(client_node);
+        unix_socket_close(client_sock);
+        return new_fd;
+    }
+
+    return new_fd;
+}
+
+static int64_t sys_connect_handler(int fd, const struct sockaddr_un *addr, uint32_t addrlen) {
+    (void)addrlen;
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES || !current_task->process->files[fd]) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (node->ops != &unix_socket_vfs_ops || !node->ptr) return -ENOTSOCK;
+
+    return unix_socket_connect((unix_socket_t *)node->ptr, addr);
 }
 
 // ============================================================================
@@ -1495,11 +1618,17 @@ void syscall_handler(void *regs_ptr) {
         case SYS_SOCKET:
             ret = sys_socket_handler((int)regs->rdi, (int)regs->rsi, (int)regs->rdx);
             break;
-        case SYS_CONNECT:
-        case SYS_ACCEPT:
         case SYS_BIND:
+            ret = sys_bind_handler((int)regs->rdi, (const struct sockaddr_un *)regs->rsi, (uint32_t)regs->rdx);
+            break;
         case SYS_LISTEN:
-            ret = -ECONNREFUSED;
+            ret = sys_listen_handler((int)regs->rdi, (int)regs->rsi);
+            break;
+        case SYS_ACCEPT:
+            ret = sys_accept_handler((int)regs->rdi, (struct sockaddr_un *)regs->rsi, (uint32_t *)regs->rdx);
+            break;
+        case SYS_CONNECT:
+            ret = sys_connect_handler((int)regs->rdi, (const struct sockaddr_un *)regs->rsi, (uint32_t)regs->rdx);
             break;
         case SYS_SENDTO:
             ret = sys_write_handler((int)regs->rdi, (const void *)regs->rsi, (size_t)regs->rdx);
