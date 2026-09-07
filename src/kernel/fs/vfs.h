@@ -10,6 +10,7 @@
 #define FS_MOUNTPOINT  0x08
 #define FS_SOCKET      0x10
 #define FBIOGET_VSCREENINFO 0x4600
+#define FBIOGET_FSCREENINFO 0x4602
 
 // Standard POSIX File Open & Access Flags
 #ifndef O_RDONLY

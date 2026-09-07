@@ -130,6 +130,18 @@ static int dev_fb_ioctl(vfs_node_t *node, uint64_t req, void *arg) {
         var->bits_per_pixel = kernel_fb->bpp;
         return 0;
     }
+
+    if (req == FBIOGET_FSCREENINFO) {
+        struct fb_fix_screeninfo *fix = (struct fb_fix_screeninfo *)arg;
+        memset(fix, 0, sizeof(struct fb_fix_screeninfo));
+        fix->smem_start = (uint64_t)kernel_fb->address - hhdm_offset;
+        fix->smem_len   = kernel_fb->pitch * kernel_fb->height;
+        fix->line_length = kernel_fb->pitch;
+        fix->type       = 0; // FB_TYPE_PACKED_PIXELS
+        fix->visual     = 2; // FB_VISUAL_TRUECOLOR
+        return 0;
+    }
+
     return -ENOTTY;
 }
 
@@ -237,15 +249,12 @@ void devfs_init(void) {
 
     // Mount /dev onto VFS root
     if (vfs_root) {
-        vfs_node_t *dev_dir = ramfs_create_directory(vfs_root, "dev");
-        if (dev_dir) {
-            dev_dir->flags |= FS_MOUNTPOINT;
-            dev_dir->ptr = (struct vfs_node *)devfs_root;
+        vfs_node_t *tmp_dir = vfs_finddir(vfs_root, "tmp");
+        if (!tmp_dir) {
+            tmp_dir = ramfs_create_directory(vfs_root, "tmp");
         }
-
-        // Ensure /tmp exists for Bash heredocs and temp scripts
-        if (!vfs_finddir(vfs_root, "tmp")) {
-            ramfs_create_directory(vfs_root, "tmp");
+        if (tmp_dir && !vfs_finddir(tmp_dir, ".X11-unix")) {
+            ramfs_create_directory(tmp_dir, ".X11-unix");
         }
     }
 
