@@ -20,35 +20,38 @@ jobs:
             apk update
             apk add --no-cache build-base git zlib-dev zlib-static \
               libx11-dev libxext-dev libxmu-dev libxt-dev libxrender-dev \
-              libxau-dev libxdmcp-dev xorgproto xtrans pkgconf wget tar sed
+              libxau-dev libxdmcp-dev xorgproto pkgconf wget tar sed
 
-            # 1. Build TinyX Server (Xfbdev)
+            # 1. Download compatible historic xtrans headers (version 1.2)
+            wget https://www.x.org/releases/individual/lib/xtrans-1.2.tar.gz
+            tar -xzf xtrans-1.2.tar.gz
+
+            # 2. Build TinyX Server (Xfbdev)
             git clone https://github.com/idunham/tinyxserver.git
             cd tinyxserver
 
-            # Disable PANORAMIX in standard_definitions.mk and all sub-makefiles
+            # Copy matched xtrans-1.2 headers directly into tinyx include directories
+            mkdir -p include/X11/Xtrans
+            cp -r ../xtrans-1.2/*.h include/X11/
+            cp -r ../xtrans-1.2/*.h include/X11/Xtrans/
+            cp -r ../xtrans-1.2/*.c os/ 2>/dev/null || true
+
+            # Disable PanoramiX in standard_definitions.mk and all sub-makefiles
             sed -i 's/-DPANORAMIX//g' standard_definitions.mk Makefile
             find . -name '*.mk' -exec sed -i 's/-DPANORAMIX//g' {} +
             find . -name 'Makefile*' -exec sed -i 's/-DPANORAMIX//g' {} +
 
-            # Neutralize panoramiX header inclusion and provide stub header
+            # Neutralize panoramiX header inclusion
             sed -i 's/#include <X11\/extensions\/panoramiXext.h>//g' Xext/panoramiX.h || true
             mkdir -p /usr/include/X11/extensions
             touch /usr/include/X11/extensions/panoramiXext.h
-
-            # Link Xtrans headers so they are visible under <X11/Xtrans.h> and <X11/Xtrans/Xtrans.h>
-            mkdir -p /usr/include/X11
-            cp -r /usr/include/X11/Xtrans/* /usr/include/X11/ 2>/dev/null || true
-            mkdir -p include/X11
-            cp -r /usr/include/X11/Xtrans/* include/X11/ 2>/dev/null || true
-            cp -r /usr/include/X11/Xtrans include/X11/ 2>/dev/null || true
 
             make Xfbdev EXTRA_CFLAGS='-static -D_GNU_SOURCE' LDFLAGS='-static'
             strip hw/kdrive/fbdev/Xfbdev 2>/dev/null || strip Xfbdev 2>/dev/null || true
             cp hw/kdrive/fbdev/Xfbdev /dist/Xfbdev.elf 2>/dev/null || cp Xfbdev /dist/Xfbdev.elf
             cd ..
 
-            # 2. Build xeyes from official release tarball
+            # 3. Build xeyes from official release tarball
             wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
             tar -xzf xeyes-1.2.0.tar.gz
             cd xeyes-1.2.0
