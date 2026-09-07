@@ -19,8 +19,8 @@ jobs:
             set -e
             apk update
             apk add --no-cache build-base git zlib-dev zlib-static \
-              libx11-dev libxext-dev libxmu-dev libxt-dev libxau-dev libxdmcp-dev \
-              autoconf automake libtool util-macros-dev pkgconf
+              libx11-dev libxext-dev libxmu-dev libxt-dev libxrender-dev \
+              libxau-dev libxdmcp-dev pkgconf wget tar
 
             # 1. Build TinyX Server (Xfbdev)
             git clone https://github.com/idunham/tinyxserver.git
@@ -30,10 +30,10 @@ jobs:
             cp Xfbdev /dist/Xfbdev.elf
             cd ..
 
-            # 2. Build xeyes
-            git clone https://gitlab.freedesktop.org/xorg/app/xeyes.git
-            cd xeyes
-            autoreconf -vfi
+            # 2. Build xeyes from official tarball (configure is already generated)
+            wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
+            tar -xzf xeyes-1.2.0.tar.gz
+            cd xeyes-1.2.0
             ./configure LDFLAGS='-static' CFLAGS='-static -O2'
             make
             strip xeyes
