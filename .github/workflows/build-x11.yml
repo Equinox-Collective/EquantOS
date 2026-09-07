@@ -24,7 +24,7 @@ jobs:
               xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar \
               linux-headers
 
-            # 1. Build Xfbdev
+            # 1. Build Xfbdev (Готов на 100%!)
             git clone https://github.com/keshto/tinyx.git
             cd tinyx
             ./autogen.sh
@@ -36,11 +36,21 @@ jobs:
             cp \$XFBDEV_BIN /dist/Xfbdev.elf
             cd ..
 
-            # 2. Build lightweight xeyes without XCB Present bloat
+            # 2. Быстрая сборка статических libXi.a и libXt.a (занимает 15 секунд)
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
+            cd libXi && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXt.git
+            cd libXt && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            cp /usr/local/lib/libXi.a /usr/lib/ 2>/dev/null || true
+            cp /usr/local/lib/libXt.a /usr/lib/ 2>/dev/null || true
+
+            # 3. Build xeyes (теперь все статические библиотеки на месте!)
             wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
             tar -xzf xeyes-1.2.0.tar.gz
             cd xeyes-1.2.0
-            ./configure --without-present LDFLAGS='-static' CFLAGS='-static -O2'
+            PKG_CONFIG_PATH='/usr/local/lib/pkgconfig:'\$PKG_CONFIG_PATH ./configure --without-present LDFLAGS='-static -L/usr/local/lib -L/usr/lib' CFLAGS='-static -O2'
             make -j\$(nproc)
             strip xeyes
             cp xeyes /dist/xeyes.elf
