@@ -1,0 +1,47 @@
+name: Build Static X11 Stack
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-x11.yml'
+
+jobs:
+  build-x11:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile Xfbdev and xeyes in Alpine Musl
+        run: |
+          docker run --rm -v $(pwd):/dist alpine:3.19 sh -c "
+            apk update && apk add build-base git zlib-dev zlib-static \
+              libx11-dev libx11-static libxext-dev libxext-static \
+              libxmu-dev libxmu-static libxt-dev libxt-static autoconf automake libtool xorg-util-macros
+            
+            # 1. Build TinyX Server (Xfbdev)
+            git clone https://github.com/idunham/tinyxserver.git
+            cd tinyxserver
+            make Xfbdev EXTRA_CFLAGS='-static -D_GNU_SOURCE' LDFLAGS='-static'
+            strip Xfbdev
+            cp Xfbdev /dist/Xfbdev.elf
+            cd ..
+
+            # 2. Build xeyes
+            git clone https://gitlab.freedesktop.org/xorg/app/xeyes.git
+            cd xeyes
+            autoreconf -vfi
+            ./configure LDFLAGS='-static' CFLAGS='-static -O2'
+            make
+            strip xeyes
+            cp xeyes /dist/xeyes.elf
+          "
+
+      - name: Upload X11 Binaries Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: x11-binaries
+          path: |
+            Xfbdev.elf
+            xeyes.elf
