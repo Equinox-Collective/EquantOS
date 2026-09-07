@@ -20,7 +20,8 @@ jobs:
             apk update
             apk add --no-cache build-base git zlib-dev zlib-static \
               libx11-dev libxext-dev libxmu-dev libxt-dev libxrender-dev \
-              libxau-dev libxdmcp-dev pkgconf wget tar
+              libxau-dev libxdmcp-dev libxinerama-dev libxrandr-dev libxfixes-dev \
+              xorgproto pkgconf wget tar
 
             # 1. Build TinyX Server (Xfbdev)
             git clone https://github.com/idunham/tinyxserver.git
