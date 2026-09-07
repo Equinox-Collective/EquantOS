@@ -21,11 +21,11 @@ jobs:
             apk add --no-cache build-base git zlib-dev zlib-static \
               libx11-dev libx11-static libxext-dev libxmu-dev libxt-dev libxrender-dev \
               libxau-dev libxdmcp-dev libxfont2-dev libxtst-dev libxi-dev \
-              libxcb-dev libxcb-static libsm-dev libsm-static libice-dev libice-static \
+              libxcb-dev libxcb-static libsm-dev libice-dev \
               xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar \
               linux-headers
 
-            # 1. Build Xfbdev (Сервер готов на 100%!)
+            # 1. Build Xfbdev (Сервер уже готов на 100%!)
             git clone https://github.com/keshto/tinyx.git
             cd tinyx
             ./autogen.sh
@@ -37,15 +37,18 @@ jobs:
             cp \$XFBDEV_BIN /dist/Xfbdev.elf
             cd ..
 
-            # 2. Build static libXi and libXt
-            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
-            cd libXi && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+            # 2. Быстрая сборка статических libICE, libSM, libXt, libXi (всего 20 секунд)
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libICE.git
+            cd libICE && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libSM.git
+            cd libSM && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXt.git
             cd libXt && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
 
-            cp /usr/local/lib/libXi.a /usr/lib/ 2>/dev/null || true
-            cp /usr/local/lib/libXt.a /usr/lib/ 2>/dev/null || true
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
+            cd libXi && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
 
             # 3. Build xeyes
             wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
