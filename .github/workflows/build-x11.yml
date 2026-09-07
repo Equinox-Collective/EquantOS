@@ -19,12 +19,12 @@ jobs:
             set -e
             apk update
             apk add --no-cache build-base git zlib-dev zlib-static \
-              libx11-dev libxext-dev libxmu-dev libxt-dev libxrender-dev \
+              libx11-dev libx11-static libxext-dev libxmu-dev libxt-dev libxrender-dev \
               libxau-dev libxdmcp-dev libxfont2-dev libxtst-dev libxi-dev \
               xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar \
               linux-headers
 
-            # 1. Build Xfbdev using modern libXfont2-compatible TinyX fork
+            # 1. Build Xfbdev
             git clone https://github.com/keshto/tinyx.git
             cd tinyx
             ./autogen.sh
@@ -36,11 +36,11 @@ jobs:
             cp \$XFBDEV_BIN /dist/Xfbdev.elf
             cd ..
 
-            # 2. Build xeyes from official release tarball
+            # 2. Build lightweight xeyes without XCB Present bloat
             wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
             tar -xzf xeyes-1.2.0.tar.gz
             cd xeyes-1.2.0
-            ./configure LDFLAGS='-static' CFLAGS='-static -O2'
+            ./configure --without-present LDFLAGS='-static' CFLAGS='-static -O2'
             make -j\$(nproc)
             strip xeyes
             cp xeyes /dist/xeyes.elf
