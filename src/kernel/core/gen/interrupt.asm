@@ -152,6 +152,7 @@ irq0_handler_asm:
 
 [global sched_yield_asm]
 sched_yield_asm:
+    cli                   ; Guarantee hardware interrupts are masked during task switch
     push qword 0          ; Fake error code for System V ABI alignment
     push qword 0x82       ; Vector 0x82 (Yield)
     SAVE_REGS

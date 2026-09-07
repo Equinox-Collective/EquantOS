@@ -54,14 +54,15 @@ void init_idt(void) {
 
     // Родной сисколл int 0x80
     set_idt_gate(0x80, (uint64_t)syscall_interrupt_asm, sel);
-    idt[0x80].flags = 0xEF; // DPL 3
+    idt[0x80].flags = 0xEE; // Было 0xEF! Ставим 0xEE (Interrupt Gate, атомарно гасит IF!)
 
     // === ШЛЮЗ ДЛЯ BASH И MUSL: INT 0x81 ===
     set_idt_gate(0x81, (uint64_t)linux_syscall_interrupt_asm, sel);
-    idt[0x81].flags = 0xEF; // DPL 3 (РАЗРЕШАЕМ ВЫЗОВ ИЗ USER MODE!)
+    idt[0x81].flags = 0xEE; // Было 0xEF! Ставим 0xEE
 
+    // === ШЛЮЗ ПЕРЕКЛЮЧЕНИЯ ЗАДАЧ (YIELD): INT 0x82 ===
     set_idt_gate(0x82, (uint64_t)sched_yield_asm, sel);
-    idt[0x82].flags = 0xEF; // DPL 3 (Разрешен вызов из Ring 0 и Ring 3)
+    idt[0x82].flags = 0xEE; // Было 0xEF! Ставим 0xEE
 
     __asm__ __volatile__("lidt (%0)" : : "r"(&idt_reg));
 }
