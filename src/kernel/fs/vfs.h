@@ -8,6 +8,7 @@
 #define FS_FILE        0x01
 #define FS_DIRECTORY   0x02
 #define FS_MOUNTPOINT  0x08
+#define FS_SOCKET      0x10
 #define FBIOGET_VSCREENINFO 0x4600
 
 // Standard POSIX File Open & Access Flags
