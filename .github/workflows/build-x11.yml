@@ -16,10 +16,12 @@ jobs:
       - name: Compile Xfbdev and xeyes in Alpine Musl
         run: |
           docker run --rm -v $(pwd):/dist alpine:3.19 sh -c "
-            apk update && apk add build-base git zlib-dev zlib-static \
-              libx11-dev libx11-static libxext-dev libxext-static \
-              libxmu-dev libxmu-static libxt-dev libxt-static autoconf automake libtool xorg-util-macros
-            
+            set -e
+            apk update
+            apk add --no-cache build-base git zlib-dev zlib-static \
+              libx11-dev libxext-dev libxmu-dev libxt-dev libxau-dev libxdmcp-dev \
+              autoconf automake libtool util-macros-dev pkgconf
+
             # 1. Build TinyX Server (Xfbdev)
             git clone https://github.com/idunham/tinyxserver.git
             cd tinyxserver
