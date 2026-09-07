@@ -21,7 +21,8 @@ jobs:
             apk add --no-cache build-base git zlib-dev zlib-static \
               libx11-dev libxext-dev libxmu-dev libxt-dev libxrender-dev \
               libxau-dev libxdmcp-dev libxfont2-dev libxtst-dev libxi-dev \
-              xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar
+              xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar \
+              linux-headers
 
             # 1. Build Xfbdev using modern libXfont2-compatible TinyX fork
             git clone https://github.com/keshto/tinyx.git
