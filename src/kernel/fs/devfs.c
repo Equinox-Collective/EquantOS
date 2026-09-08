@@ -242,9 +242,17 @@ void devfs_init(void) {
 
     // Register Devices
     devfs_register_device("null", &null_fops, NULL, 0666);
+    devfs_register_device("tty",  &tty_device_fops, NULL, 0666);
+    devfs_register_device("tty0", &tty_device_fops, NULL, 0666);
+    devfs_register_device("tty1", &tty_device_fops, NULL, 0666); // <-- Crucial for Xfbdev VT 1!
+    devfs_register_device("tty2", &tty_device_fops, NULL, 0666);
+
+    // Register Mouse Input Devices (Kdrive probes both /dev/mouse and /dev/input0)
     devfs_register_device("input0", &input_fops, NULL, 0);
-    devfs_register_device("tty0", &tty_fops, NULL, 0);
-    devfs_register_device("tty", &tty_device_fops, NULL, 0); // Crucial for Bash!
+    devfs_register_device("mouse",  &input_fops, NULL, 0);
+    devfs_register_device("psaux",  &input_fops, NULL, 0);
+
+    // Register Video Framebuffer
     devfs_register_device("fb0", &fb_fops, NULL, 0);
 
     // Mount /dev onto VFS root

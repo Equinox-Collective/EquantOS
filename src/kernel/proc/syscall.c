@@ -383,7 +383,7 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
 
     // Check if this fd is a terminal or console (fd 0..2 OR /dev/tty, /dev/tty0)
     bool is_tty = (fd >= 0 && fd <= 2);
-    if (node && (strcmp(node->name, "tty") == 0 || strcmp(node->name, "tty0") == 0)) {
+    if (node && strncmp(node->name, "tty", 3) == 0) {
         is_tty = true;
     }
 
