@@ -19,14 +19,15 @@ jobs:
             set -e
             apk update
             apk add --no-cache build-base git zlib-dev zlib-static \
+              freetype-dev freetype-static \
               libx11-dev libx11-static libxext-dev libxmu-dev libxt-dev libxrender-dev \
               libxau-dev libxdmcp-dev \
-              libxfont2-dev libxtst-dev libxi-dev \
+              libxtst-dev libxi-dev \
               libxcb-dev libxcb-static libsm-dev libice-dev \
               xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar \
               linux-headers
 
-            # 1. Сборка статических зависимостей xeyes
+            # 1. Сборка статических библиотек X11
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libICE.git
             cd libICE && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
@@ -39,15 +40,22 @@ jobs:
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
             cd libXi && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
-            # 2. Build Xfbdev с принудительным переопределением Xfbdev_LDFLAGS
+            # 2. Сборка статических библиотек шрифтов (libfontenc и libXfont2)
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libfontenc.git
+            cd libfontenc && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXfont.git
+            cd libXfont && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+
+            # 3. Build 100% Static Xfbdev
             git clone https://github.com/keshto/tinyx.git
             cd tinyx
             ./autogen.sh
-            ./configure --prefix=/usr --enable-xfbdev --disable-xvesa \
+            PKG_CONFIG_PATH='/usr/local/lib/pkgconfig:'\$PKG_CONFIG_PATH ./configure --prefix=/usr --enable-xfbdev --disable-xvesa \
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie'
             
-            make -j\$(nproc) Xfbdev_LDFLAGS='-all-static' LDFLAGS='-all-static'
+            make -j\$(nproc) Xfbdev_LDFLAGS='-all-static -L/usr/local/lib -L/usr/lib' LDFLAGS='-all-static -L/usr/local/lib -L/usr/lib'
             
             if [ -f hw/kdrive/fbdev/.libs/Xfbdev ]; then
               cp hw/kdrive/fbdev/.libs/Xfbdev /dist/Xfbdev.elf
@@ -58,7 +66,7 @@ jobs:
             strip /dist/Xfbdev.elf
             cd ..
 
-            # 3. Build xeyes с принудительным -all-static
+            # 4. Build 100% Static xeyes
             wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
             tar -xzf xeyes-1.2.0.tar.gz
             cd xeyes-1.2.0
@@ -77,7 +85,7 @@ jobs:
             strip /dist/xeyes.elf
             cd ..
 
-            # 4. СТРОГИЙ КОНТРОЛЬ: если есть INTERP, билд ОБЯЗАН упасть
+            # 5. СТРОГИЙ КОНТРОЛЬ: если есть INTERP, билд ОБЯЗАН упасть
             echo '========================================='
             echo 'ПРОВЕРКА Xfbdev:'
             readelf -h /dist/Xfbdev.elf | grep Type
