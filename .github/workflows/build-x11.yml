@@ -1,0 +1,108 @@
+name: Build Static X11 Stack
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-x11.yml'
+
+jobs:
+  build-x11:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile Truly Static Xfbdev and xeyes in Alpine Musl
+        run: |
+          docker run --rm -v $(pwd):/dist alpine:3.19 sh -c "
+            set -e
+            apk update
+            apk add --no-cache build-base git zlib-dev zlib-static \
+              libx11-dev libx11-static libxext-dev libxmu-dev libxt-dev libxrender-dev \
+              libxau-dev libxau-static libxdmcp-dev libxdmcp-static \
+              libxfont2-dev libxtst-dev libxi-dev \
+              libxcb-dev libxcb-static libsm-dev libice-dev \
+              xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar \
+              linux-headers
+
+            # 1. Сборка статических зависимостей xeyes
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libICE.git
+            cd libICE && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libSM.git
+            cd libSM && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXt.git
+            cd libXt && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
+            cd libXi && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            # 2. Build Xfbdev с принудительным переопределением Xfbdev_LDFLAGS
+            git clone https://github.com/keshto/tinyx.git
+            cd tinyx
+            ./autogen.sh
+            ./configure --prefix=/usr --enable-xfbdev --disable-xvesa \
+              --enable-static --disable-shared \
+              CFLAGS='-O2 -no-pie -fno-pie'
+            
+            # Переопределяем флаг линковки именно для Xfbdev в Make
+            make -j\$(nproc) Xfbdev_LDFLAGS='-all-static' LDFLAGS='-all-static'
+            
+            # В libtool настоящий ELF лежит в папке .libs/
+            if [ -f hw/kdrive/fbdev/.libs/Xfbdev ]; then
+              cp hw/kdrive/fbdev/.libs/Xfbdev /dist/Xfbdev.elf
+            else
+              XFBDEV_BIN=\$(find . -type f -name Xfbdev -perm -111 | head -n 1)
+              cp \$XFBDEV_BIN /dist/Xfbdev.elf
+            fi
+            strip /dist/Xfbdev.elf
+            cd ..
+
+            # 3. Build xeyes с принудительным -all-static
+            wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
+            tar -xzf xeyes-1.2.0.tar.gz
+            cd xeyes-1.2.0
+            PKG_CONFIG_PATH='/usr/local/lib/pkgconfig:'\$PKG_CONFIG_PATH ./configure --without-present \
+              --enable-static --disable-shared \
+              CFLAGS='-O2 -no-pie -fno-pie' \
+              LIBS='-lSM -lICE -lxcb -lXau -lXdmcp'
+            
+            make -j\$(nproc) LDFLAGS='-all-static -L/usr/local/lib -L/usr/lib'
+            
+            if [ -f .libs/xeyes ]; then
+              cp .libs/xeyes /dist/xeyes.elf
+            else
+              cp xeyes /dist/xeyes.elf
+            fi
+            strip /dist/xeyes.elf
+            cd ..
+
+            # 4. СТРОГИЙ КОНТРОЛЬ: если есть INTERP, билд ОБЯЗАН упасть
+            echo '========================================='
+            echo 'ПРОВЕРКА Xfbdev:'
+            readelf -h /dist/Xfbdev.elf | grep Type
+            if readelf -l /dist/Xfbdev.elf | grep -q INTERP; then
+              echo 'ОШИБКА: Xfbdev все еще имеет секцию INTERP!'
+              exit 1
+            fi
+
+            echo 'ПРОВЕРКА xeyes:'
+            readelf -h /dist/xeyes.elf | grep Type
+            if readelf -l /dist/xeyes.elf | grep -q INTERP; then
+              echo 'ОШИБКА: xeyes все еще имеет секцию INTERP!'
+              exit 1
+            fi
+
+            echo 'УСПЕХ: ОБА БИНАРНИКА 100% ЧИСТАЯ СТАТИКА БЕЗ ИНТЕРПРЕТАТОРА!'
+            echo '========================================='
+          "
+
+      - name: Upload X11 Binaries Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: x11-binaries
+          path: |
+            Xfbdev.elf
+            xeyes.elf
