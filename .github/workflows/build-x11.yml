@@ -21,7 +21,7 @@ jobs:
             apk add --no-cache build-base git zlib-dev zlib-static \
               freetype-dev freetype-static font-util font-util-dev \
               libpng-dev libpng-static bzip2-dev bzip2-static brotli-dev brotli-static \
-              libbsd-dev libbsd-static \
+              libbsd-dev libbsd-static libmd-dev libmd-static \
               libx11-dev libx11-static libxext-dev libxmu-dev libxt-dev libxrender-dev \
               libxau-dev libxdmcp-dev \
               libxtst-dev libxi-dev \
@@ -30,19 +30,21 @@ jobs:
               linux-headers
 
             export PKG_CONFIG_PATH='/usr/lib/pkgconfig:/usr/share/pkgconfig:/usr/local/lib/pkgconfig'
+            mkdir -p /build
+            cd /build
 
             # 1. Сборка статических библиотек X11
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libICE.git
-            cd libICE && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libICE && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd /build
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libSM.git
-            cd libSM && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libSM && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd /build
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXt.git
-            cd libXt && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libXt && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd /build
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
-            cd libXi && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libXi && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd /build
 
             # 2. Сборка статических libfontenc и libXfont2
             wget https://www.x.org/releases/individual/lib/libfontenc-1.1.8.tar.xz
@@ -50,14 +52,14 @@ jobs:
             cd libfontenc-1.1.8
             ./configure --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2'
             make -j\$(nproc) install
-            cd ..
+            cd /build
 
             wget https://www.x.org/releases/individual/lib/libXfont2-2.0.7.tar.xz
             tar -xf libXfont2-2.0.7.tar.xz
             cd libXfont2-2.0.7
             ./configure --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2'
             make -j\$(nproc) install
-            cd ..
+            cd /build
 
             # 3. Build 100% Static Xfbdev
             git clone https://github.com/keshto/tinyx.git
@@ -67,11 +69,10 @@ jobs:
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie'
             
-            # Передаем зависимости freetype и libbsd в конец линковщика
             make -j\$(nproc) \
               Xfbdev_LDFLAGS='-all-static' \
               LDFLAGS='-all-static' \
-              LIBS='-lfreetype -lpng -lbz2 -lbrotlidec -lbrotlicommon -lbsd -lz -lm'
+              LIBS='-lfreetype -lpng -lbz2 -lbrotlidec -lbrotlicommon -lbsd -lmd -lz -lm'
             
             if [ -f hw/kdrive/fbdev/.libs/Xfbdev ]; then
               cp hw/kdrive/fbdev/.libs/Xfbdev /dist/Xfbdev.elf
@@ -80,7 +81,7 @@ jobs:
               cp \$XFBDEV_BIN /dist/Xfbdev.elf
             fi
             strip /dist/Xfbdev.elf
-            cd ..
+            cd /build
 
             # 4. Build 100% Static xeyes
             wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
@@ -89,7 +90,7 @@ jobs:
             ./configure --prefix=/usr --without-present \
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie' \
-              LIBS='-lSM -lICE -lxcb -lXau -lXdmcp -lbsd'
+              LIBS='-lSM -lICE -lxcb -lXau -lXdmcp -lbsd -lmd'
             
             make -j\$(nproc) LDFLAGS='-all-static'
             
@@ -99,7 +100,7 @@ jobs:
               cp xeyes /dist/xeyes.elf
             fi
             strip /dist/xeyes.elf
-            cd ..
+            cd /build
 
             # 5. СТРОГИЙ КОНТРОЛЬ: проверка типа файла
             echo '========================================='
