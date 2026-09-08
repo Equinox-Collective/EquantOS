@@ -27,35 +27,35 @@ jobs:
               xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar \
               linux-headers
 
-            # 1. Сборка статических библиотек X11
+            # 1. Сборка статических библиотек X11 с установкой в /usr
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libICE.git
-            cd libICE && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libICE && ./autogen.sh --prefix=/usr --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libSM.git
-            cd libSM && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libSM && ./autogen.sh --prefix=/usr --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXt.git
-            cd libXt && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libXt && ./autogen.sh --prefix=/usr --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
-            cd libXi && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libXi && ./autogen.sh --enable-static --disable-shared --prefix=/usr CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
-            # 2. Сборка статических библиотек шрифтов (libfontenc и libXfont2)
+            # 2. Сборка статических библиотек шрифтов с установкой в /usr
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libfontenc.git
-            cd libfontenc && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libfontenc && ./autogen.sh --prefix=/usr --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXfont.git
-            cd libXfont && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libXfont && ./autogen.sh --prefix=/usr --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             # 3. Build 100% Static Xfbdev
             git clone https://github.com/keshto/tinyx.git
             cd tinyx
             ./autogen.sh
-            PKG_CONFIG_PATH='/usr/local/lib/pkgconfig:'\$PKG_CONFIG_PATH ./configure --prefix=/usr --enable-xfbdev --disable-xvesa \
+            ./configure --prefix=/usr --enable-xfbdev --disable-xvesa \
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie'
             
-            make -j\$(nproc) Xfbdev_LDFLAGS='-all-static -L/usr/local/lib -L/usr/lib' LDFLAGS='-all-static -L/usr/local/lib -L/usr/lib'
+            make -j\$(nproc) Xfbdev_LDFLAGS='-all-static' LDFLAGS='-all-static'
             
             if [ -f hw/kdrive/fbdev/.libs/Xfbdev ]; then
               cp hw/kdrive/fbdev/.libs/Xfbdev /dist/Xfbdev.elf
@@ -70,12 +70,12 @@ jobs:
             wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
             tar -xzf xeyes-1.2.0.tar.gz
             cd xeyes-1.2.0
-            PKG_CONFIG_PATH='/usr/local/lib/pkgconfig:'\$PKG_CONFIG_PATH ./configure --without-present \
+            ./configure --prefix=/usr --without-present \
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie' \
               LIBS='-lSM -lICE -lxcb -lXau -lXdmcp'
             
-            make -j\$(nproc) LDFLAGS='-all-static -L/usr/local/lib -L/usr/lib'
+            make -j\$(nproc) LDFLAGS='-all-static'
             
             if [ -f .libs/xeyes ]; then
               cp .libs/xeyes /dist/xeyes.elf
