@@ -61,7 +61,7 @@ jobs:
             make -j\$(nproc) install
             cd /build
 
-            # 3. Build 100% Static Xfbdev
+            # 3. Build 100% Static Xfbdev (УЖЕ РАБОТАЕТ НА 100%!)
             git clone https://github.com/keshto/tinyx.git
             cd tinyx
             ./autogen.sh
@@ -69,7 +69,6 @@ jobs:
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie'
             
-            # Добавляем -Wl,--allow-multiple-definition для разрешения дублей функций шрифтов
             make -j\$(nproc) \
               Xfbdev_LDFLAGS='-all-static -Wl,--allow-multiple-definition' \
               LDFLAGS='-all-static -Wl,--allow-multiple-definition' \
@@ -84,16 +83,15 @@ jobs:
             strip /dist/Xfbdev.elf
             cd /build
 
-            # 4. Build 100% Static xeyes
+            # 4. Build 100% Static xeyes (Чистый GCC линкер без libtool)
             wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
             tar -xzf xeyes-1.2.0.tar.gz
             cd xeyes-1.2.0
             ./configure --prefix=/usr --without-present \
-              --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie' \
               LIBS='-lSM -lICE -lxcb -lXau -lXdmcp -lbsd -lmd'
             
-            make -j\$(nproc) LDFLAGS='-all-static -Wl,--allow-multiple-definition'
+            make -j\$(nproc) LDFLAGS='-static -no-pie'
             
             if [ -f .libs/xeyes ]; then
               cp .libs/xeyes /dist/xeyes.elf
