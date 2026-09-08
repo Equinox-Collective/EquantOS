@@ -93,4 +93,37 @@ jobs:
             make -j\$(nproc) LDFLAGS='-all-static'
             
             if [ -f .libs/xeyes ]; then
-              cp .libs/xeyes
+              cp .libs/xeyes /dist/xeyes.elf
+            else
+              cp xeyes /dist/xeyes.elf
+            fi
+            strip /dist/xeyes.elf
+            cd ..
+
+            # 5. СТРОГИЙ КОНТРОЛЬ: проверка типа файла
+            echo '========================================='
+            echo 'ПРОВЕРКА Xfbdev:'
+            readelf -h /dist/Xfbdev.elf | grep Type
+            if readelf -l /dist/Xfbdev.elf | grep -q INTERP; then
+              echo 'ОШИБКА: Xfbdev все еще имеет секцию INTERP!'
+              exit 1
+            fi
+
+            echo 'ПРОВЕРКА xeyes:'
+            readelf -h /dist/xeyes.elf | grep Type
+            if readelf -l /dist/xeyes.elf | grep -q INTERP; then
+              echo 'ОШИБКА: xeyes все еще имеет секцию INTERP!'
+              exit 1
+            fi
+
+            echo 'УСПЕХ: ОБА БИНАРНИКА 100% ЧИСТАЯ СТАТИКА БЕЗ ИНТЕРПРЕТАТОРА!'
+            echo '========================================='
+          "
+
+      - name: Upload X11 Binaries Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: x11-binaries
+          path: |
+            Xfbdev.elf
+            xeyes.elf
