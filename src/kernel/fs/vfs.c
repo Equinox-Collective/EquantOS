@@ -27,6 +27,12 @@ vfs_node_t *vfs_mount(const char *path, vfs_node_t *local_root) {
 // Helper to traverse path components with POSIX '.', '..', and mountpoint support
 static vfs_node_t *vfs_resolve_path(const char *path) {
     if (!path || path[0] != '/') return NULL;
+
+    // Direct DevFS fast-path for /dev/ devices (bypasses any root filesystem masking)
+    extern vfs_node_t *devfs_get_root(void);
+    if (strncmp(path, "/dev/", 5) == 0 && devfs_get_root()) {
+        return vfs_finddir(devfs_get_root(), path + 5);
+    }
     
     vfs_node_t *current = vfs_root;
     if (!current) return NULL;

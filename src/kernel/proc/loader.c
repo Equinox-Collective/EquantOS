@@ -44,19 +44,25 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         return false;
     }
 
+    // Support both Static Executables (ET_EXEC = 2) and Position-Independent (ET_DYN = 3)
+    uint64_t load_base = (ehdr->e_type == 3) ? 0x400000ULL : 0ULL;
+
     page_table_t *new_pml4 = vmm_create_address_space();
     if (!new_pml4) return false;
 
+    uint64_t max_vaddr_end = 0;
     Elf64_Phdr *phdr = (Elf64_Phdr *)((uint8_t *)elf_data + ehdr->e_phoff);
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type == 1) { // PT_LOAD
-            uint64_t p_vaddr = phdr[i].p_vaddr;
+            uint64_t p_vaddr = phdr[i].p_vaddr + load_base;
             uint64_t p_filesz = phdr[i].p_filesz;
             uint64_t p_memsz = phdr[i].p_memsz;
             uint64_t p_offset = phdr[i].p_offset;
 
             uint64_t vaddr_aligned = p_vaddr & ~0xFFFULL;
             uint64_t vaddr_end = (p_vaddr + p_memsz + 0xFFF) & ~0xFFFULL;
+            if (vaddr_end > max_vaddr_end) max_vaddr_end = vaddr_end;
+
             uint64_t total_size = vaddr_end - vaddr_aligned;
             uint32_t page_count = total_size / PAGE_SIZE;
 
@@ -75,7 +81,7 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         }
     }
 
-    // Allocate 8 MB stack
+    // Allocate 8 MB user stack
     uint32_t stack_pages = 2048;
     uint64_t user_stack_top = 0x7FFFFFFF0000ULL;
     uint64_t user_stack_bottom = user_stack_top - ((uint64_t)stack_pages * PAGE_SIZE);
@@ -92,7 +98,6 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         if (j == stack_pages - 1) top_stack_phys = phys;
     }
 
-    // System V AMD64 ABI Stack Setup
     uint64_t stack_top = user_stack_top;
     uint8_t *topk = (uint8_t *)VIRT(top_stack_phys);
     uint64_t sp = stack_top;
@@ -118,6 +123,7 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         "HOME=/",
         "TERM=linux",
         "SHELL=/bin/bash",
+        "DISPLAY=:0",
         NULL
     };
     int envc = 0;
@@ -137,21 +143,25 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
 
     sp &= ~0xFULL;
 
+    uint64_t phdr_vaddr = phdr[0].p_vaddr + load_base + ehdr->e_phoff;
+    uint64_t entry_point = ehdr->e_entry + load_base;
+
     uint64_t aux[32]; 
     int an = 0;
-    uint64_t phdr_vaddr = phdr[0].p_vaddr + ehdr->e_phoff;
-    aux[an++] = 3;  aux[an++] = phdr_vaddr;
-    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;
-    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;
-    aux[an++] = 6;  aux[an++] = PAGE_SIZE;
-    aux[an++] = 9;  aux[an++] = ehdr->e_entry;
-    aux[an++] = 11; aux[an++] = 0;
-    aux[an++] = 12; aux[an++] = 0;
-    aux[an++] = 13; aux[an++] = 0;
-    aux[an++] = 14; aux[an++] = 0;
-    aux[an++] = 23; aux[an++] = 0;
-    aux[an++] = 25; aux[an++] = at_random;
-    aux[an++] = 0;  aux[an++] = 0;
+    aux[an++] = 3;  aux[an++] = phdr_vaddr;           // AT_PHDR: Now guaranteed valid for both Bash and PIE!
+    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;   // AT_PHENT
+    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;       // AT_PHNUM
+    aux[an++] = 6;  aux[an++] = PAGE_SIZE;           // AT_PAGESZ
+    aux[an++] = 7;  aux[an++] = 0;                   // AT_BASE
+    aux[an++] = 8;  aux[an++] = 0;                   // AT_FLAGS
+    aux[an++] = 9;  aux[an++] = entry_point;         // AT_ENTRY
+    aux[an++] = 11; aux[an++] = 0;                   // AT_UID
+    aux[an++] = 12; aux[an++] = 0;                   // AT_EUID
+    aux[an++] = 13; aux[an++] = 0;                   // AT_GID
+    aux[an++] = 14; aux[an++] = 0;                   // AT_EGID
+    aux[an++] = 23; aux[an++] = 0;                   // AT_SECURE
+    aux[an++] = 25; aux[an++] = at_random;           // AT_RANDOM
+    aux[an++] = 0;  aux[an++] = 0;                   // AT_NULL
 
     int total_words = 1 + (argc + 1) + (envc + 1) + an;
     if (total_words & 1) sp -= 8;
@@ -168,21 +178,19 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
 
     uint64_t initial_user_rsp = sp;
 
-    // Process Structure Initialization with Standard File Descriptors
     process_t *proc = (process_t *)kmalloc(sizeof(process_t));
     if (!proc) return false;
     memset(proc, 0, sizeof(process_t));
 
-    proc->pid = next_pid++; // Auto-increment PID!
+    proc->pid = next_pid++;
     proc->pgid = proc->pid;
     proc->cr3 = PHYS(new_pml4);
-    proc->brk = 0x600000;
+    proc->brk = (max_vaddr_end + PAGE_SIZE - 1) & ~0xFFFULL;
     strcpy(proc->cwd, "/");
 
-    // Initialize FDs 0, 1, 2
-    proc->files[0] = &dev_tty_master_node; // STDIN  -> /dev/tty
-proc->files[1] = &dev_tty_master_node; // STDOUT -> /dev/tty
-proc->files[2] = &dev_tty_master_node; // STDERR -> /dev/tty
+    proc->files[0] = &dev_tty_master_node;
+    proc->files[1] = &dev_tty_master_node;
+    proc->files[2] = &dev_tty_master_node;
 
     task_t *task = (task_t *)kmalloc(sizeof(task_t));
     if (!task) return false;
@@ -204,10 +212,10 @@ proc->files[2] = &dev_tty_master_node; // STDERR -> /dev/tty
     *--stack = initial_user_rsp;      // User Stack Pointer
     *--stack = 0x202;                 // RFLAGS (IF=1)
     *--stack = 0x23;                  // CS (User Code)
-    *--stack = ehdr->e_entry;         // RIP
+    *--stack = entry_point;           // RIP (Target Entry with Base)
 
-    *--stack = 0; // Error code
-    *--stack = 0; // Int no
+    *--stack = 0;
+    *--stack = 0;
 
     for (int k = 0; k < 15; k++) {
         *--stack = 0;
@@ -232,7 +240,6 @@ proc->files[2] = &dev_tty_master_node; // STDERR -> /dev/tty
     return true;
 }
 
-// Замена текущего процесса на новый ELF без создания новых задач
 bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, uint64_t *out_entry, uint64_t *out_rsp, uint64_t *out_cr3) {
     if (!elf_data || size < sizeof(Elf64_Ehdr)) return false;
 
@@ -242,21 +249,25 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         return false;
     }
 
-    // 1. Создаем новое адресное пространство
+    // Support both Static Executables (ET_EXEC = 2) and Position-Independent (ET_DYN = 3)
+    uint64_t load_base = (ehdr->e_type == 3) ? 0x400000ULL : 0ULL;
+
     page_table_t *new_pml4 = vmm_create_address_space();
     if (!new_pml4) return false;
 
-    // 2. Загружаем PT_LOAD сегменты
+    uint64_t max_vaddr_end = 0;
     Elf64_Phdr *phdr = (Elf64_Phdr *)((uint8_t *)elf_data + ehdr->e_phoff);
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type == 1) { // PT_LOAD
-            uint64_t p_vaddr = phdr[i].p_vaddr;
+            uint64_t p_vaddr = phdr[i].p_vaddr + load_base;
             uint64_t p_filesz = phdr[i].p_filesz;
             uint64_t p_memsz = phdr[i].p_memsz;
             uint64_t p_offset = phdr[i].p_offset;
 
             uint64_t vaddr_aligned = p_vaddr & ~0xFFFULL;
             uint64_t vaddr_end = (p_vaddr + p_memsz + 0xFFF) & ~0xFFFULL;
+            if (vaddr_end > max_vaddr_end) max_vaddr_end = vaddr_end;
+
             uint64_t total_size = vaddr_end - vaddr_aligned;
             uint32_t page_count = total_size / PAGE_SIZE;
 
@@ -275,7 +286,6 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         }
     }
 
-    // 3. Выделяем стек
     uint32_t stack_pages = 2048;
     uint64_t user_stack_top = 0x7FFFFFFF0000ULL;
     uint64_t user_stack_bottom = user_stack_top - ((uint64_t)stack_pages * PAGE_SIZE);
@@ -291,14 +301,13 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         if (j == stack_pages - 1) top_stack_phys = phys;
     }
 
-    // 4. Формируем System V ABI стек
     uint64_t stack_top = user_stack_top;
     uint8_t *topk = (uint8_t *)VIRT(top_stack_phys);
     uint64_t sp = stack_top;
 
     if (argc <= 0 || !argv) {
         argc = 1;
-        argv = (char *[]){ "busybox", NULL };
+        argv = (char *[]){ "app", NULL };
     }
     if (argc > 16) argc = 16;
 
@@ -317,6 +326,7 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         "HOME=/",
         "TERM=linux",
         "SHELL=/bin/bash",
+        "DISPLAY=:0",
         NULL
     };
     int envc = 0;
@@ -336,21 +346,25 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
 
     sp &= ~0xFULL;
 
+    uint64_t phdr_vaddr = phdr[0].p_vaddr + load_base + ehdr->e_phoff;
+    uint64_t entry_point = ehdr->e_entry + load_base;
+
     uint64_t aux[32]; 
     int an = 0;
-    uint64_t phdr_vaddr = phdr[0].p_vaddr + ehdr->e_phoff;
-    aux[an++] = 3;  aux[an++] = phdr_vaddr;
-    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;
-    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;
-    aux[an++] = 6;  aux[an++] = PAGE_SIZE;
-    aux[an++] = 9;  aux[an++] = ehdr->e_entry;
-    aux[an++] = 11; aux[an++] = 0;
-    aux[an++] = 12; aux[an++] = 0;
-    aux[an++] = 13; aux[an++] = 0;
-    aux[an++] = 14; aux[an++] = 0;
-    aux[an++] = 23; aux[an++] = 0;
-    aux[an++] = 25; aux[an++] = at_random;
-    aux[an++] = 0;  aux[an++] = 0;
+    aux[an++] = 3;  aux[an++] = phdr_vaddr;           // AT_PHDR: Now guaranteed valid for both Bash and PIE!
+    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;   // AT_PHENT
+    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;       // AT_PHNUM
+    aux[an++] = 6;  aux[an++] = PAGE_SIZE;           // AT_PAGESZ
+    aux[an++] = 7;  aux[an++] = 0;                   // AT_BASE
+    aux[an++] = 8;  aux[an++] = 0;                   // AT_FLAGS
+    aux[an++] = 9;  aux[an++] = entry_point;         // AT_ENTRY
+    aux[an++] = 11; aux[an++] = 0;                   // AT_UID
+    aux[an++] = 12; aux[an++] = 0;                   // AT_EUID
+    aux[an++] = 13; aux[an++] = 0;                   // AT_GID
+    aux[an++] = 14; aux[an++] = 0;                   // AT_EGID
+    aux[an++] = 23; aux[an++] = 0;                   // AT_SECURE
+    aux[an++] = 25; aux[an++] = at_random;           // AT_RANDOM
+    aux[an++] = 0;  aux[an++] = 0;                   // AT_NULL
 
     int total_words = 1 + (argc + 1) + (envc + 1) + an;
     if (total_words & 1) sp -= 8;
@@ -365,7 +379,12 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
     w[idx++] = 0;
     for (int i = 0; i < an; i++)   w[idx++] = aux[i];
 
-    *out_entry = ehdr->e_entry;
+    // Update process heap boundary past the binary image
+    if (current_task && current_task->process) {
+        current_task->process->brk = (max_vaddr_end + PAGE_SIZE - 1) & ~0xFFFULL;
+    }
+
+    *out_entry = entry_point;
     *out_rsp = sp;
     *out_cr3 = PHYS(new_pml4);
     return true;

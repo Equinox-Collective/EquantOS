@@ -137,8 +137,8 @@ static int dev_fb_ioctl(vfs_node_t *node, uint64_t req, void *arg) {
         fix->smem_start = (uint64_t)kernel_fb->address - hhdm_offset;
         fix->smem_len   = kernel_fb->pitch * kernel_fb->height;
         fix->line_length = kernel_fb->pitch;
-        fix->type       = 0; // FB_TYPE_PACKED_PIXELS
-        fix->visual     = 2; // FB_VISUAL_TRUECOLOR
+        fix->type       = 0;
+        fix->visual     = 2; // TrueColor
         return 0;
     }
 
@@ -241,7 +241,7 @@ void devfs_init(void) {
     devfs_root->ops = &devfs_root_fops;
 
     // Register Devices
-    devfs_register_device("null", &null_fops, NULL, 0);
+    devfs_register_device("null", &null_fops, NULL, 0666);
     devfs_register_device("input0", &input_fops, NULL, 0);
     devfs_register_device("tty0", &tty_fops, NULL, 0);
     devfs_register_device("tty", &tty_device_fops, NULL, 0); // Crucial for Bash!
