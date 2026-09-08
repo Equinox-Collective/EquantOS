@@ -20,7 +20,7 @@ jobs:
             apk update
             apk add --no-cache build-base git zlib-dev zlib-static \
               libx11-dev libx11-static libxext-dev libxmu-dev libxt-dev libxrender-dev \
-              libxau-dev libxau-static libxdmcp-dev libxdmcp-static \
+              libxau-dev libxdmcp-dev \
               libxfont2-dev libxtst-dev libxi-dev \
               libxcb-dev libxcb-static libsm-dev libice-dev \
               xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar \
@@ -28,16 +28,16 @@ jobs:
 
             # 1. Сборка статических зависимостей xeyes
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libICE.git
-            cd libICE && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+            cd libICE && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libSM.git
-            cd libSM && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+            cd libSM && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXt.git
-            cd libXt && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+            cd libXt && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
-            cd libXi && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+            cd libXi && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             # 2. Build Xfbdev с принудительным переопределением Xfbdev_LDFLAGS
             git clone https://github.com/keshto/tinyx.git
@@ -47,10 +47,8 @@ jobs:
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie'
             
-            # Переопределяем флаг линковки именно для Xfbdev в Make
             make -j\$(nproc) Xfbdev_LDFLAGS='-all-static' LDFLAGS='-all-static'
             
-            # В libtool настоящий ELF лежит в папке .libs/
             if [ -f hw/kdrive/fbdev/.libs/Xfbdev ]; then
               cp hw/kdrive/fbdev/.libs/Xfbdev /dist/Xfbdev.elf
             else
