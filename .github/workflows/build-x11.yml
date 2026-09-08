@@ -21,7 +21,7 @@ jobs:
             apk add --no-cache build-base git zlib-dev zlib-static \
               freetype-dev freetype-static font-util font-util-dev \
               libpng-dev libpng-static bzip2-dev bzip2-static brotli-dev brotli-static \
-              libbsd-dev libbsd-static libmd-dev libmd-static \
+              libbsd-dev libbsd-static libmd-dev \
               libx11-dev libx11-static libxext-dev libxmu-dev libxt-dev libxrender-dev \
               libxau-dev libxdmcp-dev \
               libxtst-dev libxi-dev \
