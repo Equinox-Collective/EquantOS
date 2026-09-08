@@ -376,7 +376,45 @@ static int64_t sys_fcntl_handler(int fd, int cmd, uint64_t arg) {
 }
 
 static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
-    if (fd >= 0 && fd <= 2) {
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+
+    // Check if this fd is a terminal or console (fd 0..2 OR /dev/tty, /dev/tty0)
+    bool is_tty = (fd >= 0 && fd <= 2);
+    if (node && (strcmp(node->name, "tty") == 0 || strcmp(node->name, "tty0") == 0)) {
+        is_tty = true;
+    }
+
+    if (is_tty) {
+        // 1. Virtual Terminal Queries (Crucial for Xfbdev / Xorg startup!)
+        if (req == VT_OPENQRY && arg) {
+            *(int *)arg = 1; // Report VT 1 as free and available
+            return 0;
+        }
+        if (req == VT_GETSTATE && arg) {
+            struct { unsigned short v_active, v_signal, v_state; } *vts = arg;
+            vts->v_active = 1;
+            vts->v_state = 1;
+            return 0;
+        }
+        if (req == VT_ACTIVATE || req == VT_WAITACTIVE || req == VT_SETMODE || req == VT_DISALLOCATE) {
+            return 0; // VT switched successfully
+        }
+        if (req == KDSETMODE || req == KDSKBMODE) {
+            return 0; // Graphics/Keyboard mode set
+        }
+        if (req == KDGETMODE && arg) {
+            *(int *)arg = 0; // KD_TEXT
+            return 0;
+        }
+        if (req == KDGKBMODE && arg) {
+            *(int *)arg = 1; // K_XLATE
+            return 0;
+        }
+
+        // 2. Window Size and Process Groups
         if (req == TIOCGWINSZ && arg) {
             struct winsize *ws = (struct winsize *)arg;
             uint64_t gw = (uint64_t)term_get_glyph_width();
@@ -390,23 +428,19 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
             return 0;
         }
         if (req == TIOCGPGRP && arg) {
-            uint64_t pgid = (current_task && current_task->process && current_task->process->pgid) 
-                            ? current_task->process->pgid : 1;
-            *(int *)arg = (int)(pgid ? pgid : 1);
+            uint64_t pgid = (current_task->process->pgid) ? current_task->process->pgid : 1;
+            *(int *)arg = (int)pgid;
             return 0;
         }
-        if (req == TIOCSPGRP) {
-            if (arg && current_task && current_task->process) {
-                int new_pgid = *(int *)arg;
-                current_task->process->pgid = (uint64_t)(new_pgid > 0 ? new_pgid : current_task->process->pid);
-            }
+        if (req == TIOCSPGRP && arg) {
+            int new_pgid = *(int *)arg;
+            current_task->process->pgid = (uint64_t)(new_pgid > 0 ? new_pgid : current_task->process->pid);
             return 0;
         }
         if (req == FIONREAD && arg) {
             *(int *)arg = tty_has_input() ? 1 : 0;
             return 0;
         }
-        // This makes isatty(0) report TRUE to Bash!
         if (req == TCGETS && arg) {
             struct termios *tio = (struct termios *)arg;
             memset(tio, 0, sizeof(struct termios));
@@ -421,7 +455,59 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
         }
         return 0;
     }
+
+    // Pass custom ioctls (e.g. /dev/fb0) to VFS node ops
+    if (node && node->ops && node->ops->ioctl) {
+        return node->ops->ioctl(node, req, arg);
+    }
+
     return -ENOTTY;
+}
+
+static int64_t sys_link_handler(const char *oldpath, const char *newpath) {
+    if (!oldpath || !newpath) return -EFAULT;
+    char old_res[256], new_res[256];
+    resolve_user_path(oldpath, old_res, sizeof(old_res));
+    resolve_user_path(newpath, new_res, sizeof(new_res));
+
+    vfs_node_t *old_node = vfs_open(old_res, 0);
+    if (!old_node) return -ENOENT;
+
+    char parent_path[256];
+    strncpy(parent_path, new_res, sizeof(parent_path) - 1);
+    parent_path[sizeof(parent_path) - 1] = '\0';
+    char *filename = parent_path;
+
+    char *last_slash = strrchr(parent_path, '/');
+    if (last_slash) {
+        if (last_slash == parent_path) {
+            filename = last_slash + 1;
+            parent_path[1] = '\0';
+        } else {
+            *last_slash = '\0';
+            filename = last_slash + 1;
+        }
+    }
+
+    vfs_node_t *parent_dir = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
+    if (!parent_dir) return -ENOENT;
+
+    vfs_node_t *new_node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!new_node) return -ENOMEM;
+    memcpy(new_node, old_node, sizeof(vfs_node_t));
+    strncpy(new_node->name, filename, sizeof(new_node->name) - 1);
+    new_node->parent = parent_dir;
+    new_node->next = NULL;
+
+    if (!parent_dir->children) {
+        parent_dir->children = new_node;
+    } else {
+        vfs_node_t *curr = parent_dir->children;
+        while (curr->next) curr = curr->next;
+        curr->next = new_node;
+    }
+
+    return 0;
 }
 // ============================================================================
 // 2. Filesystem Metadata & Directory Navigation
@@ -1626,6 +1712,12 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_ACCEPT:
             ret = sys_accept_handler((int)regs->rdi, (struct sockaddr_un *)regs->rsi, (uint32_t *)regs->rdx);
+            break;
+        case SYS_LINK:
+            ret = sys_link_handler((const char *)regs->rdi, (const char *)regs->rsi);
+            break;
+        case SYS_LINKAT:
+            ret = sys_link_handler((const char *)regs->rsi, (const char *)regs->r10);
             break;
         case SYS_CONNECT:
             ret = sys_connect_handler((int)regs->rdi, (const struct sockaddr_un *)regs->rsi, (uint32_t)regs->rdx);

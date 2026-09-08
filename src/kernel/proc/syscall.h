@@ -332,6 +332,21 @@
 #define SIGSTOP                  19
 #define SIGTSTP                  20
 
+// Linux Virtual Terminal ioctl definitions
+#define VT_OPENQRY       0x5600 // Find first available VT
+#define VT_GETMODE       0x5601
+#define VT_SETMODE       0x5602
+#define VT_GETSTATE      0x5603
+#define VT_SENDSIG       0x5604
+#define VT_RELDISP       0x5605
+#define VT_ACTIVATE      0x5606 // Make VT active
+#define VT_WAITACTIVE    0x5607 // Wait until VT is active
+#define VT_DISALLOCATE   0x5608
+#define KDSETMODE        0x4B3A // Set text/graphics mode
+#define KDGETMODE        0x4B3B
+#define KDSKBMODE        0x4B45 // Set keyboard mode (RAW/XLATE)
+#define KDGKBMODE        0x4B44
+
 // ============================================================================
 // 4. Linux Kernel Structures
 // ============================================================================
