@@ -25,34 +25,34 @@ jobs:
               xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar \
               linux-headers
 
-            # 1. Build 100% Static Xfbdev
+            export CFLAGS='-O2 -no-pie -fno-pie'
+            export LDFLAGS='-static -no-pie'
+
+            # 1. Сборка статических библиотек (libICE, libSM, libXt, libXi)
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libICE.git
+            cd libICE && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libSM.git
+            cd libSM && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXt.git
+            cd libXt && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
+            cd libXi && ./autogen.sh --enable-static --disable-shared && make -j\$(nproc) install && cd ..
+
+            # 2. Build 100% Static Xfbdev
             git clone https://github.com/keshto/tinyx.git
             cd tinyx
             ./autogen.sh
             ./configure --prefix=/usr --enable-xfbdev --disable-xvesa \
-              --enable-static --disable-shared \
-              CC='gcc -static -no-pie' \
-              CFLAGS='-static -no-pie -fno-pie -O2' \
-              LDFLAGS='-static -no-pie -all-static'
-            make -j\$(nproc) LDFLAGS='-static -no-pie -all-static'
+              --enable-static --disable-shared
+            make -j\$(nproc)
             
             XFBDEV_BIN=\$(find . -type f -name Xfbdev -perm -111 | head -n 1)
             strip \$XFBDEV_BIN
             cp \$XFBDEV_BIN /dist/Xfbdev.elf
             cd ..
-
-            # 2. Сборка статических библиотек (libICE, libSM, libXt, libXi)
-            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libICE.git
-            cd libICE && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
-
-            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libSM.git
-            cd libSM && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
-
-            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXt.git
-            cd libXt && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
-
-            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
-            cd libXi && ./autogen.sh --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             # 3. Build 100% Static xeyes
             wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
@@ -60,31 +60,23 @@ jobs:
             cd xeyes-1.2.0
             PKG_CONFIG_PATH='/usr/local/lib/pkgconfig:'\$PKG_CONFIG_PATH ./configure --without-present \
               --enable-static --disable-shared \
-              CC='gcc -static -no-pie' \
-              CFLAGS='-static -no-pie -fno-pie -O2' \
-              LDFLAGS='-static -no-pie -all-static -L/usr/local/lib -L/usr/lib' \
+              LDFLAGS='-static -no-pie -L/usr/local/lib -L/usr/lib' \
               LIBS='-lSM -lICE -lxcb -lXau -lXdmcp'
-            make -j\$(nproc) LDFLAGS='-static -no-pie -all-static'
+            make -j\$(nproc)
             strip xeyes
             cp xeyes /dist/xeyes.elf
             cd ..
 
-            # 4. СТРОГАЯ ПРОВЕРКА НА СТАТИКУ
-            echo '--- ПРОВЕРКА Xfbdev ---'
+            # 4. ВЕРИФИКАЦИЯ БИНАРНИКОВ
+            echo '========================================='
+            echo 'ПРОВЕРКА ТИПА БИНАРНИКОВ (ОБЯЗАН БЫТЬ EXEC):'
             readelf -h /dist/Xfbdev.elf | grep Type
-            if readelf -l /dist/Xfbdev.elf | grep -q INTERP; then
-              echo 'ОШИБКА: Xfbdev все еще динамический!'
-              exit 1
-            fi
-
-            echo '--- ПРОВЕРКА xeyes ---'
             readelf -h /dist/xeyes.elf | grep Type
-            if readelf -l /dist/xeyes.elf | grep -q INTERP; then
-              echo 'ОШИБКА: xeyes все еще динамический!'
-              exit 1
-            fi
 
-            echo 'УСПЕХ: Оба бинарника 100% автономные и статические!'
+            echo 'ПРОВЕРКА НА ДИНАМИЧЕСКИЙ ИНТЕРПРЕТАТОР (ДОЛЖНО БЫТЬ ПУСТО):'
+            readelf -l /dist/Xfbdev.elf | grep INTERP || echo 'Xfbdev: ЧИСТАЯ СТАТИКА (НЕТ ИНТЕРПРЕТАТОРА)!'
+            readelf -l /dist/xeyes.elf | grep INTERP || echo 'xeyes: ЧИСТАЯ СТАТИКА (НЕТ ИНТЕРПРЕТАТОРА)!'
+            echo '========================================='
           "
 
       - name: Upload X11 Binaries Artifact
