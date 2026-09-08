@@ -20,6 +20,8 @@ jobs:
             apk update
             apk add --no-cache build-base git zlib-dev zlib-static \
               freetype-dev freetype-static font-util font-util-dev \
+              libpng-dev libpng-static bzip2-dev bzip2-static brotli-dev brotli-static \
+              libbsd-dev libbsd-static \
               libx11-dev libx11-static libxext-dev libxmu-dev libxt-dev libxrender-dev \
               libxau-dev libxdmcp-dev \
               libxtst-dev libxi-dev \
@@ -42,7 +44,7 @@ jobs:
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
             cd libXi && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
-            # 2. Сборка статических libfontenc и libXfont2 из официальных tar-релизов X.Org
+            # 2. Сборка статических libfontenc и libXfont2
             wget https://www.x.org/releases/individual/lib/libfontenc-1.1.8.tar.xz
             tar -xf libfontenc-1.1.8.tar.xz
             cd libfontenc-1.1.8
@@ -57,11 +59,6 @@ jobs:
             make -j\$(nproc) install
             cd ..
 
-            # Проверка, что pkg-config видит xfont2 и fontenc
-            echo 'Проверяем pkg-config:'
-            pkg-config --exists xfont2 && echo 'OK: xfont2 найден!'
-            pkg-config --exists fontenc && echo 'OK: fontenc найден!'
-
             # 3. Build 100% Static Xfbdev
             git clone https://github.com/keshto/tinyx.git
             cd tinyx
@@ -70,7 +67,11 @@ jobs:
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie'
             
-            make -j\$(nproc) Xfbdev_LDFLAGS='-all-static' LDFLAGS='-all-static'
+            # Передаем зависимости freetype и libbsd в конец линковщика
+            make -j\$(nproc) \
+              Xfbdev_LDFLAGS='-all-static' \
+              LDFLAGS='-all-static' \
+              LIBS='-lfreetype -lpng -lbz2 -lbrotlidec -lbrotlicommon -lbsd -lz -lm'
             
             if [ -f hw/kdrive/fbdev/.libs/Xfbdev ]; then
               cp hw/kdrive/fbdev/.libs/Xfbdev /dist/Xfbdev.elf
@@ -88,7 +89,7 @@ jobs:
             ./configure --prefix=/usr --without-present \
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie' \
-              LIBS='-lSM -lICE -lxcb -lXau -lXdmcp'
+              LIBS='-lSM -lICE -lxcb -lXau -lXdmcp -lbsd'
             
             make -j\$(nproc) LDFLAGS='-all-static'
             
