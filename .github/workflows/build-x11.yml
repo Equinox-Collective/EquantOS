@@ -27,31 +27,38 @@ jobs:
               xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar \
               linux-headers
 
-            # 1. Сборка статических библиотек X11 с установкой в /usr
+            export PKG_CONFIG_PATH='/usr/lib/pkgconfig:/usr/share/pkgconfig:/usr/local/lib/pkgconfig'
+
+            # 1. Сборка статических библиотек X11
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libICE.git
-            cd libICE && ./autogen.sh --prefix=/usr --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libICE && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libSM.git
-            cd libSM && ./autogen.sh --prefix=/usr --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libSM && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXt.git
-            cd libXt && ./autogen.sh --prefix=/usr --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libXt && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
-            cd libXi && ./autogen.sh --enable-static --disable-shared --prefix=/usr CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libXi && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
-            # 2. Сборка статических библиотек шрифтов с установкой в /usr
+            # 2. Сборка статических библиотек шрифтов: libfontenc и ИМЕННО libXfont2
             git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libfontenc.git
-            cd libfontenc && ./autogen.sh --prefix=/usr --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            cd libfontenc && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
-            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXfont.git
-            cd libXfont && ./autogen.sh --prefix=/usr --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXfont2.git
+            cd libXfont2 && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+
+            # Проверка, что pkg-config видит xfont2 и fontenc
+            echo 'Проверяем pkg-config:'
+            pkg-config --exists xfont2 && echo 'OK: xfont2 найден!'
+            pkg-config --exists fontenc && echo 'OK: fontenc найден!'
 
             # 3. Build 100% Static Xfbdev
             git clone https://github.com/keshto/tinyx.git
             cd tinyx
             ./autogen.sh
-            ./configure --prefix=/usr --enable-xfbdev --disable-xvesa \
+            ./configure --prefix=/usr --libdir=/usr/lib --enable-xfbdev --disable-xvesa \
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie'
             
@@ -85,7 +92,7 @@ jobs:
             strip /dist/xeyes.elf
             cd ..
 
-            # 5. СТРОГИЙ КОНТРОЛЬ: если есть INTERP, билд ОБЯЗАН упасть
+            # 5. СТРОГИЙ КОНТРОЛЬ: проверка типа файла
             echo '========================================='
             echo 'ПРОВЕРКА Xfbdev:'
             readelf -h /dist/Xfbdev.elf | grep Type
