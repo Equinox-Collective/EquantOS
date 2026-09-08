@@ -2,6 +2,7 @@ name: Build X11 Dynamic (EXEC type)
 
 on:
   workflow_dispatch:
+    - '.github/workflows/build-x11.yml'
 
 jobs:
   build:
