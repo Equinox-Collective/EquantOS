@@ -22,7 +22,7 @@ jobs:
               freetype-dev freetype-static font-util font-util-dev \
               libpng-dev libpng-static bzip2-dev bzip2-static brotli-dev brotli-static \
               libbsd-dev libbsd-static libmd-dev \
-              libx11-dev libx11-static \
+              libx11-dev libx11-static libxext-dev \
               libxau-dev libxdmcp-dev \
               libxcb-dev libxcb-static \
               xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar xz \
@@ -43,7 +43,7 @@ jobs:
             ./configure --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2'
             make -j\$(nproc) install && cd /build
 
-            # 2. Сборка 100% Static Xfbdev Server (УЖЕ ПРОВЕРЕНО!)
+            # 2. Сборка 100% Static Xfbdev Server (с разрешением дублей ResetFontPrivateIndex)
             git clone https://github.com/keshto/tinyx.git
             cd tinyx
             ./autogen.sh
@@ -65,7 +65,7 @@ jobs:
             strip /dist/Xfbdev.elf
             cd /build
 
-            # 3. Чистый, легковесный xeyes на чистом Xlib (БЕЗ древнего libXt и libICE!)
+            # 3. Чистый, легковесный xeyes на чистом Xlib (ТОЛЬКО libX11, без древнего мусора)
             cat << 'EOF' > pure_xeyes.c
             #include <X11/Xlib.h>
             #include <X11/Xutil.h>
@@ -102,7 +102,7 @@ jobs:
             int main(void) {
                 Display *dpy = XOpenDisplay(NULL);
                 if (!dpy) {
-                    fprintf(stderr, \"pure_xeyes: cannot connect to X server at %s\\n\", XDisplayName(NULL));
+                    fprintf(stderr, "pure_xeyes: cannot connect to X server at %s\n", XDisplayName(NULL));
                     return 1;
                 }
 
@@ -113,7 +113,7 @@ jobs:
                 Window win = XCreateSimpleWindow(dpy, root, 150, 150, w, h, 2,
                                                  BlackPixel(dpy, screen), WhitePixel(dpy, screen));
 
-                XStoreName(dpy, win, \"EquantOS xeyes\");
+                XStoreName(dpy, win, "EquantOS xeyes");
                 XSelectInput(dpy, win, ExposureMask | PointerMotionMask | StructureNotifyMask);
                 XMapWindow(dpy, win);
 
