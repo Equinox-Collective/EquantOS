@@ -1,76 +1,96 @@
-name: Build X11 Dynamic (EXEC type)
+name: Build Static X11 Stack
 
 on:
   workflow_dispatch:
-    - '.github/workflows/build-x11.yml'
+  push:
+    paths:
+      - '.github/workflows/build-x11.yml'
 
 jobs:
-  build:
+  build-x11:
     runs-on: ubuntu-latest
-    container: alpine:3.19
-    
     steps:
-    - name: Install dependencies
-      run: |
-        apk add --no-cache \
-          build-base git meson ninja pkgconf \
-          xorgproto pixman-dev libxfont2-dev libxkbfile-dev \
-          libpciaccess-dev libx11-dev libxext-dev libxmu-dev \
-          libxt-dev libxrender-dev mesa-dev font-util-dev \
-          automake autoconf libtool xorg-macros util-macros
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Build Xfbdev (X.Org Server)
-      run: |
-        git clone --depth 1 https://gitlab.freedesktop.org/xorg/xserver.git
-        cd xserver
-        # b_pie=false отключает PIE для получения Type: EXEC
-        # LDFLAGS="-no-pie" для уверенности на этапе линковки
-        export LDFLAGS="-no-pie"
-        export CFLAGS="-fno-PIE"
-        
-        meson setup build \
-          -Dkdrive=true \
-          -Dxfbdev=true \
-          -Dxephyr=false \
-          -Dxwayland=false \
-          -Dxorg=false \
-          -Dglx=false \
-          -Ddri3=false \
-          -Dudev=false \
-          -Dhal=false \
-          -Dsystemd_logind=false \
-          -Db_pie=false
-          
-        ninja -C build hw/kdrive/fbdev/Xfbdev
-        cp build/hw/kdrive/fbdev/Xfbdev ../Xfbdev.elf
+      - name: Compile Truly Static Xfbdev and xeyes in Alpine Musl
+        run: |
+          docker run --rm -v $(pwd):/dist alpine:3.19 sh -c "
+            set -e
+            apk update
+            apk add --no-cache build-base git zlib-dev zlib-static \
+              freetype-dev freetype-static font-util font-util-dev \
+              libx11-dev libx11-static libxext-dev libxmu-dev libxt-dev libxrender-dev \
+              libxau-dev libxdmcp-dev \
+              libxtst-dev libxi-dev \
+              libxcb-dev libxcb-static libsm-dev libice-dev \
+              xorgproto xtrans autoconf automake libtool util-macros pkgconf bison flex wget tar xz \
+              linux-headers
 
-    - name: Build xeyes
-      run: |
-        git clone --depth 1 https://gitlab.freedesktop.org/xorg/app/xeyes.git
-        cd xeyes
-        ./autogen.sh
-        # Форсируем EXEC тип через LDFLAGS
-        ./configure LDFLAGS="-no-pie" CFLAGS="-fno-PIE"
-        make -j$(nproc)
-        cp xeyes ../xeyes.elf
+            export PKG_CONFIG_PATH='/usr/lib/pkgconfig:/usr/share/pkgconfig:/usr/local/lib/pkgconfig'
 
-    - name: Verify and List Dependencies
-      run: |
-        apk add --no-cache binutils
-        echo "--- Xfbdev Analysis ---"
-        readelf -h Xfbdev.elf | grep Type
-        readelf -l Xfbdev.elf | grep INTERP
-        ldd Xfbdev.elf
-        
-        echo "--- xeyes Analysis ---"
-        readelf -h xeyes.elf | grep Type
-        readelf -l xeyes.elf | grep INTERP
-        ldd xeyes.elf
+            # 1. Сборка статических библиотек X11
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libICE.git
+            cd libICE && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
 
-    - name: Upload Binaries
-      uses: actions/upload-artifact@v4
-      with:
-        name: EquantOS-X11-dynamic
-        path: |
-          Xfbdev.elf
-          xeyes.elf
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libSM.git
+            cd libSM && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXt.git
+            cd libXt && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+
+            git clone --depth 1 https://gitlab.freedesktop.org/xorg/lib/libXi.git
+            cd libXi && ./autogen.sh --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2' && make -j\$(nproc) install && cd ..
+
+            # 2. Сборка статических libfontenc и libXfont2 из официальных tar-релизов X.Org
+            wget https://www.x.org/releases/individual/lib/libfontenc-1.1.8.tar.xz
+            tar -xf libfontenc-1.1.8.tar.xz
+            cd libfontenc-1.1.8
+            ./configure --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2'
+            make -j\$(nproc) install
+            cd ..
+
+            wget https://www.x.org/releases/individual/lib/libXfont2-2.0.7.tar.xz
+            tar -xf libXfont2-2.0.7.tar.xz
+            cd libXfont2-2.0.7
+            ./configure --prefix=/usr --libdir=/usr/lib --enable-static --disable-shared CFLAGS='-static -no-pie -fno-pie -O2'
+            make -j\$(nproc) install
+            cd ..
+
+            # Проверка, что pkg-config видит xfont2 и fontenc
+            echo 'Проверяем pkg-config:'
+            pkg-config --exists xfont2 && echo 'OK: xfont2 найден!'
+            pkg-config --exists fontenc && echo 'OK: fontenc найден!'
+
+            # 3. Build 100% Static Xfbdev
+            git clone https://github.com/keshto/tinyx.git
+            cd tinyx
+            ./autogen.sh
+            ./configure --prefix=/usr --libdir=/usr/lib --enable-xfbdev --disable-xvesa \
+              --enable-static --disable-shared \
+              CFLAGS='-O2 -no-pie -fno-pie'
+            
+            make -j\$(nproc) Xfbdev_LDFLAGS='-all-static' LDFLAGS='-all-static'
+            
+            if [ -f hw/kdrive/fbdev/.libs/Xfbdev ]; then
+              cp hw/kdrive/fbdev/.libs/Xfbdev /dist/Xfbdev.elf
+            else
+              XFBDEV_BIN=\$(find . -type f -name Xfbdev -perm -111 | head -n 1)
+              cp \$XFBDEV_BIN /dist/Xfbdev.elf
+            fi
+            strip /dist/Xfbdev.elf
+            cd ..
+
+            # 4. Build 100% Static xeyes
+            wget https://www.x.org/releases/individual/app/xeyes-1.2.0.tar.gz
+            tar -xzf xeyes-1.2.0.tar.gz
+            cd xeyes-1.2.0
+            ./configure --prefix=/usr --without-present \
+              --enable-static --disable-shared \
+              CFLAGS='-O2 -no-pie -fno-pie' \
+              LIBS='-lSM -lICE -lxcb -lXau -lXdmcp'
+            
+            make -j\$(nproc) LDFLAGS='-all-static'
+            
+            if [ -f .libs/xeyes ]; then
+              cp .libs/xeyes
