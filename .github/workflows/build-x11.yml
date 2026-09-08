@@ -69,9 +69,10 @@ jobs:
               --enable-static --disable-shared \
               CFLAGS='-O2 -no-pie -fno-pie'
             
+            # Добавляем -Wl,--allow-multiple-definition для разрешения дублей функций шрифтов
             make -j\$(nproc) \
-              Xfbdev_LDFLAGS='-all-static' \
-              LDFLAGS='-all-static' \
+              Xfbdev_LDFLAGS='-all-static -Wl,--allow-multiple-definition' \
+              LDFLAGS='-all-static -Wl,--allow-multiple-definition' \
               LIBS='-lfreetype -lpng -lbz2 -lbrotlidec -lbrotlicommon -lbsd -lmd -lz -lm'
             
             if [ -f hw/kdrive/fbdev/.libs/Xfbdev ]; then
@@ -92,7 +93,7 @@ jobs:
               CFLAGS='-O2 -no-pie -fno-pie' \
               LIBS='-lSM -lICE -lxcb -lXau -lXdmcp -lbsd -lmd'
             
-            make -j\$(nproc) LDFLAGS='-all-static'
+            make -j\$(nproc) LDFLAGS='-all-static -Wl,--allow-multiple-definition'
             
             if [ -f .libs/xeyes ]; then
               cp .libs/xeyes /dist/xeyes.elf
