@@ -103,10 +103,13 @@
 #define SYS_MADVISE             28
 #define SYS_SHMGET              29
 #define SYS_SHMAT               30
+#define SYS_SHMCTL              31
 #define SYS_DUP                 32
 #define SYS_DUP2                33
 #define SYS_PAUSE               34
 #define SYS_NANOSLEEP           35
+#define SYS_GETITIMER           36
+#define SYS_SETITIMER           38
 #define SYS_GETPID              39
 #define SYS_SOCKET              41
 #define SYS_CONNECT             42

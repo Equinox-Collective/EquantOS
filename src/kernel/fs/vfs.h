@@ -10,7 +10,10 @@
 #define FS_MOUNTPOINT  0x08
 #define FS_SOCKET      0x10
 #define FBIOGET_VSCREENINFO 0x4600
+#define FBIOPUT_VSCREENINFO 0x4601
 #define FBIOGET_FSCREENINFO 0x4602
+#define FBIOPAN_DISPLAY     0x4606
+#define FBIOBLANK           0x4611
 
 // Standard POSIX File Open & Access Flags
 #ifndef O_RDONLY
@@ -30,17 +33,59 @@
 struct vfs_node;
 
 struct fb_fix_screeninfo {
-    uint64_t smem_start; // Physical address of framebuffer
-    uint32_t smem_len;   // Total memory size in bytes
-    uint32_t type;
-    uint32_t visual;
-    uint32_t line_length;// Pitch (bytes per scanline)
+    char id[16];             // Identification string (e.g. "fb0")
+    uint64_t smem_start;     // Physical address of framebuffer
+    uint32_t smem_len;       // Total size in bytes
+    uint32_t type;           // FB_TYPE_PACKED_PIXELS (0)
+    uint32_t type_aux;
+    uint32_t visual;         // FB_VISUAL_TRUECOLOR (2)
+    uint16_t xpanstep;
+    uint16_t ypanstep;
+    uint16_t ywrapstep;
+    uint32_t line_length;    // Pitch (bytes per scanline)
+    uint64_t mmio_start;
+    uint32_t mmio_len;
+    uint32_t accel;
+    uint16_t capabilities;
+    uint16_t reserved[2];
+};
+
+struct fb_bitfield {
+    uint32_t offset;    // Beginning of bitfield
+    uint32_t length;    // Length of bitfield
+    uint32_t msb_right; // != 0 : Most significant bit is right
 };
 
 struct fb_var_screeninfo {
-    uint32_t xres;       // Visible resolution width
-    uint32_t yres;       // Visible resolution height
-    uint32_t bits_per_pixel; // BPP (typically 32)
+    uint32_t xres;           // Visible resolution width
+    uint32_t yres;           // Visible resolution height
+    uint32_t xres_virtual;   // Virtual resolution width
+    uint32_t yres_virtual;   // Virtual resolution height
+    uint32_t xoffset;        // Offset from virtual to visible
+    uint32_t yoffset;
+    uint32_t bits_per_pixel; // 32 bpp
+    uint32_t grayscale;      // 0 = color, 1 = grayscale
+    struct fb_bitfield red;  // Bitfield in fb mem for Red
+    struct fb_bitfield green;// Bitfield for Green
+    struct fb_bitfield blue; // Bitfield for Blue
+    struct fb_bitfield transp;// Transparency / Alpha
+    uint32_t nonstd;
+    uint32_t activate;
+    uint32_t height;         // Height in mm
+    uint32_t width;          // Width in mm
+    uint32_t accel_flags;
+    uint32_t pixclock;
+    uint32_t left_margin;
+    uint32_t right_margin;
+    uint32_t upper_margin;
+    uint32_t lower_margin;
+    uint32_t hsync_len;
+    uint32_t vsync_len;
+    uint32_t sync;
+    uint32_t vmode;
+    uint32_t rotate;
+    uint32_t colorspace;
+    uint32_t reserved[4];
 };
 
 typedef struct vfs_file_operations {

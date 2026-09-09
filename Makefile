@@ -146,7 +146,8 @@ ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/equi.elf \
                  build/iso/kdiag.elf \
                  build/iso/Xfbdev.elf \
-                 build/iso/xeyes.elf
+                 build/iso/xeyes.elf \
+				 build/iso/start.sh 
 
 # ==============================================================================
 # Master Targets
@@ -245,6 +246,11 @@ build/iso/xeyes.elf: res/xeyes.elf
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/xeyes.elf,$@)
+
+build/iso/start.sh: res/start.sh
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/start.sh,$@)
 
 # Auto-Dependency Inclusion
 -include $(DEP_FILES)

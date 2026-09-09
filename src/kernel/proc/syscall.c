@@ -12,6 +12,7 @@
 #include "../../equterm/term.h"
 #include "../misc/timer.h"
 #include "string.h"
+#include "../drivers/tty/tty.h"
 #include "stdio.h"
 #include "../fs/vfs.h"
 #include "../fs/ramfs.h"
@@ -19,6 +20,7 @@
 #include "../drivers/tty/tty.h"
 #include "../../equterm/shell.h"
 #include "../ipc/af_unix.h"
+#include "../ipc/shm.h"
 
 __attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
 
@@ -32,6 +34,12 @@ static uint64_t mmap_virtual_base = 0x700000000000ULL;
 
 void linux_syscall_handler(void *regs_ptr) {
     syscall_handler(regs_ptr);
+}
+
+extern bool tty_has_char(void);
+
+static bool tty_has_input(void) {
+    return tty_has_char();
 }
 
 // ============================================================================
@@ -79,10 +87,6 @@ static int alloc_fd(vfs_node_t *node, uint32_t flags) {
         }
     }
     return -EMFILE;
-}
-
-static bool tty_has_input(void) {
-    return serial_received(COM1) || input_has_events();
 }
 
 // ============================================================================
@@ -133,6 +137,18 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
 
     vfs_node_t *node = current_task->process->files[fd];
     if (!node || !node->ops || !node->ops->read) return -EBADF;
+
+    // Handle O_NONBLOCK for terminals, consoles, and input devices
+    bool nonblock = (current_task->process->file_flags[fd] & O_NONBLOCK) != 0;
+    if (nonblock) {
+        if (strncmp(node->name, "tty", 3) == 0 || 
+            strcmp(node->name, "input0") == 0 || 
+            strcmp(node->name, "mouse") == 0) {
+            if (!tty_has_input()) {
+                return -EAGAIN; // Tell Xfbdev: no keys pending, keep going!
+            }
+        }
+    }
 
     uint64_t offset = current_task->process->file_offsets[fd];
     int64_t bytes = vfs_read(node, offset, count, (uint8_t *)buf);
@@ -413,7 +429,24 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
             *(int *)arg = 1; // K_XLATE
             return 0;
         }
+         if (req == 0x4B46 || req == 0x4B47) { // KDGKBENT / KDSKBENT
+            if (!arg) return -EFAULT;
+            
+            struct {
+                unsigned char kb_table;
+                unsigned char kb_index;
+                unsigned short kb_value;
+            } *kbe = arg;
 
+            // Only support first 4 basic tables (plain, shift, altgr, ctrl) and 128 keys
+            if (kbe->kb_table >= 4 || kbe->kb_index >= 128) {
+                return -EINVAL; // Tells Xfbdev to stop looping!
+            }
+
+            // Return basic US keymap or let it break cleanly
+            kbe->kb_value = 0;
+            return -EINVAL; // Returning -EINVAL forces Xfbdev to fall back to its internal built-in keymap!
+        }
         // 2. Window Size and Process Groups
         if (req == TIOCGWINSZ && arg) {
             struct winsize *ws = (struct winsize *)arg;
@@ -526,6 +559,8 @@ static void fill_linux_stat(vfs_node_t *node, struct linux_stat *statbuf) {
 
     if (node->flags & FS_DIRECTORY) {
         statbuf->st_mode = S_IFDIR | 0755;
+    } else if (node->flags & FS_SOCKET) {
+        statbuf->st_mode = S_IFSOCK | 0777; // Will show 's' in ls -la!
     } else {
         statbuf->st_mode = S_IFREG | 0777;
     }
@@ -698,7 +733,10 @@ static int64_t sys_getdents64_handler(int fd, void *dirp, size_t count) {
         d->d_ino = child->inode ? child->inode : (idx + 1);
         d->d_off = idx + 1;
         d->d_reclen = (unsigned short)rec_len;
-        d->d_type = (child->flags & FS_DIRECTORY) ? 4 : 8;
+        
+        // 4 = Directory (d), 12 = Socket (s), 8 = Regular file (-)
+        d->d_type = (child->flags & FS_DIRECTORY) ? 4 : ((child->flags & FS_SOCKET) ? 12 : 8);
+        
         memcpy(d->d_name, child->name, name_len + 1);
 
         written += rec_len;
@@ -788,6 +826,7 @@ static int64_t sys_brk_handler(uint64_t new_brk) {
 
 static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flags, int fd, int64_t offset) {
     if (length == 0) return -EINVAL;
+    if (offset < 0 || (offset & (PAGE_SIZE - 1)) != 0) return -EINVAL;
 
     size_t page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
     size_t aligned_len = page_count * PAGE_SIZE;
@@ -798,36 +837,55 @@ static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flag
         mmap_virtual_base += aligned_len;
     }
 
-    // Check if mapping a device node (e.g. /dev/fb0)
-    if (fd >= 0 && fd < MAX_OPEN_FILES && current_task->process->files[fd]) {
-        vfs_node_t *node = current_task->process->files[fd];
-        if (node->ops && node->ops->mmap) {
-            return node->ops->mmap(node, virt_addr, length, prot, flags, offset);
-        }
-    }
-
-    // Default Anonymous/File Paging Logic
     if (!current_task || !current_task->process) return -EINVAL;
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
 
-    for (size_t i = 0; i < page_count; i++) {
-        void *phys = pmm_alloc();
-        if (!phys) return -ENOMEM;
-        memset((void *)VIRT((uint64_t)phys), 0, PAGE_SIZE);
+    // CASE 1: Device Memory Mapping (e.g. /dev/fb0 via MAP_SHARED)
+    if (fd >= 0 && fd < MAX_OPEN_FILES && current_task->process->files[fd]) {
+        vfs_node_t *node = current_task->process->files[fd];
+        if (node->ops && node->ops->mmap) {
+            return node->ops->mmap(node, virt_addr, aligned_len, prot, flags, offset);
+        }
+    }
 
-        if (fd >= 0 && fd < MAX_OPEN_FILES && current_task->process->files[fd]) {
-            vfs_node_t *node = current_task->process->files[fd];
+    // CASE 2: Anonymous Memory Mapping (MAP_ANONYMOUS)
+    if (flags & MAP_ANONYMOUS) {
+        for (size_t i = 0; i < page_count; i++) {
+            void *phys = pmm_alloc();
+            if (!phys) return -ENOMEM;
+            memset((void *)VIRT((uint64_t)phys), 0, PAGE_SIZE);
+
+            uint64_t pte_flags = PTE_PRESENT | PTE_USER;
+            if (prot & PROT_WRITE) pte_flags |= PTE_WRITABLE;
+
+            vmm_map(pml4, virt_addr + (i * PAGE_SIZE), (uint64_t)phys, pte_flags);
+        }
+        return (int64_t)virt_addr;
+    }
+
+    // CASE 3: Regular File Mapping (MAP_PRIVATE or MAP_SHARED with file node)
+    if (fd >= 0 && fd < MAX_OPEN_FILES && current_task->process->files[fd]) {
+        vfs_node_t *node = current_task->process->files[fd];
+        for (size_t i = 0; i < page_count; i++) {
+            void *phys = pmm_alloc();
+            if (!phys) return -ENOMEM;
+            memset((void *)VIRT((uint64_t)phys), 0, PAGE_SIZE);
+
             uint64_t file_pos = (uint64_t)offset + (i * PAGE_SIZE);
             if (file_pos < node->length) {
                 uint64_t chunk = (node->length - file_pos > PAGE_SIZE) ? PAGE_SIZE : (node->length - file_pos);
                 vfs_read(node, file_pos, chunk, (uint8_t *)VIRT((uint64_t)phys));
             }
-        }
 
-        vmm_map(pml4, virt_addr + (i * PAGE_SIZE), (uint64_t)phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+            uint64_t pte_flags = PTE_PRESENT | PTE_USER;
+            if (prot & PROT_WRITE) pte_flags |= PTE_WRITABLE;
+
+            vmm_map(pml4, virt_addr + (i * PAGE_SIZE), (uint64_t)phys, pte_flags);
+        }
+        return (int64_t)virt_addr;
     }
 
-    return (int64_t)virt_addr;
+    return -EINVAL;
 }
 
 static int64_t sys_munmap_handler(uint64_t addr, size_t length) {
@@ -1298,27 +1356,165 @@ static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int tim
     return ready;
 }
 
+static int select_scan_fds(int nfds, uint8_t *rfds, uint8_t *wfds) {
+    int ready = 0;
+    if (nfds > MAX_OPEN_FILES) nfds = MAX_OPEN_FILES;
+
+    for (int fd = 0; fd < nfds; fd++) {
+        int byte = fd / 8;
+        int bit = fd % 8;
+
+        // Check Read Readiness
+        if (rfds && (rfds[byte] & (1 << bit))) {
+            bool can_read = false;
+            if (fd == 0 && tty_has_input()) {
+                can_read = true;
+            }
+            if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
+                vfs_node_t *node = current_task->process->files[fd];
+                if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
+                    can_read = unix_socket_can_read((unix_socket_t *)node->ptr);
+                }
+            }
+            if (can_read) {
+                ready++;
+            } else {
+                rfds[byte] &= ~(1 << bit); // Clear bit if not ready
+            }
+        }
+
+        // Check Write Readiness
+        if (wfds && (wfds[byte] & (1 << bit))) {
+            bool can_write = false;
+            if (fd == 1 || fd == 2) {
+                can_write = true;
+            }
+            if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
+                vfs_node_t *node = current_task->process->files[fd];
+                if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
+                    can_write = unix_socket_can_write((unix_socket_t *)node->ptr);
+                }
+            }
+            if (can_write) {
+                ready++;
+            } else {
+                wfds[byte] &= ~(1 << bit);
+            }
+        }
+    }
+    return ready;
+}
+
 static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, void *exceptfds, 
                                    const struct linux_timespec *timeout, const void *sigmask) {
-    (void)writefds; (void)exceptfds; (void)sigmask;
-    uint8_t *rfds = (uint8_t *)readfds;
+    (void)exceptfds; (void)sigmask;
+    if (nfds < 0) return -EINVAL;
+    if (nfds > MAX_OPEN_FILES) nfds = MAX_OPEN_FILES;
 
-    if (rfds && (rfds[0] & 1) && tty_has_input()) {
-        return 1;
-    }
+    uint8_t *rfds = (uint8_t *)readfds;
+    uint8_t *wfds = (uint8_t *)writefds;
+
+    int bytes = (nfds + 7) / 8;
+    uint8_t orig_rfds[MAX_OPEN_FILES / 8 + 1];
+    uint8_t orig_wfds[MAX_OPEN_FILES / 8 + 1];
+    memset(orig_rfds, 0, sizeof(orig_rfds));
+    memset(orig_wfds, 0, sizeof(orig_wfds));
+
+    // Preserve original bitmasks so polling iterations don't wipe them!
+    if (rfds) memcpy(orig_rfds, rfds, bytes);
+    if (wfds) memcpy(orig_wfds, wfds, bytes);
 
     uint64_t start_tick = tick;
     uint64_t max_ticks = (timeout == NULL) ? (uint64_t)-1 : (timeout->tv_sec * 100 + timeout->tv_nsec / 10000000ULL);
 
-    while (1) {
-        if (tty_has_input()) {
-            if (rfds) rfds[0] = 1;
-            return 1;
+    for (;;) {
+        int ready = 0;
+
+        for (int fd = 0; fd < nfds; fd++) {
+            int byte = fd / 8;
+            int bit = fd % 8;
+
+            // Check Read Descriptors
+            if (rfds && (orig_rfds[byte] & (1 << bit))) {
+                bool can_read = false;
+                if (fd == 0 && tty_has_input()) {
+                    can_read = true;
+                }
+                if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
+                    vfs_node_t *node = current_task->process->files[fd];
+                    if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
+                        can_read = unix_socket_can_read((unix_socket_t *)node->ptr);
+                    }
+                }
+                if (can_read) {
+                    ready++;
+                }
+            }
+
+            // Check Write Descriptors
+            if (wfds && (orig_wfds[byte] & (1 << bit))) {
+                bool can_write = false;
+                if (fd == 1 || fd == 2) {
+                    can_write = true;
+                }
+                if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
+                    vfs_node_t *node = current_task->process->files[fd];
+                    if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
+                        can_write = unix_socket_can_write((unix_socket_t *)node->ptr);
+                    }
+                }
+                if (can_write) {
+                    ready++;
+                }
+            }
         }
-        if (timeout != NULL && (tick - start_tick) >= max_ticks) {
-            if (rfds) rfds[0] = 0;
+
+        // If events are ready, finalize output bitmasks and return
+        if (ready > 0) {
+            for (int fd = 0; fd < nfds; fd++) {
+                int byte = fd / 8;
+                int bit = fd % 8;
+
+                if (rfds && (orig_rfds[byte] & (1 << bit))) {
+                    bool can_read = (fd == 0 && tty_has_input());
+                    if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
+                        vfs_node_t *node = current_task->process->files[fd];
+                        if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
+                            can_read = unix_socket_can_read((unix_socket_t *)node->ptr);
+                        }
+                    }
+                    if (can_read) rfds[byte] |= (1 << bit);
+                    else rfds[byte] &= ~(1 << bit);
+                }
+
+                if (wfds && (orig_wfds[byte] & (1 << bit))) {
+                    bool can_write = (fd == 1 || fd == 2);
+                    if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
+                        vfs_node_t *node = current_task->process->files[fd];
+                        if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
+                            can_write = unix_socket_can_write((unix_socket_t *)node->ptr);
+                        }
+                    }
+                    if (can_write) wfds[byte] |= (1 << bit);
+                    else wfds[byte] &= ~(1 << bit);
+                }
+            }
+            return ready;
+        }
+
+        // Timeout checks
+        if (timeout && timeout->tv_sec == 0 && timeout->tv_nsec == 0) {
+            if (rfds) memset(rfds, 0, bytes);
+            if (wfds) memset(wfds, 0, bytes);
             return 0;
         }
+
+        if (timeout != NULL && (tick - start_tick) >= max_ticks) {
+            if (rfds) memset(rfds, 0, bytes);
+            if (wfds) memset(wfds, 0, bytes);
+            return 0;
+        }
+
         __asm__ volatile("sti; pause");
         sched_yield();
     }
@@ -1599,10 +1795,105 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
     return 0;
 }
 
+static const char *get_syscall_name(uint64_t no) {
+    switch (no) {
+        case 0: return "read";
+        case 1: return "write";
+        case 2: return "open";
+        case 3: return "close";
+        case 4: return "stat";
+        case 5: return "fstat";
+        case 6: return "lstat";
+        case 7: return "poll";
+        case 8: return "lseek";
+        case 9: return "mmap";
+        case 10: return "mprotect";
+        case 11: return "munmap";
+        case 12: return "brk";
+        case 13: return "rt_sigaction";
+        case 14: return "rt_sigprocmask";
+        case 15: return "rt_sigreturn";
+        case 16: return "ioctl";
+        case 17: return "pread64";
+        case 18: return "pwrite64";
+        case 19: return "readv";
+        case 20: return "writev";
+        case 21: return "access";
+        case 22: return "pipe";
+        case 23: return "select";
+        case 24: return "sched_yield";
+        case 25: return "mremap";
+        case 29: return "shmget";
+        case 30: return "shmat";
+        case 31: return "shmctl";
+        case 32: return "dup";
+        case 33: return "dup2";
+        case 35: return "nanosleep";
+        case 36: return "getitimer";
+        case 38: return "setitimer";
+        case 39: return "getpid";
+        case 41: return "socket";
+        case 42: return "connect";
+        case 43: return "accept";
+        case 44: return "sendto";
+        case 45: return "recvfrom";
+        case 49: return "bind";
+        case 50: return "listen";
+        case 56: return "clone";
+        case 57: return "fork";
+        case 59: return "execve";
+        case 60: return "exit";
+        case 61: return "wait4";
+        case 62: return "kill";
+        case 63: return "uname";
+        case 67: return "shmdt";
+        case 72: return "fcntl";
+        case 79: return "getcwd";
+        case 80: return "chdir";
+        case 83: return "mkdir";
+        case 86: return "link";
+        case 87: return "unlink";
+        case 96: return "gettimeofday";
+        case 97: return "getrlimit";
+        case 98: return "getrusage";
+        case 99: return "sysinfo";
+        case 158: return "arch_prctl";
+        case 186: return "gettid";
+        case 202: return "futex";
+        case 217: return "getdents64";
+        case 218: return "set_tid_address";
+        case 228: return "clock_gettime";
+        case 231: return "exit_group";
+        case 257: return "openat";
+        case 258: return "mkdirat";
+        case 262: return "newfstatat";
+        case 263: return "unlinkat";
+        case 265: return "linkat";
+        case 268: return "fchmodat";
+        case 269: return "faccessat";
+        case 270: return "pselect6";
+        case 292: return "dup3";
+        case 293: return "pipe2";
+        case 302: return "prlimit64";
+        default: return "unknown";
+    }
+}
+
 void syscall_handler(void *regs_ptr) {
     syscall_regs_t *regs = (syscall_regs_t *)regs_ptr;
     uint64_t syscall_no = regs->rax;
     int64_t ret = -ENOSYS;
+
+    uint32_t pid = (current_task && current_task->process) ? (uint32_t)current_task->process->pid : 0;
+    const char *name = get_syscall_name(syscall_no);
+
+    // 1. LOG ENTRY (видно ДО того, как сисколл зависнет внутри!)
+    bool quiet = (syscall_no == 16 && regs->rsi == 0x4B46);
+
+    if (!quiet) {
+        printf("[STRACE %u] > %s(%d) args=(0x%llx, 0x%llx, 0x%llx)\n",
+               pid, name, (int)syscall_no, regs->rdi, regs->rsi, regs->rdx);
+    }
 
     switch (syscall_no) {
         case SYS_READ:
@@ -1725,6 +2016,10 @@ void syscall_handler(void *regs_ptr) {
         case SYS_SENDTO:
             ret = sys_write_handler((int)regs->rdi, (const void *)regs->rsi, (size_t)regs->rdx);
             break;
+        case SYS_GETITIMER:
+        case SYS_SETITIMER:
+            ret = 0; // Pretend interval timer is set
+            break;
         case SYS_RECVFROM:
             ret = sys_read_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
             break;
@@ -1810,6 +2105,18 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_TIMES:
             ret = sys_times_handler((struct tms *)regs->rdi);
+            break;
+        case SYS_SHMGET:
+            ret = sys_shmget_handler((uint64_t)regs->rdi, (size_t)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_SHMAT:
+            ret = sys_shmat_handler((int)regs->rdi, (uint64_t)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_SHMDT:
+            ret = sys_shmdt_handler((uint64_t)regs->rdi);
+            break;
+        case SYS_SHMCTL:
+            ret = sys_shmctl_handler((int)regs->rdi, (int)regs->rsi, (void *)regs->rdx);
             break;
         case SYS_GETUID:
         case SYS_GETEUID:
@@ -1914,6 +2221,11 @@ void syscall_handler(void *regs_ptr) {
     }
 
     regs->rax = (uint64_t)ret;
+
+    if (!quiet) {
+        printf("[STRACE %u] < %s = %lld (0x%llx)\n",
+               pid, name, (long long)ret, (unsigned long long)ret);
+    }
 }
 
 void init_syscalls(void) {

@@ -72,33 +72,13 @@ char input_event_to_ascii(input_event_t ev) {
         return 0;
     }
 
-    // Translate Hardware Arrow Keys into standard VT100 / ANSI Escape Sequences for Bash Readline!
-    if (ev.code == KEY_UP) {
-        queue_escape_seq("\033[A");
-        return 0;
-    }
-    if (ev.code == KEY_DOWN) {
-        queue_escape_seq("\033[B");
-        return 0;
-    }
-    if (ev.code == KEY_RIGHT) {
-        queue_escape_seq("\033[C");
-        return 0;
-    }
-    if (ev.code == KEY_LEFT) {
-        queue_escape_seq("\033[D");
-        return 0;
-    }
-    if (ev.code == KEY_HOME) {
-        queue_escape_seq("\033[H");
-        return 0;
-    }
-    if (ev.code == KEY_END) {
-        queue_escape_seq("\033[F");
-        return 0;
-    }
+    if (ev.code == KEY_UP)    { queue_escape_seq("\033[A"); return 0; }
+    if (ev.code == KEY_DOWN)  { queue_escape_seq("\033[B"); return 0; }
+    if (ev.code == KEY_RIGHT) { queue_escape_seq("\033[C"); return 0; }
+    if (ev.code == KEY_LEFT)  { queue_escape_seq("\033[D"); return 0; }
+    if (ev.code == KEY_HOME)  { queue_escape_seq("\033[H"); return 0; }
+    if (ev.code == KEY_END)   { queue_escape_seq("\033[F"); return 0; }
 
-    // Handle Ctrl key combinations (Ctrl+C = 0x03, Ctrl+D = 0x04)
     if (ctrl_held && ev.code < 128) {
         char base = keymap_ascii_lower[ev.code];
         if (base >= 'a' && base <= 'z') {
@@ -113,35 +93,47 @@ char input_event_to_ascii(input_event_t ev) {
     return 0;
 }
 
-char tty_getchar(void) {
-    // If pending escape sequence bytes exist in queue (e.g. \033[A), emit them first
+// Check if any character is immediately available to read without blocking
+bool tty_has_char(void) {
+    if (escape_seq_pos < escape_seq_len) return true;
+    if (serial_received(COM1)) return true;
+    return input_has_events();
+}
+
+// Non-blocking character getter: returns -1 immediately if buffer is empty
+int tty_getchar_nonblock(void) {
     if (escape_seq_pos < escape_seq_len) {
-        return escape_seq_buf[escape_seq_pos++];
+        return (unsigned char)escape_seq_buf[escape_seq_pos++];
+    }
+
+    if (serial_received(COM1)) {
+        char c = serial_getchar(COM1);
+        if (c == '\r') c = '\n';
+        return (unsigned char)c;
     }
 
     input_event_t ev;
-
-    for (;;) {
-        // 1. Check Serial Port (COM1)
-        if (serial_received(COM1)) {
-            char c = serial_getchar(COM1);
+    while (input_pop_event(&ev)) {
+        char c = input_event_to_ascii(ev);
+        if (escape_seq_pos < escape_seq_len) {
+            return (unsigned char)escape_seq_buf[escape_seq_pos++];
+        }
+        if (c != 0) {
             if (c == '\r') c = '\n';
-            return c;
+            return (unsigned char)c;
         }
+    }
 
-        // 2. Check PS/2 & USB Keyboard
-        if (input_pop_event(&ev)) {
-            char c = input_event_to_ascii(ev);
-            if (escape_seq_pos < escape_seq_len) {
-                return escape_seq_buf[escape_seq_pos++];
-            }
-            if (c != 0) {
-                if (c == '\r') c = '\n';
-                return c;
-            }
+    return -1; // No character ready
+}
+
+// Standard blocking character getter for Bash and shell
+char tty_getchar(void) {
+    for (;;) {
+        int c = tty_getchar_nonblock();
+        if (c != -1) {
+            return (char)c;
         }
-
-        // Put CPU to sleep until next hardware interrupt (Zero CPU waste!)
         __asm__ volatile("sti; hlt");
     }
 }

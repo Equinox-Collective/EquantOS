@@ -33,6 +33,10 @@ typedef struct {
 
 void tty_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch);
 void tty_switch(int index);
+// In src/kernel/drivers/tty/tty.h:
+char tty_getchar(void);
+int  tty_getchar_nonblock(void);
+bool tty_has_char(void);
 tty_t *tty_get_current(void);
 
 void tty_putchar(char c);

@@ -123,22 +123,47 @@ static int dev_fb_ioctl(vfs_node_t *node, uint64_t req, void *arg) {
     (void)node;
     if (!kernel_fb || !arg) return -EINVAL;
 
-    if (req == FBIOGET_VSCREENINFO) {
+    // Handle both GET and PUT video mode queries
+    if (req == FBIOGET_VSCREENINFO || req == FBIOPUT_VSCREENINFO) {
         struct fb_var_screeninfo *var = (struct fb_var_screeninfo *)arg;
-        var->xres = kernel_fb->width;
-        var->yres = kernel_fb->height;
-        var->bits_per_pixel = kernel_fb->bpp;
-        return 0;
+        if (req == FBIOGET_VSCREENINFO) {
+            memset(var, 0, sizeof(struct fb_var_screeninfo));
+            var->xres = (uint32_t)kernel_fb->width;
+            var->yres = (uint32_t)kernel_fb->height;
+            var->xres_virtual = (uint32_t)kernel_fb->width;
+            var->yres_virtual = (uint32_t)kernel_fb->height;
+            var->xoffset = 0;
+            var->yoffset = 0;
+            var->bits_per_pixel = (uint32_t)kernel_fb->bpp;
+            
+            // Standard 32-bit ARGB TrueColor masks (Crucial for Kdrive visual initialization!)
+            var->red.offset = 16;
+            var->red.length = 8;
+            var->green.offset = 8;
+            var->green.length = 8;
+            var->blue.offset = 0;
+            var->blue.length = 8;
+            var->transp.offset = 24;
+            var->transp.length = 8;
+        }
+        return 0; // Mode confirmed successfully!
     }
 
     if (req == FBIOGET_FSCREENINFO) {
         struct fb_fix_screeninfo *fix = (struct fb_fix_screeninfo *)arg;
         memset(fix, 0, sizeof(struct fb_fix_screeninfo));
+        
+        strncpy(fix->id, "fb0", sizeof(fix->id) - 1);
         fix->smem_start = (uint64_t)kernel_fb->address - hhdm_offset;
-        fix->smem_len   = kernel_fb->pitch * kernel_fb->height;
-        fix->line_length = kernel_fb->pitch;
-        fix->type       = 0;
-        fix->visual     = 2; // TrueColor
+        fix->smem_len   = (uint32_t)(kernel_fb->pitch * kernel_fb->height);
+        fix->type       = 0; // FB_TYPE_PACKED_PIXELS
+        fix->visual     = 2; // FB_VISUAL_TRUECOLOR
+        fix->line_length = (uint32_t)kernel_fb->pitch;
+        return 0;
+    }
+
+    // Panning & Screen Blanking ioctls
+    if (req == FBIOPAN_DISPLAY || req == FBIOBLANK) {
         return 0;
     }
 
@@ -146,21 +171,26 @@ static int dev_fb_ioctl(vfs_node_t *node, uint64_t req, void *arg) {
 }
 
 static int64_t dev_fb_mmap(vfs_node_t *node, uint64_t addr, size_t length, int prot, int flags, int64_t offset) {
-    (void)node; (void)prot; (void)flags; (void)offset;
+    (void)node; (void)prot; (void)flags;
     if (!kernel_fb) return -ENODEV;
     if (!current_task || !current_task->process) return -EINVAL;
 
-    // Convert Limine HHDM virtual framebuffer address to raw physical address
+    // Physical base address of the video framebuffer
     uint64_t fb_phys = (uint64_t)kernel_fb->address - hhdm_offset;
-    uint32_t total_size = kernel_fb->pitch * kernel_fb->height;
-    if (length > total_size) length = total_size;
+    uint64_t total_size = (uint64_t)kernel_fb->pitch * kernel_fb->height;
+
+    // If application requests full buffer or more, map the whole screen
+    if (length == 0 || length > total_size) {
+        length = total_size;
+    }
 
     size_t page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
 
-    // Map physical video memory directly into user virtual space (Write-Combining / Uncached)
+    // Map physical video memory directly into user address space
     for (size_t i = 0; i < page_count; i++) {
-        vmm_map(pml4, addr + (i * PAGE_SIZE), fb_phys + (i * PAGE_SIZE),
+        uint64_t p_addr = fb_phys + (uint64_t)offset + (i * PAGE_SIZE);
+        vmm_map(pml4, addr + (i * PAGE_SIZE), p_addr,
                 PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_PCD | PTE_PWT);
     }
 
@@ -176,9 +206,32 @@ static vfs_file_operations_t fb_fops = {
 
 // Handler for /dev/tty read/write
 static int64_t dev_tty_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    (void)node; (void)offset;
+    (void)offset;
     if (size == 0 || !buffer) return 0;
     
+    // Check if non-blocking mode is set on this descriptor
+    bool nonblock = false;
+    if (current_task && current_task->process) {
+        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+            if (current_task->process->files[i] == node) {
+                if (current_task->process->file_flags[i] & O_NONBLOCK) {
+                    nonblock = true;
+                }
+                break;
+            }
+        }
+    }
+
+    if (nonblock) {
+        int c = tty_getchar_nonblock();
+        if (c == -1) {
+            return -EAGAIN; // Non-blocking: buffer empty, return immediately!
+        }
+        buffer[0] = (uint8_t)c;
+        return 1;
+    }
+
+    // Standard blocking read for Bash
     char c = tty_getchar();
     if (c == 0x04) return 0; // EOF
     buffer[0] = (uint8_t)c;
@@ -195,16 +248,38 @@ static int64_t devfs_tty_read(vfs_node_t *node, uint64_t offset, uint64_t size, 
     (void)node; (void)offset;
     if (!buffer || size == 0) return 0;
 
+    bool nonblock = false;
+    if (current_task && current_task->process) {
+        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+            if (current_task->process->files[i] == node) {
+                if (current_task->process->file_flags[i] & O_NONBLOCK) {
+                    nonblock = true;
+                }
+                break;
+            }
+        }
+    }
+
+    if (nonblock) {
+        size_t read_bytes = 0;
+        while (read_bytes < size) {
+            int c = tty_getchar_nonblock();
+            if (c == -1) {
+                if (read_bytes == 0) return -EAGAIN;
+                break;
+            }
+            buffer[read_bytes++] = (uint8_t)c;
+        }
+        return (int64_t)read_bytes;
+    }
+
+    // Normal blocking read for Bash
     size_t bytes_read = 0;
     while (bytes_read < size) {
         char c = tty_getchar();
-        if (c == 0x04) { // Ctrl+D (EOF)
-            break;
-        }
+        if (c == 0x04) break;
         buffer[bytes_read++] = (uint8_t)c;
-        if (c == '\n') {
-            break;
-        }
+        if (c == '\n') break;
     }
     return (int64_t)bytes_read;
 }

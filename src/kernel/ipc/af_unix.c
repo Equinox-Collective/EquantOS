@@ -64,10 +64,11 @@ int unix_socket_bind(unix_socket_t *sock, const struct sockaddr_un *addr) {
     vfs_node_t *parent_dir = vfs_open(path_copy[0] == '\0' ? "/" : path_copy, 0);
     if (!parent_dir) return -ENOENT;
 
-    // Create socket node in VFS with S_IFSOCK flag
-    vfs_node_t *sock_node = vfs_create(parent_dir, filename, 0140777); // S_IFSOCK | 0777
+    // Create socket node in VFS with explicit FS_SOCKET flag
+    vfs_node_t *sock_node = vfs_create(parent_dir, filename, FS_SOCKET | 0777);
     if (!sock_node) return -EIO;
 
+    sock_node->flags = FS_SOCKET; // Guarantee not marked as directory
     sock_node->ops = &unix_socket_vfs_ops;
     sock_node->ptr = (vfs_node_t *)sock;
 
