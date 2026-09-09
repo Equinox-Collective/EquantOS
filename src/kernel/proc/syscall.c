@@ -146,20 +146,26 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
-    if (!node || !node->ops || !node->ops->read) return -EBADF;
+    if (!node || !node->ops) return -EBADF;
 
-    // Handle O_NONBLOCK for terminals, consoles, and input devices
     bool nonblock = (current_task->process->file_flags[fd] & O_NONBLOCK) != 0;
+
+    // Fast-path: AF_UNIX sockets with explicit non-blocking awareness
+    if (node->ops == &unix_socket_vfs_ops && node->ptr) {
+        return unix_socket_read((unix_socket_t *)node->ptr, buf, count, nonblock);
+    }
+
     if (nonblock) {
         if (strncmp(node->name, "tty", 3) == 0 || 
             strcmp(node->name, "input0") == 0 || 
             strcmp(node->name, "mouse") == 0) {
             if (!tty_has_input()) {
-                return -EAGAIN; // Tell Xfbdev: no keys pending, keep going!
+                return -EAGAIN;
             }
         }
     }
 
+    if (!node->ops->read) return -EBADF;
     uint64_t offset = current_task->process->file_offsets[fd];
     int64_t bytes = vfs_read(node, offset, count, (uint8_t *)buf);
     
@@ -176,7 +182,16 @@ static int64_t sys_write_handler(int fd, const void *user_buf, size_t count) {
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
-    if (!node || !node->ops || !node->ops->write) return -EBADF;
+    if (!node || !node->ops) return -EBADF;
+
+    bool nonblock = (current_task->process->file_flags[fd] & O_NONBLOCK) != 0;
+
+    // Fast-path: AF_UNIX sockets
+    if (node->ops == &unix_socket_vfs_ops && node->ptr) {
+        return unix_socket_write((unix_socket_t *)node->ptr, user_buf, count, nonblock);
+    }
+
+    if (!node->ops->write) return -EBADF;
 
     uint64_t offset = current_task->process->file_offsets[fd];
     if (current_task->process->file_flags[fd] & O_APPEND) {
@@ -435,6 +450,13 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
             *(int *)arg = 0; // KD_TEXT
             return 0;
         }
+        // Socket / Generic non-blocking control
+    if (req == 0x5421 && arg) { // FIONBIO
+        int on = *(int *)arg;
+        if (on) current_task->process->file_flags[fd] |= O_NONBLOCK;
+        else    current_task->process->file_flags[fd] &= ~O_NONBLOCK;
+        return 0;
+    }
         if (req == KDGKBMODE && arg) {
             *(int *)arg = 1; // K_XLATE
             return 0;
@@ -1484,7 +1506,6 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
     memset(orig_rfds, 0, sizeof(orig_rfds));
     memset(orig_wfds, 0, sizeof(orig_wfds));
 
-    // Preserve original bitmasks so polling iterations don't wipe them!
     if (rfds) memcpy(orig_rfds, rfds, bytes);
     if (wfds) memcpy(orig_wfds, wfds, bytes);
 
@@ -1533,7 +1554,6 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
             }
         }
 
-        // If events are ready, finalize output bitmasks and return
         if (ready > 0) {
             for (int fd = 0; fd < nfds; fd++) {
                 int byte = fd / 8;
@@ -1566,7 +1586,7 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
             return ready;
         }
 
-        // Timeout checks
+        // Timeout expired
         if (timeout && timeout->tv_sec == 0 && timeout->tv_nsec == 0) {
             if (rfds) memset(rfds, 0, bytes);
             if (wfds) memset(wfds, 0, bytes);
@@ -1769,6 +1789,92 @@ static int64_t sys_connect_handler(int fd, const struct sockaddr_un *addr, uint3
 // Master Syscall Dispatcher Table
 // ============================================================================
 
+// Implementation of socketpair(AF_UNIX, SOCK_STREAM, 0, sv)
+static int64_t sys_socketpair_handler(int domain, int type, int protocol, int sv[2]) {
+    (void)protocol;
+    if (domain != AF_UNIX) return -EAFNOSUPPORT;
+    if (!sv || !validate_user_memory(sv, sizeof(int) * 2, true)) return -EFAULT;
+
+    unix_socket_t *s1 = unix_socket_create(type);
+    unix_socket_t *s2 = unix_socket_create(type);
+    if (!s1 || !s2) {
+        if (s1) unix_socket_close(s1);
+        if (s2) unix_socket_close(s2);
+        return -ENOMEM;
+    }
+
+    s1->peer = s2;
+    s2->peer = s1;
+    s1->state = UNIX_STATE_CONNECTED;
+    s2->state = UNIX_STATE_CONNECTED;
+
+    vfs_node_t *n1 = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    vfs_node_t *n2 = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    if (!n1 || !n2) {
+        if (n1) kfree(n1);
+        if (n2) kfree(n2);
+        unix_socket_close(s1);
+        unix_socket_close(s2);
+        return -ENOMEM;
+    }
+
+    strcpy(n1->name, "socketpair:0");
+    n1->flags = FS_FILE;
+    n1->ops = &unix_socket_vfs_ops;
+    n1->ptr = (struct vfs_node *)s1;
+
+    strcpy(n2->name, "socketpair:1");
+    n2->flags = FS_FILE;
+    n2->ops = &unix_socket_vfs_ops;
+    n2->ptr = (struct vfs_node *)s2;
+
+    int fd1 = alloc_fd(n1, O_RDWR);
+    int fd2 = alloc_fd(n2, O_RDWR);
+    if (fd1 < 0 || fd2 < 0) {
+        if (fd1 >= 0) sys_close_handler(fd1);
+        if (fd2 >= 0) sys_close_handler(fd2);
+        return -EMFILE;
+    }
+
+    sv[0] = fd1;
+    sv[1] = fd2;
+    return 0;
+}
+
+// Fixed select handler handling struct timeval (microseconds)
+static int64_t sys_select_handler(int nfds, void *rfds, void *wfds, void *efds, const struct linux_timeval *tv) {
+    struct linux_timespec ts;
+    struct linux_timespec *pts = NULL;
+    if (tv) {
+        ts.tv_sec = tv->tv_sec;
+        ts.tv_nsec = tv->tv_usec * 1000ULL;
+        pts = &ts;
+    }
+    return sys_pselect6_handler(nfds, rfds, wfds, efds, pts, NULL);
+}
+
+// Implementation of ppoll (syscall 271)
+static int64_t sys_ppoll_handler(struct linux_pollfd *fds, uint64_t nfds, const struct linux_timespec *tmo_p, const void *sigmask, size_t sigsetsize) {
+    (void)sigmask; (void)sigsetsize;
+    int timeout_ms = -1;
+    if (tmo_p) {
+        timeout_ms = (int)(tmo_p->tv_sec * 1000 + tmo_p->tv_nsec / 1000000ULL);
+    }
+    return sys_poll_handler(fds, nfds, timeout_ms);
+}
+
+// Fixed select handler that converts struct timeval (microseconds) to timespec (nanoseconds)
+static int64_t sys_select_compat_handler(int nfds, void *rfds, void *wfds, void *efds, const struct linux_timeval *tv) {
+    struct linux_timespec ts;
+    struct linux_timespec *pts = NULL;
+    if (tv) {
+        ts.tv_sec = tv->tv_sec;
+        ts.tv_nsec = tv->tv_usec * 1000ULL;
+        pts = &ts;
+    }
+    return sys_pselect6_handler(nfds, rfds, wfds, efds, pts, NULL);
+}
+
 static int64_t sys_execve_handler(const char *filename, char *const argv[], char *const envp[], syscall_regs_t *regs) {
     (void)envp;
     if (!filename || !current_task || !current_task->process) return -EINVAL;
@@ -1795,14 +1901,51 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         return -ENOENT;
     }
 
-    uint8_t *elf_buf = (uint8_t *)kmalloc(file->length);
-    if (!elf_buf) return -ENOMEM;
+    uint8_t *file_buf = (uint8_t *)kmalloc(file->length);
+    if (!file_buf) return -ENOMEM;
 
-    if (vfs_read(file, 0, file->length, elf_buf) <= 0) {
-        kfree(elf_buf);
+    if (vfs_read(file, 0, file->length, file_buf) <= 0) {
+        kfree(file_buf);
         return -EIO;
     }
 
+    // 1. Check for Shebang script execution (#!/bin/sh, #!/bin/bash)
+    if (file->length >= 2 && file_buf[0] == '#' && file_buf[1] == '!') {
+        char interp_line[128];
+        size_t idx = 2;
+        while (idx < file->length && (file_buf[idx] == ' ' || file_buf[idx] == '\t')) idx++;
+        
+        size_t l_idx = 0;
+        while (idx < file->length && file_buf[idx] != '\n' && file_buf[idx] != '\r' && l_idx < sizeof(interp_line) - 1) {
+            interp_line[l_idx++] = (char)file_buf[idx++];
+        }
+        interp_line[l_idx] = '\0';
+        kfree(file_buf);
+
+        // Tokenize interpreter and optional arguments
+        char *interp_argv[18];
+        int new_argc = 0;
+        char *token = interp_line;
+        while (*token) {
+            while (*token == ' ') token++;
+            if (!*token) break;
+            interp_argv[new_argc++] = token;
+            while (*token && *token != ' ') token++;
+            if (*token) *token++ = '\0';
+        }
+
+        interp_argv[new_argc++] = (char *)filename;
+        if (argv) {
+            for (int i = 1; argv[i] != NULL && new_argc < 16; i++) {
+                interp_argv[new_argc++] = argv[i];
+            }
+        }
+        interp_argv[new_argc] = NULL;
+
+        return sys_execve_handler(interp_argv[0], interp_argv, envp, regs);
+    }
+
+    // 2. Standard ELF Binary Loading
     int argc = 0;
     char k_argv_storage[16][128];
     char *exec_argv[17];
@@ -1821,8 +1964,8 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
     uint64_t new_rsp = 0;
     uint64_t new_cr3 = 0;
 
-    bool ok = elf_execve_replace(elf_buf, file->length, argc, exec_argv, &new_entry, &new_rsp, &new_cr3);
-    kfree(elf_buf);
+    bool ok = elf_execve_replace(file_buf, file->length, argc, exec_argv, &new_entry, &new_rsp, &new_cr3);
+    kfree(file_buf);
 
     if (!ok) {
         return -ENOEXEC;
@@ -1858,6 +2001,7 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
 
     return 0;
 }
+
 
 static const char *get_syscall_name(uint64_t no) {
     switch (no) {
@@ -2028,9 +2172,16 @@ void syscall_handler(void *regs_ptr) {
             ret = sys_pipe2_handler((int *)regs->rdi, 0);
             break;
         case SYS_SELECT:
-        case SYS_PSELECT6:
+        case SYS_PSELECT6: // 270
             ret = sys_pselect6_handler((int)regs->rdi, (void *)regs->rsi, (void *)regs->rdx, 
                                        (void *)regs->r10, (const struct linux_timespec *)regs->r8, (const void *)regs->r9);
+            break;
+        case SYS_PPOLL:
+            ret = sys_ppoll_handler((struct linux_pollfd *)regs->rdi, regs->rsi, 
+                                    (const struct linux_timespec *)regs->rdx, (const void *)regs->r10, (size_t)regs->r8);
+            break;
+        case SYS_SOCKETPAIR:
+            ret = sys_socketpair_handler((int)regs->rdi, (int)regs->rsi, (int)regs->rdx, (int *)regs->r10);
             break;
         case SYS_SCHED_YIELD:
             sched_yield();
@@ -2071,6 +2222,7 @@ void syscall_handler(void *regs_ptr) {
         case SYS_DUP2:
             ret = sys_dup2_handler((int)regs->rdi, (int)regs->rsi);
             break;
+            
         case SYS_NANOSLEEP:
             ret = sys_nanosleep_handler((const struct linux_timespec *)regs->rdi, (struct linux_timespec *)regs->rsi);
             break;

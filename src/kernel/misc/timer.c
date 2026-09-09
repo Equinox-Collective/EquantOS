@@ -3,11 +3,14 @@
 #include "../core/initcall.h"
 #include "../drivers/usb/usb_hid.h"
 #include "../drivers/input.h"
+#include "../proc/sched.h"
 
 volatile uint32_t tick = 0;
 
 void timer_callback() {
     tick++;
+
+    sched_timer_tick(tick);
 
     xhci_timer_tick();
     input_timer_tick();

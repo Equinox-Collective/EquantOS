@@ -271,13 +271,39 @@ bool unix_socket_can_write(unix_socket_t *sock) {
 static int64_t vfs_sock_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)offset;
     if (!node || !node->ptr) return -EBADF;
-    return unix_socket_read((unix_socket_t *)node->ptr, buffer, size, false);
+
+    bool nonblock = false;
+    if (current_task && current_task->process) {
+        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+            if (current_task->process->files[i] == node) {
+                if (current_task->process->file_flags[i] & O_NONBLOCK) {
+                    nonblock = true;
+                }
+                break;
+            }
+        }
+    }
+
+    return unix_socket_read((unix_socket_t *)node->ptr, buffer, size, nonblock);
 }
 
 static int64_t vfs_sock_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)offset;
     if (!node || !node->ptr) return -EBADF;
-    return unix_socket_write((unix_socket_t *)node->ptr, buffer, size, false);
+
+    bool nonblock = false;
+    if (current_task && current_task->process) {
+        for (int i = 0; i < MAX_OPEN_FILES; i++) {
+            if (current_task->process->files[i] == node) {
+                if (current_task->process->file_flags[i] & O_NONBLOCK) {
+                    nonblock = true;
+                }
+                break;
+            }
+        }
+    }
+
+    return unix_socket_write((unix_socket_t *)node->ptr, buffer, size, nonblock);
 }
 
 static void vfs_sock_close(vfs_node_t *node) {

@@ -84,6 +84,9 @@ typedef struct task {
     uint64_t futex_addr;
     struct task *futex_next;
 
+    // Dedicated Sleep queue link
+    struct task *sleep_next;
+
     process_t *process;
 
     uint8_t fpu_state[528] __attribute__((aligned(16)));

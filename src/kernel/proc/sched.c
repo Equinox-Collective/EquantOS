@@ -110,48 +110,31 @@ void sched_unblock(task_t *task) {
 void sched_make_sleep(task_t *task, uint64_t sleep_until) {
     if (!task) return;
     
-    sched_dequeue(task);
-    
     task->state = TASK_STATE_SLEEPING;
     task->running = false;
     task->sleep_until = sleep_until;
-    task->sched_next = NULL;
-    task->sched_prev = NULL;
+    task->sleep_next = NULL;
     
-    if (!sleep_queue_head) {
+    if (!sleep_queue_head || sleep_until < sleep_queue_head->sleep_until) {
+        task->sleep_next = sleep_queue_head;
         sleep_queue_head = task;
         return;
     }
     
     task_t *curr = sleep_queue_head;
-    task_t *prev_node = NULL;
-    
-    while (curr && curr->sleep_until <= sleep_until) {
-        prev_node = curr;
-        curr = curr->sched_next;
+    while (curr->sleep_next && curr->sleep_next->sleep_until <= sleep_until) {
+        curr = curr->sleep_next;
     }
     
-    if (!prev_node) {
-        task->sched_next = sleep_queue_head;
-        sleep_queue_head->sched_prev = task;
-        sleep_queue_head = task;
-    } else {
-        task->sched_next = curr;
-        task->sched_prev = prev_node;
-        prev_node->sched_next = task;
-        if (curr) {
-            curr->sched_prev = task;
-        }
-    }
+    task->sleep_next = curr->sleep_next;
+    curr->sleep_next = task;
 }
 
 void sched_timer_tick(uint32_t current_tick) {
     while (sleep_queue_head && current_tick >= sleep_queue_head->sleep_until) {
         task_t *task = sleep_queue_head;
-        sleep_queue_head = task->sched_next;
-        if (sleep_queue_head) {
-            sleep_queue_head->sched_prev = NULL;
-        }
+        sleep_queue_head = task->sleep_next;
+        task->sleep_next = NULL;
         task->sleep_until = 0;
         sched_enqueue(task);
     }
@@ -165,10 +148,8 @@ uint64_t sched_switch(uint64_t current_rsp) {
     task_t *prev_task = current_task;
 
     if (current_task != idle_task) {
-        if (current_task->state != TASK_STATE_RUNNABLE) {
-            sched_dequeue(current_task);
-        } else {
-            sched_dequeue(current_task);
+        sched_dequeue(current_task);
+        if (current_task->state == TASK_STATE_RUNNABLE) {
             sched_enqueue(current_task);
         }
     }
