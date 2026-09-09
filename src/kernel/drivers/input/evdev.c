@@ -28,57 +28,53 @@ static void mousedev_enqueue_byte(uint8_t b) {
 
 // Convert input subsystem movement and clicks to 3-byte Standard PS/2 packets
 static void mousedev_process_event(uint16_t type, uint16_t code, int32_t value) {
-    static int8_t pending_dx = 0;
-    static int8_t pending_dy = 0;
-    static bool has_movement = false;
+    static int16_t accum_dx = 0;
+    static int16_t accum_dy = 0;
+    static bool button_changed = false;
 
     if (type == EV_KEY) {
         if (code == BTN_LEFT) {
             if (value) mouse_buttons_state |= 0x01;
             else       mouse_buttons_state &= ~0x01;
+            button_changed = true;
         } else if (code == BTN_RIGHT) {
             if (value) mouse_buttons_state |= 0x02;
             else       mouse_buttons_state &= ~0x02;
+            button_changed = true;
         } else if (code == BTN_MIDDLE) {
             if (value) mouse_buttons_state |= 0x04;
             else       mouse_buttons_state &= ~0x04;
-        }
-
-        // Generate instant 3-byte PS/2 packet on button press/release
-        uint8_t flags = 0x08 | (mouse_buttons_state & 0x07);
-        mousedev_enqueue_byte(flags);
-        mousedev_enqueue_byte(0);
-        mousedev_enqueue_byte(0);
-
-        if (mousedev_blocked_reader) {
-            sched_unblock(mousedev_blocked_reader);
-            mousedev_blocked_reader = NULL;
+            button_changed = true;
         }
     } else if (type == EV_REL) {
         if (code == REL_X) {
-            pending_dx += (int8_t)value;
-            has_movement = true;
+            accum_dx += (int16_t)value;
         } else if (code == REL_Y) {
-            // PS/2 Y axis goes up, screen coordinates go down: invert delta
-            pending_dy -= (int8_t)value;
-            has_movement = true;
+            // Screen Y: positive is down, in PS/2 positive is up
+            accum_dy -= (int16_t)value;
         }
-    } else if (type == EV_SYN && code == SYN_REPORT && has_movement) {
-        uint8_t flags = 0x08 | (mouse_buttons_state & 0x07);
-        if (pending_dx < 0) flags |= 0x10;
-        if (pending_dy < 0) flags |= 0x20;
+    } else if (type == EV_SYN && code == SYN_REPORT) {
+        if (accum_dx != 0 || accum_dy != 0 || button_changed) {
+            // Clamp deltas to standard int8 range [-127, 127]
+            int8_t packet_dx = (accum_dx > 127) ? 127 : ((accum_dx < -127) ? -127 : (int8_t)accum_dx);
+            int8_t packet_dy = (accum_dy > 127) ? 127 : ((accum_dy < -127) ? -127 : (int8_t)accum_dy);
 
-        mousedev_enqueue_byte(flags);
-        mousedev_enqueue_byte((uint8_t)pending_dx);
-        mousedev_enqueue_byte((uint8_t)pending_dy);
+            uint8_t flags = 0x08 | (mouse_buttons_state & 0x07);
+            if (packet_dx < 0) flags |= 0x10;
+            if (packet_dy < 0) flags |= 0x20;
 
-        pending_dx = 0;
-        pending_dy = 0;
-        has_movement = false;
+            mousedev_enqueue_byte(flags);
+            mousedev_enqueue_byte((uint8_t)packet_dx);
+            mousedev_enqueue_byte((uint8_t)packet_dy);
 
-        if (mousedev_blocked_reader) {
-            sched_unblock(mousedev_blocked_reader);
-            mousedev_blocked_reader = NULL;
+            accum_dx -= packet_dx;
+            accum_dy -= packet_dy;
+            button_changed = false;
+
+            if (mousedev_blocked_reader) {
+                sched_unblock(mousedev_blocked_reader);
+                mousedev_blocked_reader = NULL;
+            }
         }
     }
 }
@@ -152,17 +148,25 @@ static int64_t evdev_read_common(evdev_device_t *dev, void *buf, size_t count, b
     return (int64_t)read_bytes;
 }
 
+static bool is_node_nonblocking(vfs_node_t *node) {
+    if (!node || !current_task || !current_task->process) return false;
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        if (current_task->process->files[i] == node) {
+            return (current_task->process->file_flags[i] & O_NONBLOCK) != 0;
+        }
+    }
+    return false;
+}
+
 static int64_t evdev_kbd_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    (void)offset; (void)node;
-    bool nonblock = (current_task && current_task->process && 
-                    (current_task->process->file_flags[alloc_fd(node, 0)] & O_NONBLOCK));
+    (void)offset;
+    bool nonblock = is_node_nonblocking(node);
     return evdev_read_common(&ev_keyboard, buffer, size, nonblock);
 }
 
 static int64_t evdev_mouse_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    (void)offset; (void)node;
-    bool nonblock = (current_task && current_task->process && 
-                    (current_task->process->file_flags[alloc_fd(node, 0)] & O_NONBLOCK));
+    (void)offset;
+    bool nonblock = is_node_nonblocking(node);
     return evdev_read_common(&ev_mouse, buffer, size, nonblock);
 }
 
@@ -242,10 +246,10 @@ static int evdev_mouse_ioctl(vfs_node_t *node, uint64_t req, void *arg) {
 // /dev/input/mice and /dev/mouse (Raw 3-byte PS/2 Stream)
 // ----------------------------------------------------------------------------
 static int64_t mousedev_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    (void)offset; (void)node;
+    (void)offset;
     if (!buffer || size == 0) return 0;
 
-    bool nonblock = false;
+    bool nonblock = is_node_nonblocking(node);
     if (current_task && current_task->process) {
         for (int i = 0; i < MAX_OPEN_FILES; i++) {
             if (current_task->process->files[i] == node) {
@@ -296,9 +300,16 @@ vfs_file_operations_t g_evdev_mouse_fops = {
     .ioctl = evdev_mouse_ioctl
 };
 
+static int64_t mousedev_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)node; (void)offset; (void)buffer;
+    // Acknowledge mouse controller commands (e.g. sample rate, resolution, streaming enable)
+    return (int64_t)size;
+}
+
+// Update g_mousedev_fops:
 vfs_file_operations_t g_mousedev_fops = {
     .read = mousedev_read,
-    .write = NULL,
+    .write = mousedev_write, // <-- Было NULL, из-за чего летел -EBADF (-9)
     .ioctl = NULL
 };
 

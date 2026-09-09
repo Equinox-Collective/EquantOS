@@ -2,6 +2,7 @@
 #include "usb_hid.h"
 #include "../input.h"
 #include <stdbool.h>
+#include "../input/evdev.h"
 
 static uint8_t prev_keycodes[6] = {0};
 static uint8_t prev_modifiers = 0;
@@ -124,6 +125,9 @@ void usb_hid_parse_mouse_report(const uint8_t *report, size_t len) {
     if (wheel != 0) {
         input_push_event(EV_REL, REL_WHEEL, wheel);
     }
+
+    // CRITICAL: Always push SYN_REPORT so evdev and mousedev flush mouse packets!
+    input_push_event(EV_SYN, SYN_REPORT, 0);
 }
 
 void usb_hid_parse_report(const uint8_t *report, size_t len) {

@@ -31,7 +31,21 @@ static vfs_node_t *vfs_resolve_path(const char *path) {
     // Direct DevFS fast-path for /dev/ devices (bypasses any root filesystem masking)
     extern vfs_node_t *devfs_get_root(void);
     if (strncmp(path, "/dev/", 5) == 0 && devfs_get_root()) {
-        return vfs_finddir(devfs_get_root(), path + 5);
+        const char *sub = path + 5;
+        vfs_node_t *curr = devfs_get_root();
+        char comp[64];
+        while (*sub && curr) {
+            size_t c_idx = 0;
+            while (*sub && *sub != '/' && c_idx < sizeof(comp) - 1) {
+                comp[c_idx++] = *sub++;
+            }
+            comp[c_idx] = '\0';
+            if (*sub == '/') sub++;
+            if (c_idx > 0) {
+                curr = vfs_finddir(curr, comp);
+            }
+        }
+        if (curr) return curr;
     }
     
     vfs_node_t *current = vfs_root;

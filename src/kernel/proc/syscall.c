@@ -164,7 +164,12 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
             }
         }
     }
-
+    // Return -EAGAIN on non-blocking mouse read if buffer is empty
+    if (nonblock && (node->ops == &g_mousedev_fops || node->ops == &g_evdev_mouse_fops)) {
+        if (!evdev_mouse_can_read()) {
+            return -EAGAIN;
+        }
+    }
     if (!node->ops->read) return -EBADF;
     uint64_t offset = current_task->process->file_offsets[fd];
     int64_t bytes = vfs_read(node, offset, count, (uint8_t *)buf);
@@ -1367,47 +1372,62 @@ static int64_t sys_nanosleep_handler(const struct linux_timespec *req, struct li
     return 0;
 }
 
+#define POLLWRNORM 0x0100
+#define POLLRDNORM 0x0040
+
 static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
     int ready = 0;
 
     for (uint64_t i = 0; i < nfds; i++) {
         fds[i].revents = 0;
         int fd = fds[i].fd;
-        if (fd < 0) continue;
+        if (fd < 0 || fd >= MAX_OPEN_FILES) continue;
 
-        // 1. Check Terminal Standard Input (fd 0)
+        // 1. TTY / Console Standard Input (fd 0)
         if (fd == 0) {
-            if ((fds[i].events & POLLIN) && tty_has_input()) {
-                fds[i].revents |= POLLIN;
+            if ((fds[i].events & (POLLIN | POLLRDNORM)) && tty_has_input()) {
+                fds[i].revents |= (fds[i].events & (POLLIN | POLLRDNORM));
                 ready++;
             }
         } 
-        // 2. Check Terminal Output (fd 1, 2)
+        // 2. TTY / Console Standard Output (fd 1, 2)
         else if (fd == 1 || fd == 2) {
-            if (fds[i].events & POLLOUT) {
-                fds[i].revents |= POLLOUT;
+            if (fds[i].events & (POLLOUT | POLLWRNORM)) {
+                fds[i].revents |= (fds[i].events & (POLLOUT | POLLWRNORM));
                 ready++;
             }
         }
 
-        // 3. Check UNIX Domain Sockets
-        if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
-        vfs_node_t *node = current_task->process->files[fd];
-        if (node) {
-            if (node->ops == &g_mousedev_fops && (fds[i].events & POLLIN)) {
-                if (evdev_mouse_can_read()) {
-                    fds[i].revents |= POLLIN;
+        // 3. File descriptors & Sockets
+        if (current_task && current_task->process) {
+            vfs_node_t *node = current_task->process->files[fd];
+            if (!node) continue;
+
+            // UNIX Domain Sockets
+            if (node->ops == &unix_socket_vfs_ops && node->ptr) {
+                unix_socket_t *s = (unix_socket_t *)node->ptr;
+
+                if ((fds[i].events & (POLLIN | POLLRDNORM)) && unix_socket_can_read(s)) {
+                    fds[i].revents |= (fds[i].events & (POLLIN | POLLRDNORM));
+                    ready++;
+                }
+                if ((fds[i].events & (POLLOUT | POLLWRNORM)) && unix_socket_can_write(s)) {
+                    fds[i].revents |= (fds[i].events & (POLLOUT | POLLWRNORM));
+                    ready++;
+                }
+                if (s->peer_closed) {
+                    fds[i].revents |= POLLHUP;
                     ready++;
                 }
             }
-            if (node->ops == &g_evdev_mouse_fops && (fds[i].events & POLLIN)) {
-                if (evdev_mouse_has_data()) {
-                    fds[i].revents |= POLLIN;
+            // Mouse device /dev/mouse or /dev/input/mice
+            else if ((node->ops == &g_mousedev_fops || node->ops == &g_evdev_mouse_fops)) {
+                if ((fds[i].events & (POLLIN | POLLRDNORM)) && evdev_mouse_has_data()) {
+                    fds[i].revents |= (fds[i].events & (POLLIN | POLLRDNORM));
                     ready++;
                 }
             }
         }
-    }
     }
 
     return ready;
@@ -1514,87 +1534,73 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
     for (;;) {
         int ready = 0;
 
+        // Clear output bitmasks for current poll iteration
+        if (rfds) memset(rfds, 0, bytes);
+        if (wfds) memset(wfds, 0, bytes);
+
         for (int fd = 0; fd < nfds; fd++) {
             int byte = fd / 8;
             int bit = fd % 8;
 
-            // Check Read Descriptors
-            if (rfds && (orig_rfds[byte] & (1 << bit))) {
+            // 1. Check Read Readiness
+            if (orig_rfds[byte] & (1 << bit)) {
                 bool can_read = false;
+
                 if (fd == 0 && tty_has_input()) {
                     can_read = true;
-                }
-                if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
+                } else if (current_task && current_task->process && fd < MAX_OPEN_FILES) {
                     vfs_node_t *node = current_task->process->files[fd];
-                    if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
-                        can_read = unix_socket_can_read((unix_socket_t *)node->ptr);
-                    }
-                }
-                if (can_read) {
-                    ready++;
-                }
-            }
-
-            // Check Write Descriptors
-            if (wfds && (orig_wfds[byte] & (1 << bit))) {
-                bool can_write = false;
-                if (fd == 1 || fd == 2) {
-                    can_write = true;
-                }
-                if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
-                    vfs_node_t *node = current_task->process->files[fd];
-                    if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
-                        can_write = unix_socket_can_write((unix_socket_t *)node->ptr);
-                    }
-                }
-                if (can_write) {
-                    ready++;
-                }
-            }
-        }
-
-        if (ready > 0) {
-            for (int fd = 0; fd < nfds; fd++) {
-                int byte = fd / 8;
-                int bit = fd % 8;
-
-                if (rfds && (orig_rfds[byte] & (1 << bit))) {
-                    bool can_read = (fd == 0 && tty_has_input());
-                    if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
-                        vfs_node_t *node = current_task->process->files[fd];
-                        if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
+                    if (node) {
+                        // Sockets
+                        if (node->ops == &unix_socket_vfs_ops && node->ptr) {
                             can_read = unix_socket_can_read((unix_socket_t *)node->ptr);
                         }
+                        // Mouse (/dev/mouse, /dev/psaux, /dev/input/mice)
+                        else if (node->ops == &g_mousedev_fops || node->ops == &g_evdev_mouse_fops) {
+                            can_read = evdev_mouse_can_read();
+                        }
                     }
-                    if (can_read) rfds[byte] |= (1 << bit);
-                    else rfds[byte] &= ~(1 << bit);
                 }
 
-                if (wfds && (orig_wfds[byte] & (1 << bit))) {
-                    bool can_write = (fd == 1 || fd == 2);
-                    if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
-                        vfs_node_t *node = current_task->process->files[fd];
-                        if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
+                if (can_read) {
+                    if (rfds) rfds[byte] |= (1 << bit);
+                    ready++;
+                }
+            }
+
+            // 2. Check Write Readiness
+            if (orig_wfds[byte] & (1 << bit)) {
+                bool can_write = false;
+
+                if (fd == 1 || fd == 2) {
+                    can_write = true;
+                } else if (current_task && current_task->process && fd < MAX_OPEN_FILES) {
+                    vfs_node_t *node = current_task->process->files[fd];
+                    if (node) {
+                        if (node->ops == &unix_socket_vfs_ops && node->ptr) {
                             can_write = unix_socket_can_write((unix_socket_t *)node->ptr);
                         }
                     }
-                    if (can_write) wfds[byte] |= (1 << bit);
-                    else wfds[byte] &= ~(1 << bit);
+                }
+
+                if (can_write) {
+                    if (wfds) wfds[byte] |= (1 << bit);
+                    ready++;
                 }
             }
+        }
+
+        // Return immediately if events are active
+        if (ready > 0) {
             return ready;
         }
 
-        // Timeout expired
+        // Timeout checks
         if (timeout && timeout->tv_sec == 0 && timeout->tv_nsec == 0) {
-            if (rfds) memset(rfds, 0, bytes);
-            if (wfds) memset(wfds, 0, bytes);
             return 0;
         }
 
         if (timeout != NULL && (tick - start_tick) >= max_ticks) {
-            if (rfds) memset(rfds, 0, bytes);
-            if (wfds) memset(wfds, 0, bytes);
             return 0;
         }
 
