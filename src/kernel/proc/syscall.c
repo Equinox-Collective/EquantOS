@@ -984,6 +984,60 @@ static int64_t sys_exit_handler(int code) {
     return 0;
 }
 
+struct msghdr {
+    void *msg_name;
+    uint32_t msg_namelen;
+    struct iovec *msg_iov;
+    size_t msg_iovlen;
+    void *msg_control;
+    size_t msg_controllen;
+    int msg_flags;
+};
+
+static int64_t sys_sendmsg_handler(int fd, const struct msghdr *msg, int flags) {
+    (void)flags;
+    if (!msg || !msg->msg_iov || msg->msg_iovlen == 0) return -EINVAL;
+    return sys_writev_handler(fd, msg->msg_iov, (int)msg->msg_iovlen);
+}
+
+static int64_t sys_recvmsg_handler(int fd, struct msghdr *msg, int flags) {
+    (void)flags;
+    if (!msg || !msg->msg_iov || msg->msg_iovlen == 0) return -EINVAL;
+    return sys_readv_handler(fd, msg->msg_iov, (int)msg->msg_iovlen);
+}
+
+static int64_t sys_setsockopt_handler(int fd, int level, int optname, const void *optval, uint32_t optlen) {
+    (void)fd; (void)level; (void)optname; (void)optval; (void)optlen;
+    return 0; // Pretend all socket options are set successfully
+}
+
+static int64_t sys_getsockopt_handler(int fd, int level, int optname, void *optval, uint32_t *optlen) {
+    (void)fd; (void)level; (void)optname;
+    if (optval && optlen && *optlen >= sizeof(int)) {
+        *(int *)optval = 0; // Return SO_ERROR = 0 (No error)
+    }
+    return 0;
+}
+
+static int64_t sys_getpeername_handler(int fd, struct sockaddr_un *addr, uint32_t *addrlen) {
+    (void)fd;
+    if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_un)) {
+        addr->sun_family = AF_UNIX;
+        strcpy(addr->sun_path, "/tmp/.X11-unix/X0");
+        *addrlen = sizeof(struct sockaddr_un);
+    }
+    return 0;
+}
+
+static int64_t sys_getsockname_handler(int fd, struct sockaddr_un *addr, uint32_t *addrlen) {
+    return sys_getpeername_handler(fd, addr, addrlen);
+}
+
+static int64_t sys_shutdown_handler(int fd, int how) {
+    (void)fd; (void)how;
+    return 0;
+}
+
 static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent_tid, int *child_tid, uint64_t tls, syscall_regs_t *regs) {
     if (!current_task || !current_task->process) return -EAGAIN;
 
@@ -1981,6 +2035,27 @@ void syscall_handler(void *regs_ptr) {
         case SYS_SCHED_YIELD:
             sched_yield();
             ret = 0;
+            break;
+        case SYS_SENDMSG:
+            ret = sys_sendmsg_handler((int)regs->rdi, (const struct msghdr *)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_RECVMSG:
+            ret = sys_recvmsg_handler((int)regs->rdi, (struct msghdr *)regs->rsi, (int)regs->rdx);
+            break;
+        case SYS_SETSOCKOPT:
+            ret = sys_setsockopt_handler((int)regs->rdi, (int)regs->rsi, (int)regs->rdx, (const void *)regs->r10, (uint32_t)regs->r8);
+            break;
+        case SYS_GETSOCKOPT:
+            ret = sys_getsockopt_handler((int)regs->rdi, (int)regs->rsi, (int)regs->rdx, (void *)regs->r10, (uint32_t *)regs->r8);
+            break;
+        case SYS_GETPEERNAME:
+            ret = sys_getpeername_handler((int)regs->rdi, (struct sockaddr_un *)regs->rsi, (uint32_t *)regs->rdx);
+            break;
+        case SYS_GETSOCKNAME:
+            ret = sys_getsockname_handler((int)regs->rdi, (struct sockaddr_un *)regs->rsi, (uint32_t *)regs->rdx);
+            break;
+        case SYS_SHUTDOWN:
+            ret = sys_shutdown_handler((int)regs->rdi, (int)regs->rsi);
             break;
         case SYS_MREMAP:
             ret = sys_mremap_handler(regs->rdi, (size_t)regs->rsi, (size_t)regs->rdx, (int)regs->r10);
