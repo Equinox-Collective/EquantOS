@@ -21,6 +21,16 @@
 #include "../../equterm/shell.h"
 #include "../ipc/af_unix.h"
 #include "../ipc/shm.h"
+#include <stdarg.h>
+
+static void strace_log(const char *fmt, ...) {
+    char buf[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    serial_puts(COM1, buf); // Пишет только в окно хоста MINGW64!
+}
 
 __attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
 
@@ -1036,7 +1046,7 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
     child_task->id = (flags & CLONE_THREAD) ? next_pid++ : child_proc->pid;
     child_task->state = TASK_STATE_RUNNABLE;
     child_task->running = true;
-    child_task->priority = PRIO_NORMAL;
+    child_task->priority = current_task->priority;
     child_task->time_slice = 10;
     child_task->fs_base = (flags & CLONE_SETTLS) ? tls : current_task->fs_base;
     child_task->process = child_proc;
@@ -1891,8 +1901,8 @@ void syscall_handler(void *regs_ptr) {
     bool quiet = (syscall_no == 16 && regs->rsi == 0x4B46);
 
     if (!quiet) {
-        printf("[STRACE %u] > %s(%d) args=(0x%llx, 0x%llx, 0x%llx)\n",
-               pid, name, (int)syscall_no, regs->rdi, regs->rsi, regs->rdx);
+        strace_log("[STRACE %u] > %s(%d) args=(0x%llx, 0x%llx, 0x%llx)\n",
+                   pid, name, (int)syscall_no, regs->rdi, regs->rsi, regs->rdx);
     }
 
     switch (syscall_no) {
@@ -2223,8 +2233,8 @@ void syscall_handler(void *regs_ptr) {
     regs->rax = (uint64_t)ret;
 
     if (!quiet) {
-        printf("[STRACE %u] < %s = %lld (0x%llx)\n",
-               pid, name, (long long)ret, (unsigned long long)ret);
+        strace_log("[STRACE %u] < %s = %lld (0x%llx)\n",
+                   pid, name, (long long)ret, (unsigned long long)ret);
     }
 }
 

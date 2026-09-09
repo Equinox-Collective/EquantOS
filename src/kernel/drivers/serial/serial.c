@@ -85,8 +85,7 @@ void serial_puts(uint16_t port, const char *str) {
     serial_acquire_lock();
     while (*str) {
         char c = *str++;
-        serial_putchar(port, c);
-//        term_putchar_raw(c); // Зеркалируем весь serial-лог прямо на экран монитора!
+        serial_putchar(port, c); // Вывод СТРОГО в последовательный порт COM1 (терминал хоста)!
     }
     serial_release_lock();
 }
