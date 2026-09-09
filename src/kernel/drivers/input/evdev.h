@@ -6,7 +6,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "../../fs/vfs.h"
-#include "input.h"
+#include "../input.h"
 
 // Linux Input Event Types
 #define EV_SYN       0x00

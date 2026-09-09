@@ -15,12 +15,12 @@
 #include "../drivers/tty/tty.h"
 #include "stdio.h"
 #include "../fs/vfs.h"
-#include "../fs/ramfs.h"
 #include "../core/initcall.h"
 #include "../drivers/tty/tty.h"
 #include "../../equterm/shell.h"
 #include "../ipc/af_unix.h"
 #include "../ipc/shm.h"
+#include "../drivers/input/evdev.h"
 #include <stdarg.h>
 
 static void strace_log(const char *fmt, ...) {
@@ -1392,23 +1392,22 @@ static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
 
         // 3. Check UNIX Domain Sockets
         if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
-            vfs_node_t *node = current_task->process->files[fd];
-            if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
-                unix_socket_t *s = (unix_socket_t *)node->ptr;
-
-                if ((fds[i].events & POLLIN) && unix_socket_can_read(s)) {
+        vfs_node_t *node = current_task->process->files[fd];
+        if (node) {
+            if (node->ops == &g_mousedev_fops && (fds[i].events & POLLIN)) {
+                if (evdev_mouse_can_read()) {
                     fds[i].revents |= POLLIN;
                     ready++;
                 }
-                if ((fds[i].events & POLLOUT) && unix_socket_can_write(s)) {
-                    fds[i].revents |= POLLOUT;
+            }
+            if (node->ops == &g_evdev_mouse_fops && (fds[i].events & POLLIN)) {
+                if (evdev_mouse_has_data()) {
+                    fds[i].revents |= POLLIN;
                     ready++;
-                }
-                if (s->peer_closed) {
-                    fds[i].revents |= POLLHUP;
                 }
             }
         }
+    }
     }
 
     return ready;

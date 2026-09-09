@@ -2,6 +2,8 @@
 #include "input.h"
 #include "../core/initcall.h"
 #include "serial/serial.h"
+#include "input/evdev.h"
+
 
 #define INPUT_BUFFER_SIZE 256
 
@@ -25,6 +27,7 @@ void input_init(void) {
 }
 
 void input_push_event(uint16_t type, uint16_t code, int32_t value) {
+    evdev_push_event(type, code, value);
     int next = (ring_head + 1) % INPUT_BUFFER_SIZE;
 
     if (next != ring_tail) {

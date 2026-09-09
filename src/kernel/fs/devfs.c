@@ -14,6 +14,8 @@
 #include "../proc/task.h"
 #include "../proc/syscall.h"
 #include "../drivers/tty/tty.h"
+#include "../drivers/input/evdev.h"
+#include "../core/uevent.h"
 
 static vfs_node_t *devfs_root = NULL;
 extern struct limine_framebuffer *kernel_fb;
@@ -315,22 +317,64 @@ void devfs_init(void) {
     devfs_root->flags = FS_DIRECTORY;
     devfs_root->ops = &devfs_root_fops;
 
-    // Register Devices
+    // 1. Initialize Subsystems
+    evdev_init();
+    uevent_init();
+
+    // 2. Standard TTY and NULL devices
     devfs_register_device("null", &null_fops, NULL, 0666);
     devfs_register_device("tty",  &tty_device_fops, NULL, 0666);
     devfs_register_device("tty0", &tty_device_fops, NULL, 0666);
-    devfs_register_device("tty1", &tty_device_fops, NULL, 0666); // <-- Crucial for Xfbdev VT 1!
-    devfs_register_device("tty2", &tty_device_fops, NULL, 0666);
+    devfs_register_device("tty1", &tty_device_fops, NULL, 0666);
 
-    // Register Mouse Input Devices (Kdrive probes both /dev/mouse and /dev/input0)
-    devfs_register_device("input0", &input_fops, NULL, 0);
-    devfs_register_device("mouse",  &input_fops, NULL, 0);
-    devfs_register_device("psaux",  &input_fops, NULL, 0);
+    // 3. Register Framebuffer
+    devfs_register_device("fb0", &fb_fops, NULL, 0666);
 
-    // Register Video Framebuffer
-    devfs_register_device("fb0", &fb_fops, NULL, 0);
+    // 4. Register Legacy /dev/mouse and /dev/psaux (PS/2 streams)
+    devfs_register_device("mouse", &g_mousedev_fops, NULL, 0666);
+    devfs_register_device("psaux", &g_mousedev_fops, NULL, 0666);
 
-    // Mount /dev onto VFS root
+    // 5. Create /dev/input directory and nodes
+    vfs_node_t *input_dir = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    strcpy(input_dir->name, "input");
+    input_dir->flags = FS_DIRECTORY;
+    input_dir->ops = &devfs_root_fops;
+    input_dir->parent = devfs_root;
+
+    // Link /dev/input to devfs root
+    input_dir->next = devfs_root->children;
+    devfs_root->children = input_dir;
+
+    // Register /dev/input/event0 (Keyboard), /dev/input/event1 (Mouse), /dev/input/mice
+    vfs_node_t *ev0 = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    strcpy(ev0->name, "event0");
+    ev0->flags = FS_FILE;
+    ev0->ops = &g_evdev_kbd_fops;
+    ev0->parent = input_dir;
+
+    vfs_node_t *ev1 = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    strcpy(ev1->name, "event1");
+    ev1->flags = FS_FILE;
+    ev1->ops = &g_evdev_mouse_fops;
+    ev1->parent = input_dir;
+
+    vfs_node_t *mice = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    strcpy(mice->name, "mice");
+    mice->flags = FS_FILE;
+    mice->ops = &g_mousedev_fops;
+    mice->parent = input_dir;
+
+    mice->next = NULL;
+    ev1->next = mice;
+    ev0->next = ev1;
+    input_dir->children = ev0;
+
+    // 6. Broadcast uevent announcements to userspace
+    uevent_broadcast(KOBJ_ADD, "input", "input/event0", 13, 64);
+    uevent_broadcast(KOBJ_ADD, "input", "input/event1", 13, 65);
+    uevent_broadcast(KOBJ_ADD, "input", "input/mice",   13, 63);
+
+    // 7. Temporary mount directories
     if (vfs_root) {
         vfs_node_t *tmp_dir = vfs_finddir(vfs_root, "tmp");
         if (!tmp_dir) {
@@ -341,7 +385,7 @@ void devfs_init(void) {
         }
     }
 
-    serial_puts(COM1, "[DEVFS] Nodes /dev/null, /dev/tty, /dev/tty0, /dev/fb0 and /tmp registered.\n");
+    serial_puts(COM1, "[DEVFS] Nodes /dev/input/event0, event1, mice and /dev/mouse active.\n");
 }
 
 static int __init devfs_initcall(void) {
