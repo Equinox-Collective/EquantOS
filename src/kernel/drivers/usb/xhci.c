@@ -123,7 +123,7 @@ static void xhci_arm_hid_endpoint(xhci_slot_device_t *slot) {
     trb->control   = (TRB_TYPE_NORMAL << 10) | (1U << 5) | (1U << 2) | slot->ep_pcs;
 
     slot->ep_enqueue_idx++;
-    if (slot->ep_enqueue_idx >= 15) {
+    if (slot->ep_enqueue_idx >= 63) { // Увеличиваем кольцо с 15 до 63 TRB
         xhci_trb_t *link = &slot->ep_tr_virt[slot->ep_enqueue_idx];
         link->parameter = slot->ep_tr_phys;
         link->status    = 0;
@@ -132,6 +132,9 @@ static void xhci_arm_hid_endpoint(xhci_slot_device_t *slot) {
         slot->ep_enqueue_idx = 0;
         slot->ep_pcs ^= 1;
     }
+
+    // CRITICAL: Hardware memory fence to ensure TRB is in RAM before ringing doorbell!
+    __asm__ volatile("mfence" ::: "memory");
 
     xhci_ring_doorbell(slot->slot_id, 3);
 }

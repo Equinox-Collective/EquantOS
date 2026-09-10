@@ -1,0 +1,45 @@
+# res/system.twmrc - EquantOS Default TWM Configuration
+NoGrabServer
+RestartPreviousState
+DecorateTransients
+TitleFont       "fixed"
+ResizeFont      "fixed"
+MenuFont        "fixed"
+IconFont        "fixed"
+
+Color
+{
+    BorderColor         "#4a75a0"
+    DefaultBackground   "#2c3e50"
+    DefaultForeground   "#ecf0f1"
+    TitleBackground     "#1abc9c"
+    TitleForeground     "#ffffff"
+    MenuBackground      "#34495e"
+    MenuForeground      "#ecf0f1"
+    MenuTitleBackground "#16a085"
+    MenuTitleForeground "#ffffff"
+}
+
+# Window buttons layout
+Button1 = : root : f.menu "main"
+Button2 = : root : f.menu "windowops"
+Button3 = : root : f.menu "main"
+
+menu "main"
+{
+    "EquantOS Desktop"  f.title
+    "XEyes"             f.exec "/xeyes.elf &"
+    "Restart TWM"       f.restart
+    "Exit X11"          f.quit
+}
+
+menu "windowops"
+{
+    "Window Ops"        f.title
+    "Iconify"           f.iconify
+    "Resize"            f.resize
+    "Move"              f.move
+    "Raise"             f.raise
+    "Lower"             f.lower
+    "Kill"              f.destroy
+}

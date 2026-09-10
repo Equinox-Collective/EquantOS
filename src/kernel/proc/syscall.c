@@ -2101,7 +2101,18 @@ void syscall_handler(void *regs_ptr) {
     const char *name = get_syscall_name(syscall_no);
 
     // 1. LOG ENTRY (видно ДО того, как сисколл зависнет внутри!)
-    bool quiet = (syscall_no == 16 && regs->rsi == 0x4B46);
+    bool quiet = (syscall_no == 16 && regs->rsi == 0x4B46) ||
+                 (syscall_no == SYS_CLOCK_GETTIME) ||
+                 (syscall_no == SYS_SELECT) ||
+                 (syscall_no == SYS_PSELECT6) ||
+                 (syscall_no == SYS_POLL) ||
+                 (syscall_no == SYS_PPOLL) ||
+                 (syscall_no == SYS_READ) ||
+                 (syscall_no == SYS_WRITE) ||
+                 (syscall_no == SYS_READV) ||
+                 (syscall_no == SYS_WRITEV) ||
+                 (syscall_no == SYS_RECVMSG) ||
+                 (syscall_no == SYS_SENDMSG);
 
     if (!quiet) {
         strace_log("[STRACE %u] > %s(%d) args=(0x%llx, 0x%llx, 0x%llx)\n",

@@ -26,6 +26,27 @@ static void mousedev_enqueue_byte(uint8_t b) {
     }
 }
 
+
+static void mousedev_enqueue_packet(uint8_t b0, uint8_t b1, uint8_t b2) {
+    uint32_t free_space = (mouse_ps2_tail + MOUSE_BUF_SIZE - mouse_ps2_head - 1) % MOUSE_BUF_SIZE;
+    if (free_space < 3) {
+        // Drop entire packet atomically to prevent stream phase desynchronization!
+        return;
+    }
+
+    mouse_ps2_buf[mouse_ps2_head] = b0;
+    mouse_ps2_head = (mouse_ps2_head + 1) % MOUSE_BUF_SIZE;
+    mouse_ps2_buf[mouse_ps2_head] = b1;
+    mouse_ps2_head = (mouse_ps2_head + 1) % MOUSE_BUF_SIZE;
+    mouse_ps2_buf[mouse_ps2_head] = b2;
+    mouse_ps2_head = (mouse_ps2_head + 1) % MOUSE_BUF_SIZE;
+
+    if (mousedev_blocked_reader) {
+        sched_unblock(mousedev_blocked_reader);
+        mousedev_blocked_reader = NULL;
+    }
+}
+
 // Convert input subsystem movement and clicks to 3-byte Standard PS/2 packets
 static void mousedev_process_event(uint16_t type, uint16_t code, int32_t value) {
     static int16_t accum_dx = 0;
@@ -55,7 +76,6 @@ static void mousedev_process_event(uint16_t type, uint16_t code, int32_t value) 
         }
     } else if (type == EV_SYN && code == SYN_REPORT) {
         if (accum_dx != 0 || accum_dy != 0 || button_changed) {
-            // Clamp deltas to standard int8 range [-127, 127]
             int8_t packet_dx = (accum_dx > 127) ? 127 : ((accum_dx < -127) ? -127 : (int8_t)accum_dx);
             int8_t packet_dy = (accum_dy > 127) ? 127 : ((accum_dy < -127) ? -127 : (int8_t)accum_dy);
 
@@ -63,18 +83,12 @@ static void mousedev_process_event(uint16_t type, uint16_t code, int32_t value) 
             if (packet_dx < 0) flags |= 0x10;
             if (packet_dy < 0) flags |= 0x20;
 
-            mousedev_enqueue_byte(flags);
-            mousedev_enqueue_byte((uint8_t)packet_dx);
-            mousedev_enqueue_byte((uint8_t)packet_dy);
+            // Enqueue all 3 bytes atomically
+            mousedev_enqueue_packet(flags, (uint8_t)packet_dx, (uint8_t)packet_dy);
 
             accum_dx -= packet_dx;
             accum_dy -= packet_dy;
             button_changed = false;
-
-            if (mousedev_blocked_reader) {
-                sched_unblock(mousedev_blocked_reader);
-                mousedev_blocked_reader = NULL;
-            }
         }
     }
 }

@@ -147,7 +147,9 @@ ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/kdiag.elf \
                  build/iso/Xfbdev.elf \
                  build/iso/xeyes.elf \
-				 build/iso/start.sh 
+                 build/iso/start.sh \
+                 build/iso/twm.elf \
+                 build/iso/system.twmrc
 
 # ==============================================================================
 # Master Targets
@@ -251,6 +253,16 @@ build/iso/start.sh: res/start.sh
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/start.sh,$@)
+
+build/iso/twm.elf: res/twm.elf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/twm.elf,$@)
+
+build/iso/system.twmrc: res/system.twmrc
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/system.twmrc,$@)
 
 # Auto-Dependency Inclusion
 -include $(DEP_FILES)
