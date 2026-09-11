@@ -269,8 +269,6 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         return false;
     }
 
-    // ET_EXEC = 2 (Fixed base, already contains absolute virtual addresses)
-    // ET_DYN  = 3 (Position Independent Executable, load at 0x400000)
     uint64_t load_base = (ehdr->e_type == 3) ? 0x400000ULL : 0ULL;
 
     page_table_t *new_pml4 = vmm_create_address_space();
@@ -279,9 +277,9 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
     uint64_t max_vaddr_end = 0;
     Elf64_Phdr *phdr = (Elf64_Phdr *)((uint8_t *)elf_data + ehdr->e_phoff);
 
-    // 1. Map and load all PT_LOAD segments with safe boundary handling
+    // 1. Safe page-by-page mapping and zeroing for all PT_LOAD segments
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type != 1) continue; // PT_LOAD only
+        if (phdr[i].p_type != 1) continue;
 
         uint64_t seg_vaddr  = phdr[i].p_vaddr + load_base;
         uint64_t seg_filesz = phdr[i].p_filesz;
@@ -295,7 +293,6 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         uint64_t page_start = vaddr_start & ~0xFFFULL;
         uint64_t page_end   = (vaddr_end + 0xFFF) & ~0xFFFULL;
 
-        // Allocate physical frames page by page (safely reusing shared boundary pages!)
         for (uint64_t vpage = page_start; vpage < page_end; vpage += PAGE_SIZE) {
             uint64_t existing_phys = vmm_get_phys(new_pml4, vpage);
             if (!existing_phys) {
@@ -309,7 +306,6 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
             }
         }
 
-        // Copy file payload into the mapped virtual pages
         uint64_t bytes_copied = 0;
         while (bytes_copied < seg_filesz) {
             uint64_t curr_vaddr = seg_vaddr + bytes_copied;
@@ -328,8 +324,6 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
 
             bytes_copied += chunk;
         }
-
-        // BSS zeroing for remaining memsz beyond filesz is guaranteed because pmm_alloc pages are pre-zeroed!
     }
 
     // 2. Allocate 8 MB user stack
@@ -361,7 +355,7 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
     }
     if (argc > 16) argc = 16;
 
-    // 3. Copy argument strings to stack
+    // 3. Arguments & Environment Strings
     uint64_t argv_u[17];
     for (int i = 0; i < argc; i++) {
         const char *s = argv[i] ? argv[i] : "";
@@ -372,9 +366,8 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
     }
     argv_u[argc] = 0;
 
-    // 4. Copy environment strings to stack
     const char *default_env[] = {
-        "PATH=/bin/:/usr/bin/:/sbin/:/usr/sbin/:/sys/bin/",
+        "PATH=/bin:/usr/bin:/sys/bin:/",
         "USER=root",
         "HOME=/",
         "TERM=linux",
@@ -394,15 +387,13 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
     }
     envp_u[envc] = 0;
 
-    // 5. 16-byte random seed for AT_RANDOM
     sp -= 16;
     memset(topk + (PAGE_SIZE - (stack_top - sp)), 0x42, 16);
     uint64_t at_random = sp;
 
-    // Strict 16-byte alignment of SP
     sp &= ~0xFULL;
 
-    // 6. Find correct virtual address for AT_PHDR
+    // 4. Calculate AT_PHDR properly
     uint64_t phdr_vaddr = 0;
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type == 6) { // PT_PHDR
@@ -427,7 +418,7 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
 
     uint64_t entry_point = ehdr->e_entry + load_base;
 
-    // 7. Auxiliary Vector (auxv)
+    // 5. Auxiliary Vector
     uint64_t aux[32]; 
     int an = 0;
     aux[an++] = 3;  aux[an++] = phdr_vaddr;                            // AT_PHDR
@@ -445,10 +436,8 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
     aux[an++] = 25; aux[an++] = at_random;                            // AT_RANDOM
     aux[an++] = 0;  aux[an++] = 0;                                    // AT_NULL
 
-    // 8. Layout: [argc] [argv ptrs...] [NULL] [envp ptrs...] [NULL] [auxv pairs...]
+    // 6. Push vector table with strict 16-byte alignment
     int total_words = 1 + (argc + 1) + (envc + 1) + an;
-
-    // Align stack so that upon entry to _start, (RSP % 16) == 0
     if (total_words % 2 != 0) {
         sp -= 8;
     }
