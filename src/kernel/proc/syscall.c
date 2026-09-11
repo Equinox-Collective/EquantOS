@@ -1983,13 +1983,14 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
     vmm_destroy_address_space(old_cr3);
 
     regs->rip = new_entry;
-    regs->rcx = new_entry; // Required for SYSRETQ
-    regs->rsp = new_rsp;
+    regs->rcx = new_entry; // Required for SYSRETQ target
+    regs->rsp = new_rsp;   // Strictly 16-byte aligned user RSP
     regs->cs = 0x23;
     regs->ss = 0x1B;
     regs->rflags = 0x202;
-    regs->r11 = 0x202;    // Required for SYSRETQ
+    regs->r11 = 0x202;    // Required for SYSRETQ flags
 
+    // System V AMD64 ABI defines %rdx = 0 on entry (rtld_fini)
     regs->rax = 0;
     regs->rbx = 0;
     regs->rdx = 0;
