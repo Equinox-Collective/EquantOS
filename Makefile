@@ -36,6 +36,8 @@ QEMU      := qemu-system-x86_64
 QEMUFLAGS := -m 512M \
              -vga std \
              -boot d \
+             -netdev user,id=net0 \
+             -device rtl8139,netdev=net0 \
              -device qemu-xhci,id=xhci \
              -device usb-kbd,bus=xhci.0 \
              -device usb-mouse,bus=xhci.0 \
@@ -56,6 +58,8 @@ QEMUBDFLAGS := -m 512M \
                -drive file=disk_gpt_ext2.img,format=raw,if=none,id=hd0 \
                -device ide-hd,drive=hd0,bootindex=1 \
                -serial stdio \
+			   -netdev user,id=net0 \
+               -device rtl8139,netdev=net0 \
                -d guest_errors,unimp -D qemu_bd.log
 
 # ==============================================================================
