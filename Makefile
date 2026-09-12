@@ -38,6 +38,7 @@ QEMUFLAGS := -m 512M \
              -boot d \
              -netdev user,id=net0 \
              -device rtl8139,netdev=net0 \
+			 -object filter-dump,id=netdump0,netdev=net0,file=net.pcap \
              -device qemu-xhci,id=xhci \
              -device usb-kbd,bus=xhci.0 \
              -device usb-mouse,bus=xhci.0 \
@@ -60,6 +61,7 @@ QEMUBDFLAGS := -m 512M \
                -serial stdio \
 			   -netdev user,id=net0 \
                -device rtl8139,netdev=net0 \
+			   -object filter-dump,id=netdump0,netdev=net0,file=net.pcap \
                -d guest_errors,unimp -D qemu_bd.log
 
 # ==============================================================================
@@ -336,6 +338,7 @@ debug: build/equantos.iso disks
 clean:
 	$(call LOG_MSG,  $(CLR_INFO) Removing build artifacts...)
 	$(Q)$(call RMDIR,build)
+	$(Q)$(call RM,net.pcap)
 
 clean-disks:
 	$(call LOG_MSG,  $(CLR_INFO) Removing virtual disks...)
