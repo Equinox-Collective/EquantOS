@@ -4,6 +4,7 @@
 #include "../drivers/usb/usb_hid.h"
 #include "../drivers/input.h"
 #include "../proc/sched.h"
+#include "../drivers/net/rtl8139.h"
 
 volatile uint32_t tick = 0;
 
@@ -14,6 +15,7 @@ void timer_callback() {
 
     xhci_timer_tick();
     input_timer_tick();
+    rtl8139_poll();
 }
 
 void init_timer(uint32_t freq) {
