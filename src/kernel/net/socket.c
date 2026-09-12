@@ -1,9 +1,9 @@
 #include "socket.h"
 #include "tcp.h"
 #include "net.h"
-#include "../../core/mem/memory.h"
-#include "../../misc/timer.h"
-#include "../../proc/task.h"
+#include "../core/mem/memory.h"
+#include "../misc/timer.h"
+#include "../proc/task.h"
 #include "string.h"
 #include "stdio.h"
 

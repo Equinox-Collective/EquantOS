@@ -5,6 +5,7 @@
 #include "../drivers/input.h"
 #include "../proc/sched.h"
 #include "../drivers/net/rtl8139.h"
+#include "../net/tcp.h"
 
 volatile uint32_t tick = 0;
 
@@ -16,6 +17,7 @@ void timer_callback() {
     xhci_timer_tick();
     input_timer_tick();
     rtl8139_poll();
+    tcp_tick_with_iface(tick * 10);
 }
 
 void init_timer(uint32_t freq) {

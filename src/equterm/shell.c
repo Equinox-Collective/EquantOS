@@ -28,6 +28,9 @@
 #include "../kernel/misc/user.h"
 #include "../kernel/net/net.h"
 #include "../kernel/net/icmp.h"
+#include "../kernel/net/net.h"
+#include "../kernel/net/dns.h"
+#include "../kernel/net/tcp.h"
 
 extern uint64_t free_memory;
 extern uint64_t total_pages;
@@ -107,6 +110,8 @@ static void cmd_passwd(int argc, char **argv);
 static void cmd_useradd(int argc, char **argv);
 static void cmd_login(int argc, char **argv);
 static void cmd_ping(int argc, char **argv);
+static void cmd_dns(int argc, char **argv);
+static void cmd_wget(int argc, char **argv);
 
 static const shell_command_t commands[] = {
     { "help",       "List all diagnostic & stress commands",  cmd_help },
@@ -167,6 +172,8 @@ static const shell_command_t commands[] = {
     { "useradd",  "Create a new user account: useradd <user>",cmd_useradd },
     { "login",    "Lock terminal and show login prompt",      cmd_login },
     { "ping", "Ping IP address: ping <ip_str>",               cmd_ping },
+    { "dns",        "Resolve domain name: dns <host>",        cmd_dns },
+    { "wget",       "Download HTTP page: wget <host/ip>",     cmd_wget },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -1705,4 +1712,84 @@ static void cmd_ping(int argc, char **argv) {
 
     term_print("PING 10.0.2.2...\n");
     icmp_send_echo_request(iface, ip);
+}
+
+static void cmd_dns(int argc, char **argv) {
+    if (argc < 2) {
+        term_print("Usage: dns <hostname>\nExample: dns google.com\n");
+        return;
+    }
+
+    net_interface_t *iface = net_get_primary_interface();
+    if (!iface) {
+        term_print("dns: network interface not found\n");
+        return;
+    }
+
+    // 0x0A000203 is QEMU virtual DNS (10.0.2.3)
+    dns_query(iface, argv[1], 0x0A000203);
+
+    // Wait up to 3 seconds for response
+    uint32_t start = tick;
+    while (tick - start < 300) {
+        uint32_t ip = dns_get_result(argv[1]);
+        if (ip != 0) return;
+        __asm__ volatile("sti; hlt; cli");
+    }
+    term_print("dns: query timed out\n");
+}
+
+static void cmd_wget(int argc, char **argv) {
+    if (argc < 2) {
+        term_print("Usage: wget <ip_or_host>\nExample: wget 10.0.2.2\n");
+        return;
+    }
+
+    net_interface_t *iface = net_get_primary_interface();
+    if (!iface) {
+        term_print("wget: network interface not found\n");
+        return;
+    }
+
+    uint32_t target_ip = 0;
+    if (strcmp(argv[1], "10.0.2.2") == 0) {
+        target_ip = 0x0A000202;
+    } else {
+        target_ip = dns_get_result(argv[1]);
+        if (target_ip == 0) {
+            term_print("Resolving host via DNS...\n");
+            dns_query(iface, argv[1], 0x0A000203);
+            uint32_t start = tick;
+            while (tick - start < 300) {
+                target_ip = dns_get_result(argv[1]);
+                if (target_ip != 0) break;
+                __asm__ volatile("sti; hlt; cli");
+            }
+        }
+    }
+
+    if (target_ip == 0) {
+        term_print("wget: failed to resolve host IP\n");
+        return;
+    }
+
+    term_print("Connecting via TCP to HTTP server...\n");
+    net_wget(iface, target_ip);
+
+    extern bool http_finished;
+    extern uint8_t *http_response_buf;
+    extern uint32_t http_response_len;
+
+    uint32_t start = tick;
+    while (!http_finished && (tick - start < 500)) {
+        __asm__ volatile("sti; hlt; cli");
+    }
+
+    if (http_response_buf && http_response_len > 0) {
+        term_print("\n=== HTTP RESPONSE RECEIVED ===\n");
+        term_print((char *)http_response_buf);
+        term_print("\n==============================\n");
+    } else {
+        term_print("wget: request timed out or empty response\n");
+    }
 }
