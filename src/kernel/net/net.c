@@ -1,7 +1,7 @@
 #include "net.h"
 #include "arp.h"
 #include "ipv4.h"
-#include "../../../../syslibc/string.h"
+#include "string.h"
 
 extern void term_print(const char* str);
 

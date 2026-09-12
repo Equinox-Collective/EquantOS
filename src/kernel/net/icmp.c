@@ -1,7 +1,7 @@
 #include "icmp.h"
 #include "ipv4.h"
-#include "../../../../syslibc/string.h"
-#include "../../../../syslibc/stdio.h"
+#include "string.h"
+#include "stdio.h"
 
 extern void term_print(const char* str);
 uint16_t icmp_checksum(void* vdata, uint32_t length) {
