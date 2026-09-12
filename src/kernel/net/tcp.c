@@ -136,10 +136,18 @@ static void wget_on_data(tcp_socket_t *sock, uint8_t *data, uint32_t len) {
     }
 }
 
+extern char last_queried_name[];
+
 static void send_http_get(net_interface_t *iface, tcp_socket_t *sock) {
-    char get[256];
+    char get[512];
+    const char *host = last_queried_name[0] ? last_queried_name : "httpforever.com";
     snprintf(get, sizeof(get),
-             "GET / HTTP/1.1\r\nHost: 10.0.2.2\r\nUser-Agent: EquantOS/1.0\r\nConnection: close\r\n\r\n");
+             "GET / HTTP/1.1\r\n"
+             "Host: %s\r\n"
+             "User-Agent: EquantOS/1.0\r\n"
+             "Accept: text/html,*/*\r\n"
+             "Connection: close\r\n\r\n",
+             host);
     tcp_send_packet(iface, sock, TCP_PSH | TCP_ACK, (uint8_t *)get, (uint32_t)strlen(get));
 }
 
