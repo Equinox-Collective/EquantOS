@@ -24,11 +24,13 @@ __attribute__((weak)) void socket_on_state_change(tcp_socket_t *sock) {
 static tcp_socket_t tcp_sockets[TCP_MAX_SOCKETS];
 
 static inline uint32_t get_random_isn(void) {
-    uint64_t val = 0;
-    unsigned char ok;
-    __asm__ volatile("rdrand %0; setc %1" : "=r"(val), "=qm"(ok));
-    if (ok) return (uint32_t)(val & 0x7FFFFFFF);
-    return (tick * 1103515245 + 12345) & 0x7FFFFFFF;
+    extern volatile uint32_t tick;
+    static uint32_t seed = 0x12345678;
+    // Xorshift32 PRNG mixed with hardware timer ticks
+    seed ^= (seed << 13) ^ (tick * 1103515245 + 12345);
+    seed ^= (seed >> 17);
+    seed ^= (seed << 5);
+    return seed & 0x7FFFFFFF;
 }
 
 static void tcp_socket_free(tcp_socket_t *sock) {
