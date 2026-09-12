@@ -3,7 +3,7 @@
 #include "tcp.h"
 #include "arp.h"
 #include "icmp.h"
-#include "../../../../syslibc/string.h"
+#include "string.h"
 
 extern void term_print(const char* str);
 
