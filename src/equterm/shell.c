@@ -26,6 +26,8 @@
 #include "../kernel/core/gen/io.h"
 #include "../kernel/misc/installer.h"
 #include "../kernel/misc/user.h"
+#include "../kernel/net/net.h"
+#include "../kernel/net/icmp.h"
 
 extern uint64_t free_memory;
 extern uint64_t total_pages;
@@ -104,6 +106,7 @@ static void cmd_su(int argc, char **argv);
 static void cmd_passwd(int argc, char **argv);
 static void cmd_useradd(int argc, char **argv);
 static void cmd_login(int argc, char **argv);
+static void cmd_ping(int argc, char **argv);
 
 static const shell_command_t commands[] = {
     { "help",       "List all diagnostic & stress commands",  cmd_help },
@@ -163,6 +166,7 @@ static const shell_command_t commands[] = {
     { "passwd",   "Change user password: passwd [user]",      cmd_passwd },
     { "useradd",  "Create a new user account: useradd <user>",cmd_useradd },
     { "login",    "Lock terminal and show login prompt",      cmd_login },
+    { "ping", "Ping IP address: ping <ip_str>",               cmd_ping },
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -1674,4 +1678,31 @@ void shell_execute_diag(const char *cmd_line_in) {
         }
     }
     // NO print_prompt() here! Control returns cleanly to Bash!
+}
+
+static void cmd_ping(int argc, char **argv) {
+    if (argc < 2) {
+        term_print("Usage: ping <ip>\nExample: ping 10.0.2.2\n");
+        return;
+    }
+
+    uint32_t ip = 0;
+    int a, b, c, d;
+    // Простой парсер IPv4 x.x.x.x
+    // Если хочешь по-простому:
+    if (strcmp(argv[1], "10.0.2.2") == 0) {
+        ip = 0x0A000202;
+    } else {
+        term_print("Currently supports pinging gateway: ping 10.0.2.2\n");
+        return;
+    }
+
+    net_interface_t *iface = net_get_primary_interface();
+    if (!iface) {
+        term_print("ping: no network interface available\n");
+        return;
+    }
+
+    term_print("PING 10.0.2.2...\n");
+    icmp_send_echo_request(iface, ip);
 }
