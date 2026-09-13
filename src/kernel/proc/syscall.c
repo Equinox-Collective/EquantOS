@@ -925,6 +925,53 @@ static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flag
     return -EINVAL;
 }
 
+static int64_t inet_socket_read_op(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)offset;
+    if (!node || !node->ptr) return -EBADF;
+    int sock_id = (int)(uintptr_t)node->ptr;
+
+    int res = sock_recv(sock_id, buffer, (uint32_t)size);
+    if (res < 0) {
+        if (res == SOCK_ERR_TIMEOUT || res == SOCK_ERR_AGAIN) return -EAGAIN;
+        if (res == SOCK_ERR_CLOSED || res == SOCK_ERR_NOTCONN) return 0; // EOF
+        return -EIO;
+    }
+    return res;
+}
+
+static int64_t inet_socket_write_op(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)offset;
+    if (!node || !node->ptr) return -EBADF;
+    int sock_id = (int)(uintptr_t)node->ptr;
+
+    int res = sock_send(sock_id, buffer, (uint32_t)size);
+    if (res < 0) {
+        if (res == SOCK_ERR_NOTCONN || res == SOCK_ERR_CLOSED) return -EPIPE;
+        return -EIO;
+    }
+    return res;
+}
+
+static void inet_socket_close_op(vfs_node_t *node) {
+    if (node && node->ptr) {
+        int sock_id = (int)(uintptr_t)node->ptr;
+        sock_close(sock_id);
+        node->ptr = NULL;
+    }
+}
+
+static vfs_file_operations_t inet_socket_vfs_ops = {
+    .read    = inet_socket_read_op,
+    .write   = inet_socket_write_op,
+    .open    = NULL,
+    .close   = inet_socket_close_op,
+    .readdir = NULL,
+    .finddir = NULL,
+    .create  = NULL,
+    .ioctl   = NULL,
+    .mmap    = NULL
+};
+
 static int64_t sys_munmap_handler(uint64_t addr, size_t length) {
     if (length == 0 || (addr & (PAGE_SIZE - 1)) != 0) return -EINVAL;
     if (!current_task || !current_task->process) return -EINVAL;
@@ -1697,32 +1744,46 @@ static int64_t sys_getpgid_handler(int pid) {
 
 static int64_t sys_socket_handler(int domain, int type, int protocol) {
     (void)protocol;
-    if (domain != AF_UNIX) {
-        return -EAFNOSUPPORT; // Only UNIX domain sockets for local GUI IPC right now
+
+    // 1. Local Unix Domain Sockets (X11 / IPC)
+    if (domain == AF_UNIX) {
+        unix_socket_t *sock = unix_socket_create(type);
+        if (!sock) return -ENOMEM;
+
+        vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+        if (!node) {
+            unix_socket_close(sock);
+            return -ENOMEM;
+        }
+
+        strcpy(node->name, "socket:unix");
+        node->flags = FS_SOCKET;
+        node->ops = &unix_socket_vfs_ops;
+        node->ptr = (struct vfs_node *)sock;
+
+        return alloc_fd(node, O_RDWR);
     }
 
-    unix_socket_t *sock = unix_socket_create(type);
-    if (!sock) return -ENOMEM;
+    // 2. Real Internet IPv4 TCP Sockets (AF_INET = 2)
+    if (domain == AF_INET) {
+        int sock_id = sock_create();
+        if (sock_id < 0) return -ENOMEM;
 
-    vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-    if (!node) {
-        unix_socket_close(sock);
-        return -ENOMEM;
+        vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+        if (!node) {
+            sock_close(sock_id);
+            return -ENOMEM;
+        }
+
+        strcpy(node->name, "socket:inet");
+        node->flags = FS_SOCKET;
+        node->ops = &inet_socket_vfs_ops;
+        node->ptr = (void *)(uintptr_t)sock_id;
+
+        return alloc_fd(node, O_RDWR);
     }
 
-    strcpy(node->name, "socket:unix");
-    node->flags = FS_FILE;
-    node->ops = &unix_socket_vfs_ops;
-    node->ptr = (struct vfs_node *)sock;
-
-    int fd = alloc_fd(node, O_RDWR);
-    if (fd < 0) {
-        kfree(node);
-        unix_socket_close(sock);
-        return fd;
-    }
-
-    return fd;
+    return -EAFNOSUPPORT;
 }
 
 static int64_t sys_bind_handler(int fd, const struct sockaddr_un *addr, uint32_t addrlen) {
@@ -1780,14 +1841,36 @@ static int64_t sys_accept_handler(int fd, struct sockaddr_un *addr, uint32_t *ad
 }
 
 static int64_t sys_connect_handler(int fd, const struct sockaddr_un *addr, uint32_t addrlen) {
-    (void)addrlen;
     if (!current_task || !current_task->process) return -EBADF;
     if (fd < 0 || fd >= MAX_OPEN_FILES || !current_task->process->files[fd]) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
-    if (node->ops != &unix_socket_vfs_ops || !node->ptr) return -ENOTSOCK;
+    if (!node || !node->ops) return -ENOTSOCK;
 
-    return unix_socket_connect((unix_socket_t *)node->ptr, addr);
+    // Handle AF_UNIX
+    if (node->ops == &unix_socket_vfs_ops && node->ptr) {
+        return unix_socket_connect((unix_socket_t *)node->ptr, addr);
+    }
+
+    // Handle AF_INET (TCP Connect to Internet Host)
+    if (node->ops == &inet_socket_vfs_ops && node->ptr) {
+        if (addrlen < sizeof(struct linux_sockaddr_in)) return -EINVAL;
+        const struct linux_sockaddr_in *in = (const struct linux_sockaddr_in *)addr;
+        int sock_id = (int)(uintptr_t)node->ptr;
+
+        uint16_t port = HTONS(in->sin_port);
+        uint32_t ip   = HTONL(in->sin_addr);
+
+        int res = sock_connect(sock_id, ip, port);
+        if (res < 0) {
+            if (res == SOCK_ERR_TIMEOUT) return -ETIMEDOUT;
+            if (res == SOCK_ERR_REFUSED) return -ECONNREFUSED;
+            return -ECONNRESET;
+        }
+        return 0;
+    }
+
+    return -ENOTSOCK;
 }
 
 // ============================================================================

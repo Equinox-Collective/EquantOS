@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "../net/socket.h"
+#include "../net/net.h"
 
 // ============================================================================
 // 1. Linux Standard Error Codes (Negative Return Values)
@@ -493,6 +495,15 @@ struct linux_sigaction {
     uint64_t   sa_flags;
     void     (*sa_restorer)(void);
     uint64_t   sa_mask;
+};
+
+#define AF_INET 2
+
+struct linux_sockaddr_in {
+    uint16_t sin_family;
+    uint16_t sin_port;
+    uint32_t sin_addr;
+    char     sin_zero[8];
 };
 
 void init_syscalls(void);
