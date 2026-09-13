@@ -212,6 +212,16 @@ build/iso/equi.elf: $(UI_OBJECTS)
 # Generic Userspace Applications
 # ==============================================================================
 
+build/iso/epacmg.elf: userspace/epacmg.c
+	@$(call MKDIR,build/obj/userspace)
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_CC),$<)
+	$(Q)$(CC) -static -nostdinc -isystem sdk/sysroot/include -fno-pie -fno-pic -c $< -o build/obj/userspace/epacmg.o
+	$(call LOG_STEP,$(CLR_LD),$@)
+	$(Q)$(LD) $(USER_LDFLAGS) $(USER_CRT_PRE) build/obj/userspace/epacmg.o \
+		--start-group sdk/sysroot/lib/libbearssl.a sdk/sysroot/lib/libc.a --end-group \
+		sdk/sysroot/lib/crtn.o -o $@
+
 build/iso/equantmemtest.elf: userspace/equantmemtest.c
 	@$(call MKDIR,build/obj/userspace)
 	@$(call MKDIR,build/iso)

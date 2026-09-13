@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/syscall.h>
+#include <stdbool.h>
 
 #include <bearssl.h>
 
