@@ -21,6 +21,7 @@
 #include "../ipc/af_unix.h"
 #include "../ipc/shm.h"
 #include "../drivers/input/evdev.h"
+#include "../net/dns.h"
 #include <stdarg.h>
 
 static void strace_log(const char *fmt, ...) {
@@ -2385,6 +2386,41 @@ void syscall_handler(void *regs_ptr) {
         case SYS_UNAME:
             ret = sys_uname_handler((struct linux_utsname *)regs->rdi);
             break;
+        case SYS_EQUANT_DNS: {
+            const char *hostname = (const char *)regs->rdi;
+            uint32_t *out_ip = (uint32_t *)regs->rsi;
+            if (!hostname || !out_ip) {
+                ret = -EFAULT;
+                break;
+            }
+
+            net_interface_t *iface = net_get_primary_interface();
+            if (!iface) {
+                ret = -ENETDOWN;
+                break;
+            }
+
+            // 10.0.2.3 (QEMU virtual DNS)
+            dns_query(iface, hostname, 0x0A000203);
+
+            uint32_t start_t = tick;
+            uint32_t resolved = 0;
+            // Wait up to 3 seconds
+            while (tick - start_t < 300) {
+                resolved = dns_get_result(hostname);
+                if (resolved != 0) break;
+                __asm__ volatile("sti; pause");
+                sched_yield();
+            }
+
+            if (resolved != 0) {
+                *out_ip = resolved;
+                ret = 0;
+            } else {
+                ret = -ETIMEDOUT;
+            }
+            break;
+        }
         case SYS_FCNTL:
             ret = sys_fcntl_handler((int)regs->rdi, (int)regs->rsi, regs->rdx);
             break;

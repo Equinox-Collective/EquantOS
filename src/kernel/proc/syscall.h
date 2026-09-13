@@ -208,6 +208,7 @@
 #define SYS_PIPE2              293
 #define SYS_PRLIMIT64          302
 #define SYS_EQUANT_KDIAG       400
+#define SYS_EQUANT_DNS         401
 
 // ============================================================================
 // 3. Flags & Constants
