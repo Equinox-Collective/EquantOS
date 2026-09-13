@@ -1,0 +1,392 @@
+// userspace/epacmg.c - EquantOS Package Manager (OPM) Client
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <sys/syscall.h>
+
+#include <bearssl.h>
+
+#define SYS_EQUANT_DNS 401
+
+#define DEFAULT_TRANS_HOST "raw.githubusercontent.com"
+// Change this to your real path on GitHub:
+#define DEFAULT_MANIFEST_PATH "/ewasion137/epacmg-trans/main/packages.txt"
+
+#define DB_DIR "/var/lib/epacmg"
+#define DB_INSTALLED "/var/lib/epacmg/installed.db"
+#define DB_CACHE "/var/lib/epacmg/packages.db"
+
+static int resolve_dns(const char *host, uint32_t *ip) {
+    return syscall(SYS_EQUANT_DNS, host, ip);
+}
+
+// ============================================================================
+// Built-in POSIX TAR Extractor (Extracts .epkg directly to /)
+// ============================================================================
+
+typedef struct {
+    char name[100];
+    char mode[8];
+    char uid[8];
+    char gid[8];
+    char size[12];
+    char mtime[12];
+    char chksum[8];
+    char typeflag;
+    char linkname[100];
+    char magic[6];
+    char version[2];
+    char uname[32];
+    char gname[32];
+    char devmajor[8];
+    char devminor[8];
+    char prefix[155];
+    char pad[12];
+} __attribute__((packed)) tar_header_t;
+
+static unsigned int parse_octal(const char *str, int len) {
+    unsigned int val = 0;
+    while (len > 0 && (*str == ' ' || *str == '0')) { str++; len--; }
+    while (len > 0 && *str >= '0' && *str <= '7') {
+        val = (val << 3) | (*str++ - '0');
+        len--;
+    }
+    return val;
+}
+
+static void create_parent_dirs(const char *path) {
+    char temp[256];
+    strncpy(temp, path, sizeof(temp) - 1);
+    char *p = temp;
+    if (*p == '/') p++;
+    while ((p = strchr(p, '/')) != NULL) {
+        *p = '\0';
+        mkdir(temp, 0755);
+        *p = '/';
+        p++;
+    }
+}
+
+static int extract_tar(const uint8_t *tar_data, size_t total_size) {
+    size_t offset = 0;
+    int files_extracted = 0;
+
+    while (offset + 512 <= total_size) {
+        const tar_header_t *hdr = (const tar_header_t *)(tar_data + offset);
+        if (hdr->name[0] == '\0') break; // End of Archive
+
+        unsigned int file_size = parse_octal(hdr->size, sizeof(hdr->size));
+        offset += 512;
+
+        char dest_path[256];
+        if (hdr->name[0] == '/') {
+            snprintf(dest_path, sizeof(dest_path), "%s", hdr->name);
+        } else {
+            snprintf(dest_path, sizeof(dest_path), "/%s", hdr->name);
+        }
+
+        if (hdr->typeflag == '5') { // Directory
+            mkdir(dest_path, 0755);
+        } else if (hdr->typeflag == '0' || hdr->typeflag == '\0') { // File
+            create_parent_dirs(dest_path);
+            printf("  -> Extracting: %s (%u bytes)\n", dest_path, file_size);
+            int fd = open(dest_path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+            if (fd >= 0) {
+                if (file_size > 0) {
+                    write(fd, tar_data + offset, file_size);
+                }
+                close(fd);
+                chmod(dest_path, 0755);
+                files_extracted++;
+            } else {
+                printf("  [ERROR] Failed to write %s\n", dest_path);
+            }
+        }
+
+        offset += (file_size + 511) & ~511; // Align to 512 bytes
+    }
+
+    return files_extracted;
+}
+
+// ============================================================================
+// BearSSL HTTPS / HTTP Engine
+// ============================================================================
+
+static int sock_read_cb(void *ctx, unsigned char *buf, size_t len) {
+    int fd = *(int *)ctx;
+    ssize_t r = read(fd, buf, len);
+    if (r <= 0) return -1;
+    return (int)r;
+}
+
+static int sock_write_cb(void *ctx, const unsigned char *buf, size_t len) {
+    int fd = *(int *)ctx;
+    ssize_t w = write(fd, buf, len);
+    if (w <= 0) return -1;
+    return (int)w;
+}
+
+static uint8_t *http_fetch(const char *host, int port, const char *path, bool use_ssl, size_t *out_size) {
+    uint32_t ip = 0;
+    printf("[epacmg] Resolving %s...\n", host);
+    if (resolve_dns(host, &ip) != 0 || ip == 0) {
+        printf("[epacmg] Error: Failed to resolve %s\n", host);
+        return NULL;
+    }
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        printf("[epacmg] Error: socket creation failed\n");
+        return NULL;
+    }
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    sa.sin_addr.s_addr = htonl(ip);
+
+    printf("[epacmg] Connecting to %s:%d...\n", host, port);
+    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        printf("[epacmg] Error: connect() failed\n");
+        close(fd);
+        return NULL;
+    }
+
+    char req[512];
+    snprintf(req, sizeof(req),
+             "GET %s HTTP/1.1\r\n"
+             "Host: %s\r\n"
+             "User-Agent: epacmg/1.0 (EquantOS)\r\n"
+             "Connection: close\r\n\r\n",
+             path, host);
+
+    size_t buf_cap = 1024 * 1024; // 1 MB initial buffer
+    uint8_t *buf = (uint8_t *)malloc(buf_cap);
+    size_t received = 0;
+
+    if (!use_ssl) {
+        // Plain HTTP
+        write(fd, req, strlen(req));
+        ssize_t r;
+        while ((r = read(fd, buf + received, buf_cap - received - 1)) > 0) {
+            received += r;
+            if (received + 4096 >= buf_cap) {
+                buf_cap *= 2;
+                buf = (uint8_t *)realloc(buf, buf_cap);
+            }
+        }
+    } else {
+        // BearSSL TLS 1.2 Handshake
+        br_ssl_client_context sc;
+        br_x509_minimal_context xc;
+        unsigned char iobuf[BR_SSL_BUFSIZE_BIDI];
+
+        // Minimal client without hardcoded root CAs (Bootstrapping mode)
+        br_ssl_client_init_full(&sc, &xc, NULL, 0);
+        br_ssl_engine_set_buffer(&sc.eng, iobuf, sizeof(iobuf), 1);
+        br_ssl_client_reset(&sc, host, 0);
+
+        br_sslio_context ioc;
+        br_sslio_init(&ioc, &sc.eng, sock_read_cb, &fd, sock_write_cb, &fd);
+
+        br_sslio_write_all(&ioc, req, strlen(req));
+        br_sslio_flush(&ioc);
+
+        for (;;) {
+            int r = br_sslio_read(&ioc, buf + received, buf_cap - received - 1);
+            if (r < 0) break;
+            received += r;
+            if (received + 4096 >= buf_cap) {
+                buf_cap *= 2;
+                buf = (uint8_t *)realloc(buf, buf_cap);
+            }
+        }
+    }
+
+    close(fd);
+
+    if (received == 0) {
+        free(buf);
+        return NULL;
+    }
+
+    buf[received] = '\0';
+
+    // Parse HTTP Status and Body
+    char *body = strstr((char *)buf, "\r\n\r\n");
+    if (!body) {
+        free(buf);
+        return NULL;
+    }
+    body += 4;
+
+    size_t body_len = received - (size_t)(body - (char *)buf);
+    uint8_t *res = (uint8_t *)malloc(body_len);
+    memcpy(res, body, body_len);
+    free(buf);
+
+    *out_size = body_len;
+    return res;
+}
+
+// ============================================================================
+// CLI Commands & Actions
+// ============================================================================
+
+static void parse_url(const char *url, char *host, int *port, char *path, bool *is_ssl) {
+    *is_ssl = false;
+    *port = 80;
+
+    const char *p = url;
+    if (strncmp(p, "https://", 8) == 0) {
+        *is_ssl = true;
+        *port = 443;
+        p += 8;
+    } else if (strncmp(p, "http://", 7) == 0) {
+        p += 7;
+    }
+
+    const char *slash = strchr(p, '/');
+    if (slash) {
+        size_t hlen = slash - p;
+        strncpy(host, p, hlen);
+        host[hlen] = '\0';
+        strcpy(path, slash);
+    } else {
+        strcpy(host, p);
+        strcpy(path, "/");
+    }
+}
+
+static int cmd_sync(void) {
+    mkdir("/var", 0755);
+    mkdir("/var/lib", 0755);
+    mkdir(DB_DIR, 0755);
+
+    printf("\033[36m:: Synchronizing package databases...\033[0m\n");
+
+    size_t size = 0;
+    uint8_t *data = http_fetch(DEFAULT_TRANS_HOST, 443, DEFAULT_MANIFEST_PATH, true, &size);
+    if (!data) {
+        printf("\033[31mError: Failed to fetch repository manifest from %s\033[0m\n", DEFAULT_TRANS_HOST);
+        return 1;
+    }
+
+    int fd = open(DB_CACHE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        write(fd, data, size);
+        close(fd);
+    }
+    free(data);
+
+    printf("\033[32m:: Synchronization complete. Manifest updated.\033[0m\n");
+    return 0;
+}
+
+static int cmd_install(const char *pkg_name) {
+    FILE *f = fopen(DB_CACHE, "r");
+    if (!f) {
+        printf("Database not found. Running sync first...\n");
+        if (cmd_sync() != 0) return 1;
+        f = fopen(DB_CACHE, "r");
+        if (!f) return 1;
+    }
+
+    char line[512];
+    bool found = false;
+    char name[64], ver[32], size_str[32], url[256], desc[128];
+
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || strlen(line) < 5) continue;
+        char *p = line;
+        // Parse Name|Ver|Size|URL|Desc
+        char *tok = strtok(p, "|\n"); if (!tok) continue; strncpy(name, tok, sizeof(name)-1);
+        tok = strtok(NULL, "|\n"); if (!tok) continue; strncpy(ver, tok, sizeof(ver)-1);
+        tok = strtok(NULL, "|\n"); if (!tok) continue; strncpy(size_str, tok, sizeof(size_str)-1);
+        tok = strtok(NULL, "|\n"); if (!tok) continue; strncpy(url, tok, sizeof(url)-1);
+        tok = strtok(NULL, "|\n"); if (!tok) desc[0] = '\0'; else strncpy(desc, tok, sizeof(desc)-1);
+
+        if (strcmp(name, pkg_name) == 0) {
+            found = true;
+            break;
+        }
+    }
+    fclose(f);
+
+    if (!found) {
+        printf("\033[31mError: target not found: %s\033[0m\n", pkg_name);
+        return 1;
+    }
+
+    printf("\033[36m:: Resolving dependencies...\033[0m\n");
+    printf("\033[32mPackage (%s) %s [%s bytes] - %s\033[0m\n", name, ver, size_str, desc);
+    printf(":: Proceed with installation? [Y/n] y\n");
+
+    char host[128], path[256];
+    int port;
+    bool is_ssl;
+    parse_url(url, host, &port, path, &is_ssl);
+
+    size_t epkg_size = 0;
+    uint8_t *epkg_data = http_fetch(host, port, path, is_ssl, &epkg_size);
+    if (!epkg_data) {
+        printf("\033[31mError: failed to download package archive from %s\033[0m\n", url);
+        return 1;
+    }
+
+    printf(":: Extracting %s...\n", name);
+    int extracted = extract_tar(epkg_data, epkg_size);
+    free(epkg_data);
+
+    if (extracted > 0) {
+        FILE *inst = fopen(DB_INSTALLED, "a");
+        if (inst) {
+            fprintf(inst, "%s|%s\n", name, ver);
+            fclose(inst);
+        }
+        printf("\033[32m(1/1) Successfully installed %s (%s)!\033[0m\n", name, ver);
+    } else {
+        printf("\033[31mError: archive extracted 0 files (invalid .epkg format)\033[0m\n");
+        return 1;
+    }
+
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        printf("EquantOS Package Manager (epacmg) v1.0\n");
+        printf("Usage: epacmg <operation> [...]\n\n");
+        printf("Operations:\n");
+        printf("  sync, -Sy          Update package repository database\n");
+        printf("  ins,  -S <pkg>     Install target package from repository\n");
+        printf("  list, -Q           List available packages\n");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "sync") == 0 || strcmp(argv[1], "-Sy") == 0) {
+        return cmd_sync();
+    } else if ((strcmp(argv[1], "ins") == 0 || strcmp(argv[1], "-S") == 0) && argc >= 3) {
+        return cmd_install(argv[2]);
+    } else if (strcmp(argv[1], "list") == 0 || strcmp(argv[1], "-Q") == 0) {
+        FILE *f = fopen(DB_CACHE, "r");
+        if (!f) { printf("No cache. Run 'epacmg sync' first.\n"); return 1; }
+        char line[256];
+        printf("=== Available Packages ===\n");
+        while (fgets(line, sizeof(line), f)) printf("  %s", line);
+        fclose(f);
+        return 0;
+    }
+
+    printf("Unknown command. Run 'epacmg' for help.\n");
+    return 1;
+}

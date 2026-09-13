@@ -155,7 +155,8 @@ ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/xeyes.elf \
                  build/iso/start.sh \
                  build/iso/twm.elf \
-                 build/iso/system.twmrc
+                 build/iso/system.twmrc \
+				 build/iso/epacmg.elf
 
 # ==============================================================================
 # Master Targets
