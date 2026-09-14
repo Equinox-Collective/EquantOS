@@ -6,7 +6,8 @@
 #include "stdio.h"
 #include "../gen/cpu.h"
 #include "../../drivers/serial/serial.h"
-
+#include "../../proc/sched.h"
+#include "../../proc/task.h"
 // x86_64 Hardware Physical Address Mask (Bits 12..51)
 // Strictly strips flags (0..11), OS bits (52..62) and NX bit (63)
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
@@ -175,20 +176,18 @@ void vmm_page_fault_handler(cpu_state_t *state) {
     uint64_t pd_idx   = (fault_addr >> 21) & 0x1FF;
     uint64_t pt_idx   = (fault_addr >> 12) & 0x1FF;
 
+    // 1. Handle Copy-On-Write Fault (COW)
     if (pml4[pml4_idx] & PTE_PRESENT) {
         page_table_t *pdpt = (page_table_t *)VIRT(pml4[pml4_idx] & PTE_ADDR_MASK);
         if (pdpt[pdpt_idx] & PTE_PRESENT) {
             page_table_t *pd = (page_table_t *)VIRT(pdpt[pdpt_idx] & PTE_ADDR_MASK);
             if (pd[pd_idx] & PTE_PRESENT) {
                 page_table_t *pt = (page_table_t *)VIRT(pd[pd_idx] & PTE_ADDR_MASK);
-                
                 uint64_t pte = pt[pt_idx];
                 bool is_write_fault = (state->error_code & 0x02) != 0;
 
-                // Handle Copy-On-Write Fault
                 if (is_write_fault && (pte & PTE_PRESENT) && (pte & PTE_COW)) {
                     uint64_t old_phys = pte & PTE_ADDR_MASK;
-
                     void *new_phys = pmm_alloc();
                     if (!new_phys) {
                         kernel_panic(state, __FILE__, __LINE__, "OOM during Copy-On-Write resolution!");
@@ -201,20 +200,63 @@ void vmm_page_fault_handler(cpu_state_t *state) {
 
                     pt[pt_idx] = ((uint64_t)new_phys & PTE_ADDR_MASK) | new_flags;
                     invlpg(fault_addr);
-
-                    return;
+                    return; // COW Resolved cleanly!
                 }
             }
         }
     }
 
-    serial_puts(COM1, "[VMM] Fatal Page Fault at virtual address: 0x");
+    // 2. DEMAND PAGING: Automatic User Stack Expansion
+    // User stack range: 0x7FFF00000000 .. 0x800000000000
+    if (fault_addr >= 0x7FFF00000000ULL && fault_addr < 0x800000000000ULL) {
+        void *new_stack_page = pmm_alloc();
+        if (new_stack_page) {
+            memset((void *)VIRT((uint64_t)new_stack_page), 0, PAGE_SIZE);
+            vmm_map(pml4, fault_addr & ~0xFFFULL, (uint64_t)new_stack_page,
+                    PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+            invlpg(fault_addr);
+            return; // Stack page allocated on the fly! Process continues seamlessly!
+        }
+    }
+
+    // 3. TRUE RING 3 ISOLATION:
+    // If a user-space program crashed (or kernel faulted on bad user pointer):
+    // DO NOT PANIC! Kill ONLY the rogue process, keep the OS and shell alive!
+    bool from_user = (state->cs == 0x23) || ((state->error_code & 0x04) != 0);
+    bool is_user_addr = (fault_addr < 0x0000800000000000ULL);
+
+    if (from_user || is_user_addr) {
+        serial_puts(COM1, "\n[VMM] Segmentation fault at virtual address: 0x");
+        char buf[32];
+        itoa_hex(fault_addr, buf);
+        serial_puts(COM1, buf);
+        serial_puts(COM1, " (Terminating rogue process)\n");
+
+        extern void sys_exit_group(int status);
+        extern int64_t sys_kill_handler(int pid, int sig);
+        extern task_t *current_task;
+
+        if (current_task && current_task->process) {
+            printf("\n\033[31mSegmentation fault (core dumped)\033[0m\n");
+            // Kill task cleanly with standard POSIX 139 (128 + SIGSEGV)
+            current_task->process->exit_code = 139;
+            current_task->process->exited = true;
+            current_task->state = TASK_STATE_ZOMBIE;
+            current_task->running = false;
+        }
+
+        sched_yield();
+        for (;;) { __asm__ volatile("hlt"); }
+    }
+
+    // 4. Genuine Kernel Panic: ONLY if the kernel's OWN higher-half code/data is corrupted!
+    serial_puts(COM1, "[VMM] Fatal Kernel Mode Page Fault at: 0x");
     char buf[32];
     itoa_hex(fault_addr, buf);
     serial_puts(COM1, buf);
     serial_puts(COM1, "\n");
 
-    kernel_panic(state, __FILE__, __LINE__, "Fatal Unhandled Page Fault (#PF)");
+    kernel_panic(state, __FILE__, __LINE__, "Fatal Unhandled Kernel Page Fault (#PF)");
 }
 
 uint64_t vmm_get_phys(page_table_t *pml4, uint64_t virt) {

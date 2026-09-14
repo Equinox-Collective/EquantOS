@@ -6,6 +6,8 @@
 #include "../proc/task.h"
 #include "string.h"
 #include "stdio.h"
+#include "../drivers/net/rtl8139.h"
+#include "../proc/sched.h"
 
 #define DEFAULT_CONNECT_TIMEOUT_MS  5000
 #define DEFAULT_RECV_TIMEOUT_MS     5000
@@ -100,7 +102,6 @@ int sock_create(void) {
 static void hlt_until_tick(void) {
     __asm__ volatile("sti; hlt; cli");
 }
-
 int sock_connect(int fd, uint32_t ip_be, uint16_t port) {
     if (fd < 0 || fd >= SOCK_MAX) return SOCK_ERR_BADFD;
     socket_entry_t *e = &sockets[fd];
@@ -120,11 +121,20 @@ int sock_connect(int fd, uint32_t ip_be, uint16_t port) {
     uint32_t deadline = start + (DEFAULT_CONNECT_TIMEOUT_MS / 10);
 
     while (tick < deadline) {
-        if (e->state == SOCK_STATE_CONNECTED) return 0;
-        if (e->state == SOCK_STATE_CLOSED || e->state == SOCK_STATE_ERROR) {
+        rtl8139_poll(); // Забираем входящий SYN-ACK
+
+        // Если сокет или TCP-блок уже в ESTABLISHED - УСПЕХ!
+        if (e->state == SOCK_STATE_CONNECTED || (e->tcb && e->tcb->state == TCP_ESTABLISHED)) {
+            e->state = SOCK_STATE_CONNECTED;
+            return 0;
+        }
+
+        if (e->state == SOCK_STATE_CLOSED || e->state == SOCK_STATE_ERROR || (e->tcb && e->tcb->state == TCP_CLOSED)) {
             return SOCK_ERR_REFUSED;
         }
-        hlt_until_tick();
+
+        __asm__ volatile("sti; pause"); // Разрешаем прерывания, чтобы тикал таймер!
+        sched_yield();
     }
     return SOCK_ERR_TIMEOUT;
 }
@@ -159,6 +169,7 @@ int sock_recv(int fd, uint8_t *buf, uint32_t len) {
     uint32_t deadline = tick + timeout;
 
     while (tick < deadline) {
+        rtl8139_poll(); // Забираем входящие TLS-пакеты
         if (e->rx_ring && ring_used(e) > 0) {
             return (int)ring_pop(e, buf, len);
         }
@@ -166,7 +177,8 @@ int sock_recv(int fd, uint8_t *buf, uint32_t len) {
             if (!e->rx_ring || ring_used(e) == 0) return 0;
         }
         if (e->state == SOCK_STATE_ERROR) return SOCK_ERR_CLOSED;
-        hlt_until_tick();
+        __asm__ volatile("pause");
+        sched_yield();
     }
     return SOCK_ERR_TIMEOUT;
 }

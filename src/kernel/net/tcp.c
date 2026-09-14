@@ -193,6 +193,7 @@ void handle_tcp(net_interface_t *iface, uint8_t *packet, uint32_t ip_hdr_len) {
             sock->rcv_nxt = seq + 1;
             sock->state   = TCP_ESTABLISHED;
             tcp_send_pure_ack(iface, sock);
+            socket_on_state_change(sock);
 
             if (sock->on_data == wget_on_data) {
                 send_http_get(iface, sock);

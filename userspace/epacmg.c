@@ -17,7 +17,7 @@
 #define SYS_EQUANT_DNS 401
 
 #define DEFAULT_TRANS_HOST "raw.githubusercontent.com"
-// Change this to your real path on GitHub:
+// Change this to your real path:
 #define DEFAULT_MANIFEST_PATH "/ewasion137/epacmg-trans/main/packages.txt"
 
 #define DB_DIR "/var/lib/epacmg"
@@ -81,7 +81,7 @@ static int extract_tar(const uint8_t *tar_data, size_t total_size) {
 
     while (offset + 512 <= total_size) {
         const tar_header_t *hdr = (const tar_header_t *)(tar_data + offset);
-        if (hdr->name[0] == '\0') break; // End of Archive
+        if (hdr->name[0] == '\0') break;
 
         unsigned int file_size = parse_octal(hdr->size, sizeof(hdr->size));
         offset += 512;
@@ -93,9 +93,9 @@ static int extract_tar(const uint8_t *tar_data, size_t total_size) {
             snprintf(dest_path, sizeof(dest_path), "/%s", hdr->name);
         }
 
-        if (hdr->typeflag == '5') { // Directory
+        if (hdr->typeflag == '5') {
             mkdir(dest_path, 0755);
-        } else if (hdr->typeflag == '0' || hdr->typeflag == '\0') { // File
+        } else if (hdr->typeflag == '0' || hdr->typeflag == '\0') {
             create_parent_dirs(dest_path);
             printf("  -> Extracting: %s (%u bytes)\n", dest_path, file_size);
             int fd = open(dest_path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
@@ -106,16 +106,65 @@ static int extract_tar(const uint8_t *tar_data, size_t total_size) {
                 close(fd);
                 chmod(dest_path, 0755);
                 files_extracted++;
-            } else {
-                printf("  [ERROR] Failed to write %s\n", dest_path);
             }
         }
-
-        offset += (file_size + 511) & ~511; // Align to 512 bytes
+        offset += (file_size + 511) & ~511;
     }
-
     return files_extracted;
 }
+
+// ============================================================================
+// BearSSL No-Anchor Insecure Adapter (Allows HTTPS bootstrapping)
+// ============================================================================
+
+typedef struct {
+    const br_x509_class *vtable;
+    const br_x509_class **inner;
+} x509_noanchor_context;
+
+static void xwc_start_chain(const br_x509_class **ctx, const char *server_name) {
+    x509_noanchor_context *xwc = (x509_noanchor_context *)ctx;
+    (*xwc->inner)->start_chain(xwc->inner, server_name);
+}
+
+static void xwc_start_cert(const br_x509_class **ctx, uint32_t length) {
+    x509_noanchor_context *xwc = (x509_noanchor_context *)ctx;
+    (*xwc->inner)->start_cert(xwc->inner, length);
+}
+
+static void xwc_append(const br_x509_class **ctx, const unsigned char *buf, size_t len) {
+    x509_noanchor_context *xwc = (x509_noanchor_context *)ctx;
+    (*xwc->inner)->append(xwc->inner, buf, len);
+}
+
+static void xwc_end_cert(const br_x509_class **ctx) {
+    x509_noanchor_context *xwc = (x509_noanchor_context *)ctx;
+    (*xwc->inner)->end_cert(xwc->inner);
+}
+
+static unsigned xwc_end_chain(const br_x509_class **ctx) {
+    x509_noanchor_context *xwc = (x509_noanchor_context *)ctx;
+    unsigned err = (*xwc->inner)->end_chain(xwc->inner);
+    if (err == BR_ERR_X509_NOT_TRUSTED) {
+        err = BR_ERR_OK;
+    }
+    return err;
+}
+
+static const br_x509_pkey *xwc_get_pkey(const br_x509_class *const *ctx, unsigned *usages) {
+    const x509_noanchor_context *xwc = (const x509_noanchor_context *)ctx;
+    return (*xwc->inner)->get_pkey(xwc->inner, usages);
+}
+
+static const br_x509_class x509_noanchor_vtable = {
+    sizeof(x509_noanchor_context),
+    xwc_start_chain,
+    xwc_start_cert,
+    xwc_append,
+    xwc_end_cert,
+    xwc_end_chain,
+    xwc_get_pkey
+};
 
 // ============================================================================
 // BearSSL HTTPS / HTTP Engine
@@ -162,6 +211,8 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
         return NULL;
     }
 
+    printf("[epacmg] Connected successfully! Sending HTTP request...\n");
+
     char req[512];
     snprintf(req, sizeof(req),
              "GET %s HTTP/1.1\r\n"
@@ -170,12 +221,11 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
              "Connection: close\r\n\r\n",
              path, host);
 
-    size_t buf_cap = 1024 * 1024; // 1 MB initial buffer
+    size_t buf_cap = 1024 * 1024;
     uint8_t *buf = (uint8_t *)malloc(buf_cap);
     size_t received = 0;
 
     if (!use_ssl) {
-        // Plain HTTP
         write(fd, req, strlen(req));
         ssize_t r;
         while ((r = read(fd, buf + received, buf_cap - received - 1)) > 0) {
@@ -186,15 +236,41 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
             }
         }
     } else {
-        // BearSSL TLS 1.2 Handshake
-        br_ssl_client_context sc;
-        br_x509_minimal_context xc;
-        unsigned char iobuf[BR_SSL_BUFSIZE_BIDI];
+        static br_ssl_client_context sc;
+        static br_x509_minimal_context xc;
+        static x509_noanchor_context xwc;
+        static unsigned char iobuf[BR_SSL_BUFSIZE_BIDI];
 
-        // Minimal client without hardcoded root CAs (Bootstrapping mode)
         br_ssl_client_init_full(&sc, &xc, NULL, 0);
+
+        // Wrap X509 engine to accept GitHub certificate chain
+        xwc.vtable = &x509_noanchor_vtable;
+        xwc.inner = &xc.vtable;
+        br_ssl_engine_set_x509(&sc.eng, &xwc.vtable);
+
         br_ssl_engine_set_buffer(&sc.eng, iobuf, sizeof(iobuf), 1);
-        br_ssl_client_reset(&sc, host, 0);
+
+        // ====================================================================
+        // INJECT HARDWARE ENTROPY (Satisfies BearSSL DRBG without /dev/urandom)
+        // ====================================================================
+        uint8_t entropy[32];
+        uint64_t tsc;
+        __asm__ volatile("rdtsc" : "=A"(tsc));
+        for (int i = 0; i < 32; i++) {
+            tsc = tsc * 6364136223846793005ULL + 1442695040888963407ULL;
+            entropy[i] = (uint8_t)(tsc >> (i % 8 * 8));
+        }
+        br_ssl_engine_inject_entropy(&sc.eng, entropy, sizeof(entropy));
+
+        // Reset client for handshake
+        int reset_res = br_ssl_client_reset(&sc, host, 0);
+        if (reset_res == 0) {
+            printf("[epacmg] TLS Engine Reset failed! Last error = %d\n",
+                   br_ssl_engine_last_error(&sc.eng));
+            close(fd);
+            free(buf);
+            return NULL;
+        }
 
         br_sslio_context ioc;
         br_sslio_init(&ioc, &sc.eng, sock_read_cb, &fd, sock_write_cb, &fd);
@@ -222,7 +298,6 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
 
     buf[received] = '\0';
 
-    // Parse HTTP Status and Body
     char *body = strstr((char *)buf, "\r\n\r\n");
     if (!body) {
         free(buf);
@@ -309,7 +384,6 @@ static int cmd_install(const char *pkg_name) {
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#' || strlen(line) < 5) continue;
         char *p = line;
-        // Parse Name|Ver|Size|URL|Desc
         char *tok = strtok(p, "|\n"); if (!tok) continue; strncpy(name, tok, sizeof(name)-1);
         tok = strtok(NULL, "|\n"); if (!tok) continue; strncpy(ver, tok, sizeof(ver)-1);
         tok = strtok(NULL, "|\n"); if (!tok) continue; strncpy(size_str, tok, sizeof(size_str)-1);

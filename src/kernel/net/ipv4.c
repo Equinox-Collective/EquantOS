@@ -4,6 +4,7 @@
 #include "arp.h"
 #include "icmp.h"
 #include "string.h"
+#include "../drivers/net/rtl8139.h"
 
 extern void term_print(const char* str);
 
@@ -49,10 +50,21 @@ void ipv4_send_packet(net_interface_t* iface, uint32_t dest_ip, uint8_t proto, u
     }
 
     // ARP Lookup
-    uint8_t* dest_mac = arp_lookup(target_ip);
+    uint8_t *dest_mac = arp_lookup(target_ip);
     if (!dest_mac) {
         send_arp_request(iface, target_ip);
-        return; // Drop packet for now, first packet triggers ARP
+
+        // Wait briefly for ARP reply (QEMU responds in < 1ms)
+        for (int retry = 0; retry < 50; retry++) {
+            rtl8139_poll();
+            dest_mac = arp_lookup(target_ip);
+            if (dest_mac) break;
+            
+            // Tiny microsecond pause
+            for (volatile int d = 0; d < 20000; d++);
+        }
+
+        if (!dest_mac) return; // Drop only if host truly does not respond
     }
 
     uint8_t buffer[1600];

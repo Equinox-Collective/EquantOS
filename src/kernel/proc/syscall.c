@@ -22,6 +22,7 @@
 #include "../ipc/shm.h"
 #include "../drivers/input/evdev.h"
 #include "../net/dns.h"
+#include "../drivers/net/rtl8139.h"
 #include <stdarg.h>
 
 static void strace_log(const char *fmt, ...) {
@@ -133,10 +134,17 @@ static inline bool validate_user_memory(const void *addr, size_t size, bool writ
     (void)writeable;
     if (!addr) return false;
     uintptr_t uaddr = (uintptr_t)addr;
-    // Canonical user-space boundary check for x86_64
-    if (uaddr >= 0x0000800000000000ULL || (uaddr + size) > 0x0000800000000000ULL) {
+
+    // 1. Guard against 64-bit integer wraparound overflow
+    if (uaddr + size < uaddr) {
         return false;
     }
+
+    // 2. Strict canonical user space boundary check (Strictly below 128TB limit)
+    if ((uaddr + size) > 0x00007FFFFFFFFFFFULL) {
+        return false;
+    }
+
     return true;
 }
 
@@ -929,12 +937,12 @@ static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flag
 static int64_t inet_socket_read_op(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)offset;
     if (!node || !node->ptr) return -EBADF;
-    int sock_id = (int)(uintptr_t)node->ptr;
+    int sock_id = (int)(uintptr_t)node->ptr - 1; // <-- ВЫЧИТАЕМ 1
 
     int res = sock_recv(sock_id, buffer, (uint32_t)size);
     if (res < 0) {
         if (res == SOCK_ERR_TIMEOUT || res == SOCK_ERR_AGAIN) return -EAGAIN;
-        if (res == SOCK_ERR_CLOSED || res == SOCK_ERR_NOTCONN) return 0; // EOF
+        if (res == SOCK_ERR_CLOSED || res == SOCK_ERR_NOTCONN) return 0;
         return -EIO;
     }
     return res;
@@ -943,7 +951,7 @@ static int64_t inet_socket_read_op(vfs_node_t *node, uint64_t offset, uint64_t s
 static int64_t inet_socket_write_op(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)offset;
     if (!node || !node->ptr) return -EBADF;
-    int sock_id = (int)(uintptr_t)node->ptr;
+    int sock_id = (int)(uintptr_t)node->ptr - 1; // <-- ВЫЧИТАЕМ 1
 
     int res = sock_send(sock_id, buffer, (uint32_t)size);
     if (res < 0) {
@@ -955,7 +963,7 @@ static int64_t inet_socket_write_op(vfs_node_t *node, uint64_t offset, uint64_t 
 
 static void inet_socket_close_op(vfs_node_t *node) {
     if (node && node->ptr) {
-        int sock_id = (int)(uintptr_t)node->ptr;
+        int sock_id = (int)(uintptr_t)node->ptr - 1; // <-- ВЫЧИТАЕМ 1
         sock_close(sock_id);
         node->ptr = NULL;
     }
@@ -1779,7 +1787,7 @@ static int64_t sys_socket_handler(int domain, int type, int protocol) {
         strcpy(node->name, "socket:inet");
         node->flags = FS_SOCKET;
         node->ops = &inet_socket_vfs_ops;
-        node->ptr = (void *)(uintptr_t)sock_id;
+        node->ptr = (void *)(uintptr_t)(sock_id + 1); // <-- СОХРАНЯЕМ sock_id + 1
 
         return alloc_fd(node, O_RDWR);
     }
@@ -1857,7 +1865,7 @@ static int64_t sys_connect_handler(int fd, const struct sockaddr_un *addr, uint3
     if (node->ops == &inet_socket_vfs_ops && node->ptr) {
         if (addrlen < sizeof(struct linux_sockaddr_in)) return -EINVAL;
         const struct linux_sockaddr_in *in = (const struct linux_sockaddr_in *)addr;
-        int sock_id = (int)(uintptr_t)node->ptr;
+        int sock_id = (int)(uintptr_t)node->ptr - 1; // <-- ВЫЧИТАЕМ 1
 
         uint16_t port = HTONS(in->sin_port);
         uint32_t ip   = HTONL(in->sin_addr);
@@ -2400,17 +2408,20 @@ void syscall_handler(void *regs_ptr) {
                 break;
             }
 
-            // 10.0.2.3 (QEMU virtual DNS)
-            dns_query(iface, hostname, 0x0A000203);
-
-            uint32_t start_t = tick;
             uint32_t resolved = 0;
-            // Wait up to 3 seconds
-            while (tick - start_t < 300) {
-                resolved = dns_get_result(hostname);
-                if (resolved != 0) break;
-                __asm__ volatile("sti; pause");
-                sched_yield();
+
+            // Try up to 3 times (standard DNS client behavior)
+            for (int attempt = 0; attempt < 3 && resolved == 0; attempt++) {
+                dns_query(iface, hostname, 0x0A000203);
+
+                uint32_t start_t = tick;
+                while (tick - start_t < 100) { // 1 second per attempt
+                    rtl8139_poll();
+                    resolved = dns_get_result(hostname);
+                    if (resolved != 0) break;
+                    __asm__ volatile("pause");
+                    sched_yield();
+                }
             }
 
             if (resolved != 0) {

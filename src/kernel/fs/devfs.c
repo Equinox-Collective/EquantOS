@@ -311,6 +311,32 @@ vfs_file_operations_t g_tty_fops = {
     .mmap = NULL
 };
 
+static int64_t dev_urandom_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)node; (void)offset;
+    if (!buffer || size == 0) return 0;
+    
+    // Cap read size to prevent buffer overrun
+    if (size > 256) size = 256;
+
+    uintptr_t uaddr = (uintptr_t)buffer;
+    if (uaddr >= 0x00007FFFFFFFFFFFULL || (uaddr + size) > 0x00007FFFFFFFFFFFULL) {
+        return -EFAULT;
+    }
+
+    uint64_t tsc;
+    __asm__ volatile("rdtsc" : "=A"(tsc));
+    for (uint64_t i = 0; i < size; i++) {
+        tsc = tsc * 6364136223846793005ULL + 1442695040888963407ULL;
+        buffer[i] = (uint8_t)(tsc >> 32);
+    }
+    return (int64_t)size;
+}
+
+static vfs_file_operations_t urandom_fops = {
+    .read = dev_urandom_read,
+    .write = dev_null_write
+};
+
 void devfs_init(void) {
     devfs_root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strcpy(devfs_root->name, "dev");
@@ -326,7 +352,8 @@ void devfs_init(void) {
     devfs_register_device("tty",  &tty_device_fops, NULL, 0666);
     devfs_register_device("tty0", &tty_device_fops, NULL, 0666);
     devfs_register_device("tty1", &tty_device_fops, NULL, 0666);
-
+    devfs_register_device("urandom", &urandom_fops, NULL, 0666);
+    devfs_register_device("random",  &urandom_fops, NULL, 0666);
     // 3. Register Framebuffer
     devfs_register_device("fb0", &fb_fops, NULL, 0666);
 
