@@ -208,14 +208,14 @@ void vmm_page_fault_handler(cpu_state_t *state) {
 
     // 2. DEMAND PAGING: Automatic User Stack Expansion
     // User stack range: 0x7FFF00000000 .. 0x800000000000
-    if (fault_addr >= 0x7FFF00000000ULL && fault_addr < 0x800000000000ULL) {
+    if (fault_addr >= 0x7FE000000000ULL && fault_addr < 0x0000800000000000ULL) {
         void *new_stack_page = pmm_alloc();
         if (new_stack_page) {
             memset((void *)VIRT((uint64_t)new_stack_page), 0, PAGE_SIZE);
             vmm_map(pml4, fault_addr & ~0xFFFULL, (uint64_t)new_stack_page,
                     PTE_PRESENT | PTE_WRITABLE | PTE_USER);
             invlpg(fault_addr);
-            return; // Stack page allocated on the fly! Process continues seamlessly!
+            return; // Stack page allocated on the fly!
         }
     }
 

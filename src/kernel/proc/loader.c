@@ -83,7 +83,7 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
 
     // Allocate 8 MB user stack
     uint32_t stack_pages = 2048;
-    uint64_t user_stack_top = 0x7FFFFFFF0000ULL;
+    uint64_t user_stack_top = 0x7FFFF0000000ULL;
     uint64_t user_stack_bottom = user_stack_top - ((uint64_t)stack_pages * PAGE_SIZE);
     void *top_stack_phys = NULL;
 
@@ -328,7 +328,7 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
 
     // 2. Allocate 8 MB user stack
     uint32_t stack_pages = 2048;
-    uint64_t user_stack_top = 0x7FFFFFFF0000ULL;
+    uint64_t user_stack_top = 0x7FFFF0000000ULL;
     uint64_t user_stack_bottom = user_stack_top - ((uint64_t)stack_pages * PAGE_SIZE);
     void *top_stack_phys = NULL;
 

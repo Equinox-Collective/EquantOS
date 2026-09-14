@@ -314,21 +314,29 @@ vfs_file_operations_t g_tty_fops = {
 static int64_t dev_urandom_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset;
     if (!buffer || size == 0) return 0;
-    
-    // Cap read size to prevent buffer overrun
     if (size > 256) size = 256;
 
     uintptr_t uaddr = (uintptr_t)buffer;
+    // Strict canonical check: must not touch or cross 128TB non-canonical ceiling
     if (uaddr >= 0x00007FFFFFFFFFFFULL || (uaddr + size) > 0x00007FFFFFFFFFFFULL) {
         return -EFAULT;
     }
 
+    uint8_t kbuf[256];
     uint64_t tsc;
     __asm__ volatile("rdtsc" : "=A"(tsc));
     for (uint64_t i = 0; i < size; i++) {
         tsc = tsc * 6364136223846793005ULL + 1442695040888963407ULL;
-        buffer[i] = (uint8_t)(tsc >> 32);
+        kbuf[i] = (uint8_t)(tsc >> 32);
     }
+
+    // Safe transfer with hardware boundary clamping
+    for (uint64_t i = 0; i < size; i++) {
+        uintptr_t target = uaddr + i;
+        if (target >= 0x00007FFFFFFFFFFFULL) break;
+        buffer[i] = kbuf[i];
+    }
+
     return (int64_t)size;
 }
 

@@ -4,7 +4,7 @@
 #include "../misc/power.h"
 #include "gen/io.h"
 #include "../../equterm/term.h"
-#include <string.h>
+#include "../proc/sched.h"
 #include <stdbool.h>
 
 static bool in_panic = false;
@@ -21,6 +21,25 @@ static void poll_keyboard_enter_for_reboot(void) {
 }
 
 void __attribute__((noreturn)) panic_handler(cpu_state_t *state) {
+    // If exception came from Ring 3 (User Code CS == 0x23 or User Stack SS == 0x1B)
+    if (state != NULL && (state->cs == 0x23 || state->ss == 0x1B || (state->error_code & 4) != 0)) {
+        serial_puts(COM1, "\n[KERNEL] Unhandled User CPU Exception. Terminating task.\n");
+        extern void term_print(const char *str);
+        term_print("\n\033[31mSegmentation fault (core dumped)\033[0m\n");
+        
+        extern task_t *current_task;
+        extern void sched_yield(void);
+        if (current_task && current_task->process) {
+            current_task->process->exit_code = 139; // 128 + SIGSEGV
+            current_task->process->exited = true;
+            current_task->state = TASK_STATE_ZOMBIE;
+            current_task->running = false;
+        }
+
+        sched_yield();
+        for (;;) { asm volatile ("hlt"); }
+    }
+
     kernel_panic(state, NULL, 0, "Unhandled CPU Exception");
 }
 
