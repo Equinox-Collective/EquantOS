@@ -1648,27 +1648,29 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
     }
 }
 
-static int64_t sys_sysinfo_handler(equant_sysinfo_t *info) {
+static int64_t sys_sysinfo_handler(struct linux_sysinfo *info) {
     if (!info) return -EFAULT;
-    equant_sysinfo_t kinfo;
-    memset(&kinfo, 0, sizeof(equant_sysinfo_t));
-    kinfo.total_ram = pmm_get_total_memory();
-    kinfo.used_ram = pmm_get_used_memory();
-    kinfo.free_ram = (kinfo.total_ram > kinfo.used_ram) ? (kinfo.total_ram - kinfo.used_ram) : 0;
-    kinfo.pmm_total_pages = total_pages;
-    kinfo.pmm_used_pages = kinfo.used_ram / PAGE_SIZE;
-    kinfo.kernel_heap_used = used_memory;
-    memcpy(info, &kinfo, sizeof(equant_sysinfo_t));
+    struct linux_sysinfo kinfo;
+    memset(&kinfo, 0, sizeof(struct linux_sysinfo));
+
+    kinfo.uptime = (int64_t)(tick / 100); // Real uptime in seconds!
+    kinfo.totalram = pmm_get_total_memory();
+    uint64_t used = pmm_get_used_memory();
+    kinfo.freeram = (kinfo.totalram > used) ? (kinfo.totalram - used) : 0;
+    kinfo.mem_unit = 1;
+    kinfo.procs = 2; // Init + Current
+
+    memcpy(info, &kinfo, sizeof(struct linux_sysinfo));
     return 0;
 }
 
 static int64_t sys_uname_handler(struct linux_utsname *buf) {
     if (!buf) return -EFAULT;
     memset(buf, 0, sizeof(struct linux_utsname));
-    strcpy(buf->sysname, "Linux");
+    strcpy(buf->sysname, "EquantOS"); // <-- Наше истинное имя!
     strcpy(buf->nodename, "equant");
-    strcpy(buf->release, "6.1.0-equantos");
-    strcpy(buf->version, "EquantOS SMP Unix Kernel x86_64");
+    strcpy(buf->release, "1.0.0-equantos");
+    strcpy(buf->version, "EquantOS Unix Microkernel x86_64");
     strcpy(buf->machine, "x86_64");
     strcpy(buf->domainname, "localdomain");
     return 0;
@@ -2462,7 +2464,7 @@ void syscall_handler(void *regs_ptr) {
             ret = sys_getrusage_handler((int)regs->rdi, (struct rusage *)regs->rsi);
             break;
         case SYS_SYSINFO:
-            ret = sys_sysinfo_handler((equant_sysinfo_t *)regs->rdi);
+            ret = sys_sysinfo_handler((struct linux_sysinfo *)regs->rdi);
             break;
         case SYS_TIMES:
             ret = sys_times_handler((struct tms *)regs->rdi);

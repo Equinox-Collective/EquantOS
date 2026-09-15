@@ -502,15 +502,22 @@ struct tms {
     int64_t tms_cstime;
 };
 
-typedef struct {
-    uint64_t total_ram;
-    uint64_t free_ram;
-    uint64_t used_ram;
-    uint64_t pmm_total_pages;
-    uint64_t pmm_used_pages;
-    uint64_t kernel_heap_used;
-} __attribute__((packed)) equant_sysinfo_t;
-
+struct linux_sysinfo {
+    int64_t  uptime;             // Seconds since boot
+    uint64_t loads[3];          // 1, 5, and 15 minute load averages
+    uint64_t totalram;          // Total usable main memory size in bytes
+    uint64_t freeram;           // Available memory size in bytes
+    uint64_t sharedram;         // Amount of shared memory
+    uint64_t bufferram;         // Memory used by buffers
+    uint64_t totalswap;         // Total swap space size
+    uint64_t freeswap;          // Swap space still available
+    uint16_t procs;             // Number of current processes
+    uint16_t pad;
+    uint64_t totalhigh;         // Total high memory size
+    uint64_t freehigh;          // Available high memory size
+    uint32_t mem_unit;          // Memory unit size in bytes (1)
+    char     _f[20 - 2 * sizeof(uint64_t) - sizeof(uint32_t)];
+};
 typedef struct {
     void  *ss_sp;
     int    ss_flags;
