@@ -79,13 +79,16 @@ void kernel_start_userland(void) {
 
     // Monitor shell lifecycle: if user types 'exit' or Bash faults, drop to Rescue Shell
     while (last_spawned_task && last_spawned_task->state != TASK_STATE_ZOMBIE) {
-        current_task->state = TASK_STATE_BLOCKED;
-        sched_dequeue(current_task);
-        sched_yield();
+        sched_yield(); // Simply yield CPU time to Bash without destroying own scheduler state!
     }
 
     term_set_color(0x00FF5555);
     term_print("\n[INIT] Interactive shell process terminated. Dropping to Rescue Shell.\n");
     term_set_color(0x00FFFFFF);
     shell_init();
+    for (;;) {
+        tty_poll_input();              // Опрашиваем клавиатуру и печатаем ввод
+        __asm__ volatile("pause");
+        sched_yield();                 // Отдаем квант времени фоновым процессам
+    }
 }
