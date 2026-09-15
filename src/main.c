@@ -1,4 +1,3 @@
-// src/main.c - Clean Kernel Entry Point
 #include <stdint.h>
 #include <stddef.h>
 #include "limine.h"
@@ -28,7 +27,6 @@ volatile struct limine_framebuffer_request framebuffer_request = {
 };
 
 struct limine_framebuffer *kernel_fb = NULL;
-
 uint64_t hhdm_offset = 0;
 
 __attribute__((used, section(".requests")))
@@ -45,7 +43,6 @@ volatile struct limine_module_request module_request = {
 };
 
 void _start(void) {
-    // 1. Core Hardware Bootstrap
     serial_init(COM1);
     enable_fpu_sse();
     init_gdt();
@@ -56,13 +53,11 @@ void _start(void) {
     }
     hhdm_offset = hhdm_request.response->offset;
 
-    // 2. Graphical Terminal Display & TTY System
     if (framebuffer_request.response != NULL && framebuffer_request.response->framebuffer_count > 0) {
         kernel_fb = framebuffer_request.response->framebuffers[0];
         tty_init(kernel_fb->address, kernel_fb->width, kernel_fb->height, kernel_fb->pitch);
     }
 
-    // 3. Buddy Memory & Slab Allocators
     pmm_init();
     vmm_init();
 
@@ -72,36 +67,14 @@ void _start(void) {
     }
     init_heap(VIRT(heap_phys), 256 * 4096);
 
-    // 4. Load Limine Boot Modules into memory
-    if (module_request.response != NULL && module_request.response->module_count > 0) {
-        for (uint64_t i = 0; i < module_request.response->module_count; i++) {
-            struct limine_file *mod = module_request.response->modules[i];
-            serial_puts(COM1, "[KERNEL] Boot Module detected: ");
-            serial_puts(COM1, mod->path);
-            serial_puts(COM1, "\n");
-
-            // Auto-detect and initialize PSF2 font module
-            if (strstr(mod->path, "font.psf") || strstr(mod->path, ".psf")) {
-                if (psf2_init_default(mod->address, mod->size)) {
-                    serial_puts(COM1, "[KERNEL] PSF2 Font loaded successfully from Limine module.\n");
-                }
-            }
-        }
-    }
-    // 5. Execute all Initcalls (Syscalls, Timer, Tasking, VFS, Storage)
     serial_puts(COM1, "[KERNEL] Executing Initcalls...\n");
     do_initcalls();
 
-    // 6. Enable Interrupts & Launch Shell AFTER ALL INITCALL LOGS ARE DONE
     asm volatile ("sti");
 
     tty_print("\nWelcome to EquantOS!\n\n");
-    // shell_init();
-
-    // Launch Ring 3 Bash (or Rescue Shell fallback)
     kernel_start_userland();
 
-    // Kernel Idle Loop: execution only reaches here if userland exited completely
     for (;;) {
         asm volatile ("hlt");
     }

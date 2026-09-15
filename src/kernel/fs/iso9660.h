@@ -1,4 +1,3 @@
-// src/kernel/fs/iso9660.h - ISO9660 Optical Disc Filesystem Driver
 #ifndef ISO9660_H
 #define ISO9660_H
 
@@ -11,7 +10,6 @@
 #define ISO_SECTOR_SIZE 2048
 #define ISO_PVD_LBA     16
 
-// ISO9660 Directory Record Structure (34+ bytes)
 typedef struct {
     uint8_t  length;
     uint8_t  ext_attr_length;
@@ -20,7 +18,7 @@ typedef struct {
     uint32_t data_length_lsb;
     uint32_t data_length_msb;
     uint8_t  recording_date[7];
-    uint8_t  flags;             // Bit 1 (0x02) = Directory
+    uint8_t  flags;
     uint8_t  file_unit_size;
     uint8_t  interleave_gap_size;
     uint16_t vol_seq_num_lsb;
@@ -29,11 +27,10 @@ typedef struct {
     char     file_identifier[];
 } __attribute__((packed)) iso9660_dir_record_t;
 
-// ISO9660 Primary Volume Descriptor (PVD) Structure (2048 bytes)
 typedef struct {
-    uint8_t  type;              // Must be 0x01
-    char     id[5];             // Must be "CD001"
-    uint8_t  version;           // Must be 0x01
+    uint8_t  type;
+    char     id[5];
+    uint8_t  version;
     uint8_t  unused1;
     char     system_id[32];
     char     volume_id[32];
@@ -58,5 +55,6 @@ typedef struct {
 
 void iso9660_init(void);
 vfs_node_t *iso9660_mount(block_device_t dev);
+vfs_node_t *iso9660_mount_boot_drive(void);
 
-#endif // ISO9660_H
+#endif

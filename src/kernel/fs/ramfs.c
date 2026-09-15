@@ -1,4 +1,3 @@
-// ramfs.c - In-memory RAM File System implementation
 #include "ramfs.h"
 #include "../core/mem/memory.h"
 #include "string.h"
@@ -6,6 +5,8 @@
 #include "../core/initcall.h"
 #include "../../limine.h"
 #include "../drivers/serial/serial.h"
+#include "iso9660.h"
+#include "../drivers/display/psf2.h"
 
 extern volatile struct limine_module_request module_request;
 
@@ -28,7 +29,7 @@ static int64_t ramfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uin
 
     uint64_t required_size = offset + size;
     if (required_size > fdata->capacity) {
-        size_t new_cap = required_size + 1024; // Buffer growth padding
+        size_t new_cap = required_size + 1024;
         uint8_t *new_buf = (uint8_t *)krealloc(fdata->buffer, new_cap);
         if (!new_buf) return -1;
         fdata->buffer = new_buf;
@@ -70,6 +71,7 @@ static vfs_node_t *ramfs_vfs_create(vfs_node_t *dir, const char *name, uint32_t 
     }
     return ramfs_create_file(dir, name, NULL, 0);
 }
+
 static vfs_file_operations_t ramfs_fops = {
     .read = ramfs_read,
     .write = ramfs_write,
@@ -92,32 +94,29 @@ vfs_node_t *ramfs_create_root(void) {
 
 vfs_node_t *ramfs_create_directory(vfs_node_t *parent, const char *name) {
     vfs_node_t *dir = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-    if (!dir) return NULL; // Safety guard against OOM
-    
+    if (!dir) return NULL;
+
     strcpy(dir->name, name);
     dir->flags = FS_DIRECTORY;
     dir->permissions = 0755;
     dir->ops = &ramfs_fops;
-    dir->parent = parent;
+    dir->parent = parent ? parent : dir;
 
-    if (!parent) {
-        parent = dir; // Root self-parenting fallback
-    }
-
-    // Append to parent children list
-    if (!parent->children) {
-        parent->children = dir;
-    } else {
-        vfs_node_t *curr = parent->children;
-        while (curr->next) curr = curr->next;
-        curr->next = dir;
+    if (parent) {
+        if (!parent->children) {
+            parent->children = dir;
+        } else {
+            vfs_node_t *curr = parent->children;
+            while (curr->next) curr = curr->next;
+            curr->next = dir;
+        }
     }
     return dir;
 }
 
 vfs_node_t *ramfs_create_file(vfs_node_t *parent, const char *name, void *data, size_t size) {
     vfs_node_t *file = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-    if (!file) return NULL; // Safety guard against OOM
+    if (!file) return NULL;
 
     strcpy(file->name, name);
     file->flags = FS_FILE;
@@ -142,9 +141,6 @@ vfs_node_t *ramfs_create_file(vfs_node_t *parent, const char *name, void *data, 
             kfree(file);
             return NULL;
         }
-    } else {
-        fdata->buffer = NULL;
-        fdata->capacity = 0;
     }
     file->ptr = (vfs_node_t *)fdata;
 
@@ -167,7 +163,75 @@ static int __init ramfs_populate_modules_initcall(void) {
     if (!sys_dir) {
         sys_dir = ramfs_create_directory(vfs_root, "sys");
     }
-    vfs_node_t *bin_dir = ramfs_create_directory(sys_dir, "bin");
+    vfs_node_t *sys_bin_dir = vfs_finddir(sys_dir, "bin");
+    if (!sys_bin_dir) {
+        sys_bin_dir = ramfs_create_directory(sys_dir, "bin");
+    }
+
+    vfs_node_t *bin_dir = vfs_finddir(vfs_root, "bin");
+    if (!bin_dir) {
+        bin_dir = ramfs_create_directory(vfs_root, "bin");
+    }
+
+    vfs_node_t *iso_root = iso9660_mount_boot_drive();
+    if (iso_root) {
+        serial_puts(COM1, "[RAMFS] Mapping files from ISO9660 into RAMFS...\n");
+        uint32_t idx = 0;
+        vfs_node_t *entry = NULL;
+        while ((entry = vfs_readdir(iso_root, idx++)) != NULL) {
+            if (strstr(entry->name, "font.psf") || strstr(entry->name, ".psf")) {
+                uint8_t *fbuf = (uint8_t *)kmalloc(entry->length);
+                if (fbuf) {
+                    if (vfs_read(entry, 0, entry->length, fbuf) == (int64_t)entry->length) {
+                        psf2_init_default(fbuf, entry->length);
+                        serial_puts(COM1, "[KERNEL] PSF2 Font loaded from ISO9660.\n");
+                    }
+                }
+            }
+
+            entry->parent = vfs_root;
+            entry->next = vfs_root->children;
+            vfs_root->children = entry;
+
+            if (strcmp(entry->name, "_bashrc") == 0) {
+                vfs_node_t *alias = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                if (alias) {
+                    memcpy(alias, entry, sizeof(vfs_node_t));
+                    strcpy(alias->name, ".bashrc");
+                    alias->parent = vfs_root;
+                    alias->next = vfs_root->children;
+                    vfs_root->children = alias;
+                }
+            }
+
+            if (entry->flags & FS_FILE) {
+                if (sys_bin_dir) {
+                    vfs_node_t *snode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                    if (snode) {
+                        memcpy(snode, entry, sizeof(vfs_node_t));
+                        snode->parent = sys_bin_dir;
+                        snode->next = sys_bin_dir->children;
+                        sys_bin_dir->children = snode;
+                    }
+                }
+                if (bin_dir) {
+                    vfs_node_t *bnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                    if (bnode) {
+                        memcpy(bnode, entry, sizeof(vfs_node_t));
+                        bnode->parent = bin_dir;
+                        bnode->next = bin_dir->children;
+                        bin_dir->children = bnode;
+                    }
+                }
+            }
+
+            serial_puts(COM1, "[RAMFS] ISO node registered: ");
+            serial_puts(COM1, entry->name);
+            serial_puts(COM1, "\n");
+        }
+        kfree(iso_root);
+        return 0;
+    }
 
     if (module_request.response != NULL && module_request.response->module_count > 0) {
         for (uint64_t i = 0; i < module_request.response->module_count; i++) {
@@ -175,15 +239,13 @@ static int __init ramfs_populate_modules_initcall(void) {
             const char *filename = strrchr(mod->path, '/');
             filename = (filename != NULL) ? filename + 1 : mod->path;
 
-            // Register in Root '/' AND '/sys/bin/'
             ramfs_create_file(vfs_root, filename, mod->address, mod->size);
+            if (sys_bin_dir) {
+                ramfs_create_file(sys_bin_dir, filename, mod->address, mod->size);
+            }
             if (bin_dir) {
                 ramfs_create_file(bin_dir, filename, mod->address, mod->size);
             }
-
-            serial_puts(COM1, "[RAMFS] Module loaded to VFS: ");
-            serial_puts(COM1, filename);
-            serial_puts(COM1, "\n");
         }
     }
     return 0;

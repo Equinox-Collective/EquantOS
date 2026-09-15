@@ -315,6 +315,7 @@ build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd
 	$(Q)$(call CP,limine-uefi-cd.bin,build/iso/boot/limine-uefi-cd.bin)
 	$(Q)$(call CP,BOOTX64.EFI,build/iso/EFI/BOOT/BOOTX64.EFI)
 	$(Q)xorriso -as mkisofs \
+		-r -iso-level 3 -l -allow-leading-dots -relaxed-filenames -allow-lowercase \
 		-b boot/limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot boot/limine-uefi-cd.bin \
