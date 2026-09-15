@@ -1,32 +1,44 @@
-#include "io.h"
+#ifndef IO_H
+#define IO_H
+
 #include <stdint.h>
 
-unsigned char inb(unsigned short port) {
-    unsigned char ret;
-    __asm__ __volatile__ ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
 }
 
-void outb(unsigned short port, unsigned char val) {
-    __asm__ __volatile__ ("outb %0, %1" : : "a"(val), "Nd"(port));
+static inline void outb(uint16_t port, uint8_t val) {
+    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 
-uint16_t inw(uint16_t port) {
+static inline uint16_t inw(uint16_t port) {
     uint16_t ret;
-    __asm__ __volatile__ ("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    __asm__ volatile ("inw %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
 }
 
-void outw(unsigned short port, uint16_t val) {
-    __asm__ __volatile__ ("outw %0, %1" : : "a"(val), "Nd"(port));
+static inline void outw(uint16_t port, uint16_t val) {
+    __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
 }
 
-uint32_t inl(unsigned short port) {
+static inline uint32_t inl(uint16_t port) {
     uint32_t ret;
-    __asm__ __volatile__ ("inl %1, %0" : "=a"(ret) : "Nd"(port));
+    __asm__ volatile ("inl %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
 }
 
-void outl(unsigned short port, uint32_t val) {
-    __asm__ __volatile__ ("outl %0, %1" : : "a"(val), "Nd"(port));
+static inline void outl(uint16_t port, uint32_t val) {
+    __asm__ volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
 }
+
+static inline void insw(uint16_t port, void *addr, uint32_t count) {
+    __asm__ volatile ("rep insw" : "+D"(addr), "+c"(count) : "d"(port) : "memory");
+}
+
+static inline void outsw(uint16_t port, const void *addr, uint32_t count) {
+    __asm__ volatile ("rep outsw" : "+S"(addr), "+c"(count) : "d"(port) : "memory");
+}
+
+#endif

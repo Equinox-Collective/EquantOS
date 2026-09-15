@@ -60,12 +60,7 @@ void _start(void) {
 
     pmm_init();
     vmm_init();
-
-    void *heap_phys = pmm_alloc_continuous(256);
-    if (!heap_phys) {
-        PANIC("Failed to allocate physical memory for kernel heap!");
-    }
-    init_heap(VIRT(heap_phys), 256 * 4096);
+    init_heap(0, 0);
 
     serial_puts(COM1, "[KERNEL] Executing Initcalls...\n");
     do_initcalls();
