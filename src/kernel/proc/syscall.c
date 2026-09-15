@@ -2200,12 +2200,7 @@ void syscall_handler(void *regs_ptr) {
                  (syscall_no == SYS_PSELECT6) ||
                  (syscall_no == SYS_POLL) ||
                  (syscall_no == SYS_PPOLL) ||
-                 (syscall_no == SYS_READ) ||
-                 (syscall_no == SYS_WRITE) ||
-                 (syscall_no == SYS_READV) ||
-                 (syscall_no == SYS_WRITEV) ||
-                 (syscall_no == SYS_RECVMSG) ||
-                 (syscall_no == SYS_SENDMSG);
+                 ((syscall_no == SYS_READ || syscall_no == SYS_WRITE) && regs->rdi <= 2);
 
     if (!quiet) {
         strace_log("[STRACE %u] > %s(%d) args=(0x%llx, 0x%llx, 0x%llx)\n",

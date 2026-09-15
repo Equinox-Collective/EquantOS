@@ -226,27 +226,16 @@ void vmm_page_fault_handler(cpu_state_t *state) {
     bool is_user_addr = (fault_addr < 0x0000800000000000ULL);
 
     if (from_user || is_user_addr) {
-        serial_puts(COM1, "\n[VMM] Segmentation fault at virtual address: 0x");
+        serial_puts(COM1, "\n[VMM FAULT] Page Fault at virtual address: 0x");
         char buf[32];
         itoa_hex(fault_addr, buf);
         serial_puts(COM1, buf);
-        serial_puts(COM1, " (Terminating rogue process)\n");
+        serial_puts(COM1, " | RIP: 0x");
+        itoa_hex(state->rip, buf);
+        serial_puts(COM1, buf);
+        serial_puts(COM1, "\n");
 
-        extern void sys_exit_group(int status);
-        extern int64_t sys_kill_handler(int pid, int sig);
-        extern task_t *current_task;
-
-        if (current_task && current_task->process) {
-            printf("\n\033[31mSegmentation fault (core dumped)\033[0m\n");
-            // Kill task cleanly with standard POSIX 139 (128 + SIGSEGV)
-            current_task->process->exit_code = 139;
-            current_task->process->exited = true;
-            current_task->state = TASK_STATE_ZOMBIE;
-            current_task->running = false;
-        }
-
-        sched_yield();
-        for (;;) { __asm__ volatile("hlt"); }
+        kernel_panic(state, __FILE__, __LINE__, "Unhandled User Memory Fault");
     }
 
     // 4. Genuine Kernel Panic: ONLY if the kernel's OWN higher-half code/data is corrupted!
