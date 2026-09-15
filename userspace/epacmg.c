@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <sys/syscall.h>
+#include <stdint.h>
 #include <stdbool.h>
 
 #include <bearssl.h>
@@ -199,6 +200,11 @@ static int sock_write_cb(void *ctx, const unsigned char *buf, size_t len) {
     return (int)w;
 }
 
+static br_ssl_client_context sc;
+static br_x509_minimal_context xc;
+static x509_noanchor_context xwc;
+static unsigned char iobuf[BR_SSL_BUFSIZE_BIDI];
+
 static uint8_t *http_fetch(const char *host, int port, const char *path, bool use_ssl, size_t *out_size) {
     uint32_t ip = 0;
     dbg("[STEP 1] Resolving host via DNS...\n");
@@ -253,10 +259,6 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
         }
     } else {
         dbg("[STEP 5] Setting up BearSSL static structures...\n");
-        static br_ssl_client_context sc;
-        static br_x509_minimal_context xc;
-        static x509_noanchor_context xwc;
-        static unsigned char iobuf[BR_SSL_BUFSIZE_BIDI];
 
         dbg("[STEP 6] Calling br_ssl_client_init_full()...\n");
         br_ssl_client_init_full(&sc, &xc, NULL, 0);
