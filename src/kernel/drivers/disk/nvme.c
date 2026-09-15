@@ -441,6 +441,17 @@ int nvme_write_sectors(uint64_t lba, uint32_t sector_count, void *buffer) {
     return err;
 }
 
+int nvme_flush(void) {
+    if (!nvme_ctrl.bar0) return NVME_ERR_HARDWARE;
+    nvme_sq_entry_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    uint16_t cid = nvme_ctrl.command_id++;
+    cmd.cdw0 = 0x00 | (cid << 16); // NVME_NVM_CMD_FLUSH (0x00)
+    cmd.nsid = 1;
+    nvme_submit_command(&nvme_ctrl, &nvme_ctrl.io_queue, &cmd, 1);
+    return nvme_wait_completion(&nvme_ctrl, &nvme_ctrl.io_queue, cid, 1);
+}
+
 int nvme_init(void) {
     if (nvme_ctrl.initialized) {
         return NVME_SUCCESS;
