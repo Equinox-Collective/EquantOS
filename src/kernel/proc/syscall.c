@@ -1268,7 +1268,29 @@ static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
             if (wstatus) {
                 *wstatus = (child->process->exit_code & 0xFF) << 8;
             }
-            child->process->parent_pid = 0; // Detach reaped child
+
+            if (child->next == child) {
+                task_list = NULL;
+            } else {
+                child->prev->next = child->next;
+                child->next->prev = child->prev;
+                if (task_list == child) task_list = child->next;
+            }
+
+            if (child->process) {
+                if (child->process->cr3 != 0 && child->process->cr3 != kernel_cr3) {
+                    vmm_destroy_address_space(child->process->cr3);
+                }
+                kfree(child->process);
+                child->process = NULL;
+            }
+
+            if (child->kstack_at_bottom) {
+                kfree((void *)(child->kstack_at_bottom - 16384));
+                child->kstack_at_bottom = 0;
+            }
+
+            kfree(child);
             return child_pid;
         }
 
@@ -2493,8 +2515,6 @@ void syscall_handler(void *regs_ptr) {
         case SYS_GETGID:
         case SYS_GETEGID:
             ret = (current_task && current_task->process) ? (int64_t)current_task->process->gid : 0;
-            break;
-            ret = 0;
             break;
         case SYS_GETPPID:
             ret = (current_task && current_task->process) ? (int64_t)current_task->process->parent_pid : 1;
