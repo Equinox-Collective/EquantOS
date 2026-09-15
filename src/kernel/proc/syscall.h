@@ -7,6 +7,32 @@
 #include <stdbool.h>
 #include "../net/socket.h"
 #include "../net/net.h"
+#include "task.h"
+#include "sched.h"
+#include "pipe.h"
+#include "loader.h"
+#include "../core/mem/vmm.h"
+#include "../core/mem/pmm.h"
+#include "../core/mem/memory.h"
+#include "../core/gen/cpu.h"
+#include "../drivers/serial/serial.h"
+#include "../../equterm/term.h"
+#include "../misc/timer.h"
+#include "string.h"
+#include "../drivers/tty/tty.h"
+#include "stdio.h"
+#include "../fs/vfs.h"
+#include "../core/initcall.h"
+#include "../drivers/tty/tty.h"
+#include "../../equterm/shell.h"
+#include "../ipc/af_unix.h"
+#include "../ipc/shm.h"
+#include "../drivers/input/evdev.h"
+#include "../net/dns.h"
+#include "../drivers/net/rtl8139.h"
+#include <stdarg.h>
+#include "../misc/rtc.h"
+#include "../misc/random.h"
 
 // ============================================================================
 // 1. Linux Standard Error Codes (Negative Return Values)

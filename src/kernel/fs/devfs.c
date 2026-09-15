@@ -16,6 +16,7 @@
 #include "../drivers/tty/tty.h"
 #include "../drivers/input/evdev.h"
 #include "../core/uevent.h"
+#include "../misc/random.h"
 
 static vfs_node_t *devfs_root = NULL;
 extern struct limine_framebuffer *kernel_fb;
@@ -314,18 +315,9 @@ vfs_file_operations_t g_tty_fops = {
 static int64_t dev_urandom_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset;
     if (!buffer || size == 0) return 0;
-    if (size > 64) size = 64;
+    if (size > 256) size = 256;
 
-    serial_puts(COM1, "[DEVFS] /dev/urandom read requested...\n");
-
-    uint64_t tsc;
-    __asm__ volatile("rdtsc" : "=A"(tsc));
-    for (uint64_t i = 0; i < size; i++) {
-        tsc = tsc * 6364136223846793005ULL + 1442695040888963407ULL;
-        buffer[i] = (uint8_t)(tsc >> 32);
-    }
-
-    serial_puts(COM1, "[DEVFS] /dev/urandom read success!\n");
+    random_fill(buffer, size);
     return (int64_t)size;
 }
 

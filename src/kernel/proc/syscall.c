@@ -1,29 +1,5 @@
 // src/kernel/proc/syscall.c - Native x86_64 Linux System Call Dispatcher
 #include "syscall.h"
-#include "task.h"
-#include "sched.h"
-#include "pipe.h"
-#include "loader.h"
-#include "../core/mem/vmm.h"
-#include "../core/mem/pmm.h"
-#include "../core/mem/memory.h"
-#include "../core/gen/cpu.h"
-#include "../drivers/serial/serial.h"
-#include "../../equterm/term.h"
-#include "../misc/timer.h"
-#include "string.h"
-#include "../drivers/tty/tty.h"
-#include "stdio.h"
-#include "../fs/vfs.h"
-#include "../core/initcall.h"
-#include "../drivers/tty/tty.h"
-#include "../../equterm/shell.h"
-#include "../ipc/af_unix.h"
-#include "../ipc/shm.h"
-#include "../drivers/input/evdev.h"
-#include "../net/dns.h"
-#include "../drivers/net/rtl8139.h"
-#include <stdarg.h>
 
 static void strace_log(const char *fmt, ...) {
     char buf[256];
@@ -1398,17 +1374,15 @@ static int64_t sys_futex_handler(uint32_t *uaddr, int op, uint32_t val, const st
 static int64_t sys_clock_gettime_handler(int clock_id, struct linux_timespec *tp) {
     (void)clock_id;
     if (!tp) return -EFAULT;
-    uint64_t current_ticks = tick;
-    tp->tv_sec = current_ticks / 100;
-    tp->tv_nsec = (current_ticks % 100) * 10000000ULL;
+    tp->tv_sec = rtc_get_unix_timestamp();
+    tp->tv_nsec = (tick % 100) * 10000000ULL;
     return 0;
 }
 
 static int64_t sys_gettimeofday_handler(struct linux_timeval *tv, struct linux_timezone *tz) {
     if (tv) {
-        uint64_t current_ticks = tick;
-        tv->tv_sec = current_ticks / 100;
-        tv->tv_usec = (current_ticks % 100) * 10000ULL;
+        tv->tv_sec = rtc_get_unix_timestamp();
+        tv->tv_usec = (tick % 100) * 10000ULL;
     }
     if (tz) {
         tz->tz_minuteswest = 0;
@@ -2099,7 +2073,6 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
 
     return 0;
 }
-
 
 static const char *get_syscall_name(uint64_t no) {
     switch (no) {

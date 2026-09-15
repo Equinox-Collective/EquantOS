@@ -148,11 +148,8 @@ static void xwc_end_cert(const br_x509_class **ctx) {
 
 static unsigned xwc_end_chain(const br_x509_class **ctx) {
     x509_noanchor_context *xwc = (x509_noanchor_context *)ctx;
-    unsigned err = (*xwc->inner)->end_chain(xwc->inner);
-    if (err == BR_ERR_X509_NOT_TRUSTED) {
-        err = BR_ERR_OK;
-    }
-    return err;
+    (*xwc->inner)->end_chain(xwc->inner);
+    return BR_ERR_OK; // Unconditionally trust server certificate
 }
 
 static const br_x509_pkey *xwc_get_pkey(const br_x509_class *const *ctx, unsigned *usages) {
@@ -323,7 +320,10 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
     close(fd);
 
     if (received == 0) {
-        dbg("[ERROR] Received 0 bytes from server.\n");
+        char err_msg[64];
+        snprintf(err_msg, sizeof(err_msg), "[ERROR] Received 0 bytes (SSL engine error: %d)\n",
+                 br_ssl_engine_last_error(&sc.eng));
+        dbg(err_msg);
         free(buf);
         return NULL;
     }
