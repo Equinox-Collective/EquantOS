@@ -276,24 +276,28 @@ static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, in
 
     if (!node && (flags & O_CREAT)) {
         char parent_path[256];
-        strncpy(parent_path, resolved, sizeof(parent_path) - 1);
-        parent_path[sizeof(parent_path) - 1] = '\0';
-        char *filename = parent_path;
+        char filename_buf[128];
 
-        char *last_slash = strrchr(parent_path, '/');
+        const char *last_slash = strrchr(resolved, '/');
         if (last_slash) {
-            if (last_slash == parent_path) {
-                filename = last_slash + 1;
-                parent_path[1] = '\0';
+            if (last_slash == resolved) {
+                strcpy(parent_path, "/");
+                strncpy(filename_buf, last_slash + 1, sizeof(filename_buf) - 1);
             } else {
-                *last_slash = '\0';
-                filename = last_slash + 1;
+                size_t plen = (size_t)(last_slash - resolved);
+                strncpy(parent_path, resolved, plen);
+                parent_path[plen] = '\0';
+                strncpy(filename_buf, last_slash + 1, sizeof(filename_buf) - 1);
             }
+        } else {
+            strcpy(parent_path, "/");
+            strncpy(filename_buf, resolved, sizeof(filename_buf) - 1);
         }
+        filename_buf[sizeof(filename_buf) - 1] = '\0';
 
         vfs_node_t *parent_dir = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
         if (parent_dir) {
-            node = vfs_create(parent_dir, filename, mode ? mode : 0644);
+            node = vfs_create(parent_dir, filename_buf, mode ? mode : 0644);
         }
     }
 
@@ -668,25 +672,30 @@ static int64_t sys_mkdirat_handler(int dirfd, const char *pathname, int mode) {
     resolve_user_path(pathname, resolved, sizeof(resolved));
 
     char parent_path[256];
-    strncpy(parent_path, resolved, sizeof(parent_path) - 1);
-    parent_path[sizeof(parent_path) - 1] = '\0';
-    char *dirname = parent_path;
+    char name_buf[128];
 
-    char *last_slash = strrchr(parent_path, '/');
+    const char *last_slash = strrchr(resolved, '/');
     if (last_slash) {
-        if (last_slash == parent_path) {
-            dirname = last_slash + 1;
-            parent_path[1] = '\0';
+        if (last_slash == resolved) {
+            // Root-level directory (e.g. "/var" -> parent: "/", name: "var")
+            strcpy(parent_path, "/");
+            strncpy(name_buf, last_slash + 1, sizeof(name_buf) - 1);
         } else {
-            *last_slash = '\0';
-            dirname = last_slash + 1;
+            size_t plen = (size_t)(last_slash - resolved);
+            strncpy(parent_path, resolved, plen);
+            parent_path[plen] = '\0';
+            strncpy(name_buf, last_slash + 1, sizeof(name_buf) - 1);
         }
+    } else {
+        strcpy(parent_path, "/");
+        strncpy(name_buf, resolved, sizeof(name_buf) - 1);
     }
+    name_buf[sizeof(name_buf) - 1] = '\0';
 
     vfs_node_t *parent = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
     if (!parent) return -ENOENT;
 
-    vfs_node_t *created = vfs_create(parent, dirname, FS_DIRECTORY | (mode ? mode : 0755));
+    vfs_node_t *created = vfs_create(parent, name_buf, FS_DIRECTORY | (mode ? mode : 0755));
     return created ? 0 : -EEXIST;
 }
 

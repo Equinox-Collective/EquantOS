@@ -393,10 +393,13 @@ static int cmd_sync(void) {
     }
 
     int fd = open(DB_CACHE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) {
-        write(fd, data, size);
-        close(fd);
+    if (fd < 0) {
+        printf("\033[31mError: Failed to create database file %s (errno=%d)\033[0m\n", DB_CACHE, fd);
+        free(data);
+        return 1;
     }
+    write(fd, data, size);
+    close(fd);
     free(data);
 
     printf("\033[32m:: Synchronization complete. Manifest updated (%zu bytes).\033[0m\n", size);
