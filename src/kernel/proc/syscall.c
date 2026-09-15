@@ -313,20 +313,6 @@ static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, in
     return alloc_fd(node, (uint32_t)flags);
 }
 
-static int64_t sys_close_handler(int fd) {
-    if (!current_task || !current_task->process) return -EBADF;
-    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
-
-    vfs_node_t *node = current_task->process->files[fd];
-    if (!node) return -EBADF;
-
-    vfs_close(node);
-    current_task->process->files[fd] = NULL;
-    current_task->process->file_offsets[fd] = 0;
-    current_task->process->file_flags[fd] = 0;
-    return 0;
-}
-
 static int64_t sys_dup_handler(int oldfd) {
     if (!current_task || !current_task->process) return -EBADF;
     if (oldfd < 0 || oldfd >= MAX_OPEN_FILES || !current_task->process->files[oldfd]) return -EBADF;
@@ -965,6 +951,25 @@ static vfs_file_operations_t inet_socket_vfs_ops = {
     .ioctl   = NULL,
     .mmap    = NULL
 };
+
+
+static int64_t sys_close_handler(int fd) {
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    vfs_close(node);
+    if (node->ops && (node->ops->read == inet_socket_read_op || 
+                      node->ops->write == inet_socket_write_op)) {
+        kfree(node);
+    }
+    current_task->process->files[fd] = NULL;
+    current_task->process->file_offsets[fd] = 0;
+    current_task->process->file_flags[fd] = 0;
+    return 0;
+}
 
 static int64_t sys_munmap_handler(uint64_t addr, size_t length) {
     if (length == 0 || (addr & (PAGE_SIZE - 1)) != 0) return -EINVAL;
