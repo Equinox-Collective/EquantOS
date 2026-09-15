@@ -1,4 +1,3 @@
-// vfs.c - Virtual File System core implementation
 #include "vfs.h"
 #include "../core/mem/memory.h"
 #include "string.h"
@@ -15,20 +14,22 @@ void vfs_init(void) {
 }
 
 vfs_node_t *vfs_mount(const char *path, vfs_node_t *local_root) {
-    (void)path;
+    if (!local_root) return NULL;
     if (!vfs_root) {
         vfs_root = local_root;
         return vfs_root;
     }
-    // Simple VFS mount logic can be expanded for multi-fs trees
-    return NULL;
+    vfs_node_t *mountpoint = vfs_open(path, 0);
+    if (!mountpoint) return NULL;
+
+    mountpoint->flags |= FS_MOUNTPOINT;
+    mountpoint->ptr = local_root;
+    return local_root;
 }
 
-// Helper to traverse path components with POSIX '.', '..', and mountpoint support
 static vfs_node_t *vfs_resolve_path(const char *path) {
     if (!path || path[0] != '/') return NULL;
 
-    // Direct DevFS fast-path for /dev/ devices (bypasses any root filesystem masking)
     extern vfs_node_t *devfs_get_root(void);
     if (strncmp(path, "/dev/", 5) == 0 && devfs_get_root()) {
         const char *sub = path + 5;
@@ -47,11 +48,10 @@ static vfs_node_t *vfs_resolve_path(const char *path) {
         }
         if (curr) return curr;
     }
-    
+
     vfs_node_t *current = vfs_root;
     if (!current) return NULL;
 
-    // If root itself is a mount point
     if (current->flags & FS_MOUNTPOINT && current->ptr) {
         current = (vfs_node_t *)current->ptr;
     }
@@ -60,46 +60,41 @@ static vfs_node_t *vfs_resolve_path(const char *path) {
         return current;
     }
 
+    char stack_buf[256];
+    char *buffer = stack_buf;
     size_t len = strlen(path);
-    char *buffer = (char *)kmalloc(len + 1);
-    if (!buffer) return NULL;
+    if (len >= sizeof(stack_buf)) {
+        buffer = (char *)kmalloc(len + 1);
+        if (!buffer) return NULL;
+    }
 
     strcpy(buffer, path + 1);
-
-    char *token = buffer;
     char *rest = buffer;
 
     while (rest != NULL) {
-        token = strsep(&rest, "/");
+        char *token = strsep(&rest, "/");
         if (!token || token[0] == '\0') continue;
 
-        // POSIX "." refers to the current directory
-        if (strcmp(token, ".") == 0) {
-            continue;
-        }
+        if (strcmp(token, ".") == 0) continue;
 
-        // POSIX ".." refers to parent directory
         if (strcmp(token, "..") == 0) {
-            if (current->parent) {
-                current = current->parent;
-            }
+            if (current->parent) current = current->parent;
             continue;
         }
 
         vfs_node_t *next = vfs_finddir(current, token);
         if (!next) {
-            kfree(buffer);
-            return NULL; 
+            if (buffer != stack_buf) kfree(buffer);
+            return NULL;
         }
         current = next;
 
-        // If reached node is a mount point, cross over to the mounted filesystem root
         if (current->flags & FS_MOUNTPOINT && current->ptr) {
             current = (vfs_node_t *)current->ptr;
         }
     }
 
-    kfree(buffer);
+    if (buffer != stack_buf) kfree(buffer);
     return current;
 }
 
@@ -149,7 +144,6 @@ vfs_node_t *vfs_readdir(vfs_node_t *node, uint32_t index) {
 }
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
-    // If current node is a mount point, resolve through its mounted root pointer
     if (node->flags & FS_MOUNTPOINT && node->ptr) {
         node = (vfs_node_t *)node->ptr;
     }
@@ -158,8 +152,6 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
     }
     return node->ops->finddir(node, name);
 }
-
-// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
 
 static int __init vfs_subsys_initcall(void) {
     vfs_init();
