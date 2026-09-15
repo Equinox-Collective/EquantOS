@@ -1242,6 +1242,7 @@ static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
     if (!current_task || !current_task->process) return -ECHILD;
 
     extern task_t *task_list;
+    extern uint64_t kernel_cr3;
 
     for (;;) {
         bool have_child = false;
