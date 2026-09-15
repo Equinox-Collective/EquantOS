@@ -1,4 +1,3 @@
-// src/kernel/proc/pipe.c - Production-Grade POSIX Blocking FIFO Subsystem
 #include "pipe.h"
 #include "task.h"
 #include "sched.h"
@@ -13,10 +12,9 @@ static int64_t pipe_read_op(vfs_node_t *node, uint64_t offset, uint64_t size, ui
 
     pipe_t *p = (pipe_t *)node->ptr;
 
-    // Wait until there is data to read or the write end has been completely closed
     while (p->count == 0) {
         if (p->write_closed) {
-            return 0; // EOF (End of File)
+            return 0;
         }
         if (current_task) {
             p->blocked_reader = current_task;
@@ -35,7 +33,6 @@ static int64_t pipe_read_op(vfs_node_t *node, uint64_t offset, uint64_t size, ui
         p->count--;
     }
 
-    // Wake up blocked writer if space is now available in buffer
     if (p->blocked_writer) {
         sched_unblock(p->blocked_writer);
         p->blocked_writer = NULL;
@@ -51,13 +48,12 @@ static int64_t pipe_write_op(vfs_node_t *node, uint64_t offset, uint64_t size, u
     pipe_t *p = (pipe_t *)node->ptr;
 
     if (p->read_closed) {
-        return -EPIPE; // Broken Pipe
+        return -EPIPE;
     }
 
     uint64_t total_written = 0;
 
     while (total_written < size) {
-        // If pipe buffer is full, block the writing task until reader drains bytes
         while (p->count >= PIPE_BUF_SIZE) {
             if (p->read_closed) {
                 return total_written > 0 ? (int64_t)total_written : -EPIPE;
@@ -76,7 +72,6 @@ static int64_t pipe_write_op(vfs_node_t *node, uint64_t offset, uint64_t size, u
         p->write_pos = (p->write_pos + 1) % PIPE_BUF_SIZE;
         p->count++;
 
-        // Wake up blocked reader immediately on newly available bytes
         if (p->blocked_reader) {
             sched_unblock(p->blocked_reader);
             p->blocked_reader = NULL;
@@ -99,6 +94,7 @@ static void pipe_read_close_op(vfs_node_t *node) {
     if (p->ref_count <= 0) {
         kfree(p);
     }
+    kfree(node);
 }
 
 static void pipe_write_close_op(vfs_node_t *node) {
@@ -114,6 +110,7 @@ static void pipe_write_close_op(vfs_node_t *node) {
     if (p->ref_count <= 0) {
         kfree(p);
     }
+    kfree(node);
 }
 
 static vfs_file_operations_t pipe_read_ops = {
