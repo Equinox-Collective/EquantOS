@@ -33,7 +33,6 @@ typedef struct {
 
 void tty_init(void *fb_addr, uint64_t width, uint64_t height, uint64_t pitch);
 void tty_switch(int index);
-// In src/kernel/drivers/tty/tty.h:
 char tty_getchar(void);
 int  tty_getchar_nonblock(void);
 bool tty_has_char(void);
@@ -46,9 +45,6 @@ void tty_set_colors(uint32_t fg_color, uint32_t bg_color);
 void tty_clear(void);
 void tty_poll_input(void);
 char input_code_to_ascii(uint16_t code, bool shift);
-char tty_getchar(void);
-
-// Raw Input API for TUI
 uint16_t tty_getchar_raw(void);
 
-#endif // TTY_H
+#endif
