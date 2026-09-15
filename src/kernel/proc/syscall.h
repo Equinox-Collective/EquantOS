@@ -33,7 +33,6 @@
 #include <stdarg.h>
 #include "../misc/rtc.h"
 #include "../misc/random.h"
-#include "../net/"
 
 // ============================================================================
 // 1. Linux Standard Error Codes (Negative Return Values)
