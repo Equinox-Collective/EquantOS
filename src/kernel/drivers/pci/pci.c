@@ -3,6 +3,7 @@
 #include "../../core/mem/vmm.h"
 #include "../serial/serial.h"
 #include "../../core/initcall.h"
+#include "../../core/gen/io.h"
 #include <stddef.h>
 
 #define PCI_CONFIG_ADDRESS 0xCF8
