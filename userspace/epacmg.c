@@ -1,4 +1,4 @@
-// userspace/epacmg.c - EquantOS Package Manager (OPM) Client
+// userspace/epacmg.c - EquantOS Package Manager (OPM) Client (DEBUG INSTRUMENTED)
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,12 +17,16 @@
 #define SYS_EQUANT_DNS 401
 
 #define DEFAULT_TRANS_HOST "raw.githubusercontent.com"
-// Change this to your real path:
 #define DEFAULT_MANIFEST_PATH "/ewasion137/epacmg-trans/main/packages.txt"
 
 #define DB_DIR "/var/lib/epacmg"
 #define DB_INSTALLED "/var/lib/epacmg/installed.db"
 #define DB_CACHE "/var/lib/epacmg/packages.db"
+
+// Direct synchronous logger (Bypasses stdio buffering, visible before any crash!)
+static void dbg(const char *msg) {
+    write(1, msg, strlen(msg));
+}
 
 static int resolve_dns(const char *host, uint32_t *ip) {
     return syscall(SYS_EQUANT_DNS, host, ip);
@@ -114,7 +118,7 @@ static int extract_tar(const uint8_t *tar_data, size_t total_size) {
 }
 
 // ============================================================================
-// BearSSL No-Anchor Insecure Adapter (Allows HTTPS bootstrapping)
+// BearSSL No-Anchor Insecure Adapter
 // ============================================================================
 
 typedef struct {
@@ -167,34 +171,49 @@ static const br_x509_class x509_noanchor_vtable = {
 };
 
 // ============================================================================
-// BearSSL HTTPS / HTTP Engine
+// BearSSL HTTPS / HTTP Engine with Full Debug Tracing
 // ============================================================================
 
 static int sock_read_cb(void *ctx, unsigned char *buf, size_t len) {
     int fd = *(int *)ctx;
+    char b[64];
+    snprintf(b, sizeof(b), "  [CB:READ] requesting up to %zu bytes from fd %d...\n", len, fd);
+    dbg(b);
+
     ssize_t r = read(fd, buf, len);
+    snprintf(b, sizeof(b), "  [CB:READ] returned %zd bytes\n", r);
+    dbg(b);
+
     if (r <= 0) return -1;
     return (int)r;
 }
 
 static int sock_write_cb(void *ctx, const unsigned char *buf, size_t len) {
     int fd = *(int *)ctx;
+    char b[64];
+    snprintf(b, sizeof(b), "  [CB:WRITE] writing %zu bytes to fd %d...\n", len, fd);
+    dbg(b);
+
     ssize_t w = write(fd, buf, len);
+    snprintf(b, sizeof(b), "  [CB:WRITE] returned %zd bytes\n", w);
+    dbg(b);
+
     if (w <= 0) return -1;
     return (int)w;
 }
 
 static uint8_t *http_fetch(const char *host, int port, const char *path, bool use_ssl, size_t *out_size) {
     uint32_t ip = 0;
-    printf("[epacmg] Resolving %s...\n", host);
+    dbg("[STEP 1] Resolving host via DNS...\n");
     if (resolve_dns(host, &ip) != 0 || ip == 0) {
-        printf("[epacmg] Error: Failed to resolve %s\n", host);
+        dbg("[ERROR] DNS resolution failed\n");
         return NULL;
     }
 
+    dbg("[STEP 2] Creating TCP socket...\n");
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        printf("[epacmg] Error: socket creation failed\n");
+        dbg("[ERROR] socket() failed\n");
         return NULL;
     }
 
@@ -204,14 +223,13 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
     sa.sin_port = htons(port);
     sa.sin_addr.s_addr = htonl(ip);
 
-    printf("[epacmg] Connecting to %s:%d...\n", host, port);
+    dbg("[STEP 3] Connecting to remote server...\n");
     if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        printf("[epacmg] Error: connect() failed\n");
+        dbg("[ERROR] connect() failed\n");
         close(fd);
         return NULL;
     }
-
-    printf("[epacmg] Connected successfully! Sending HTTP request...\n");
+    dbg("[STEP 4] TCP Connected successfully!\n");
 
     char req[512];
     snprintf(req, sizeof(req),
@@ -226,6 +244,7 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
     size_t received = 0;
 
     if (!use_ssl) {
+        dbg("[STEP 5] Plain HTTP path selected.\n");
         write(fd, req, strlen(req));
         ssize_t r;
         while ((r = read(fd, buf + received, buf_cap - received - 1)) > 0) {
@@ -236,23 +255,23 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
             }
         }
     } else {
+        dbg("[STEP 5] Setting up BearSSL static structures...\n");
         static br_ssl_client_context sc;
         static br_x509_minimal_context xc;
         static x509_noanchor_context xwc;
         static unsigned char iobuf[BR_SSL_BUFSIZE_BIDI];
 
+        dbg("[STEP 6] Calling br_ssl_client_init_full()...\n");
         br_ssl_client_init_full(&sc, &xc, NULL, 0);
+        dbg("[STEP 6] br_ssl_client_init_full() done.\n");
 
-        // Wrap X509 engine to accept GitHub certificate chain
+        dbg("[STEP 7] Attaching X509 No-Anchor engine & buffer...\n");
         xwc.vtable = &x509_noanchor_vtable;
         xwc.inner = &xc.vtable;
         br_ssl_engine_set_x509(&sc.eng, &xwc.vtable);
-
         br_ssl_engine_set_buffer(&sc.eng, iobuf, sizeof(iobuf), 1);
 
-        // ====================================================================
-        // INJECT HARDWARE ENTROPY (Satisfies BearSSL DRBG without /dev/urandom)
-        // ====================================================================
+        dbg("[STEP 8] Injecting CPU entropy...\n");
         uint8_t entropy[32];
         uint64_t tsc;
         __asm__ volatile("rdtsc" : "=A"(tsc));
@@ -262,22 +281,33 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
         }
         br_ssl_engine_inject_entropy(&sc.eng, entropy, sizeof(entropy));
 
-        // Reset client for handshake
+        dbg("[STEP 9] Calling br_ssl_client_reset()...\n");
         int reset_res = br_ssl_client_reset(&sc, host, 0);
+        char r_msg[64];
+        snprintf(r_msg, sizeof(r_msg), "[STEP 9] Reset returned: %d (last_err=%d)\n",
+                 reset_res, br_ssl_engine_last_error(&sc.eng));
+        dbg(r_msg);
+
         if (reset_res == 0) {
-            printf("[epacmg] TLS Engine Reset failed! Last error = %d\n",
-                   br_ssl_engine_last_error(&sc.eng));
+            dbg("[ERROR] br_ssl_client_reset failed!\n");
             close(fd);
             free(buf);
             return NULL;
         }
 
+        dbg("[STEP 10] Initializing br_sslio bridge...\n");
         br_sslio_context ioc;
         br_sslio_init(&ioc, &sc.eng, sock_read_cb, &fd, sock_write_cb, &fd);
 
+        dbg("[STEP 11] Sending HTTPS GET Request through br_sslio_write_all()...\n");
         br_sslio_write_all(&ioc, req, strlen(req));
-        br_sslio_flush(&ioc);
+        dbg("[STEP 11] br_sslio_write_all() completed!\n");
 
+        dbg("[STEP 12] Flushing TLS pipeline with br_sslio_flush()...\n");
+        br_sslio_flush(&ioc);
+        dbg("[STEP 12] Flush completed!\n");
+
+        dbg("[STEP 13] Reading HTTPS Response...\n");
         for (;;) {
             int r = br_sslio_read(&ioc, buf + received, buf_cap - received - 1);
             if (r < 0) break;
@@ -287,11 +317,13 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
                 buf = (uint8_t *)realloc(buf, buf_cap);
             }
         }
+        dbg("[STEP 14] Read loop terminated.\n");
     }
 
     close(fd);
 
     if (received == 0) {
+        dbg("[ERROR] Received 0 bytes from server.\n");
         free(buf);
         return NULL;
     }
@@ -300,6 +332,7 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
 
     char *body = strstr((char *)buf, "\r\n\r\n");
     if (!body) {
+        dbg("[ERROR] No HTTP header/body delimiter found.\n");
         free(buf);
         return NULL;
     }
@@ -364,7 +397,7 @@ static int cmd_sync(void) {
     }
     free(data);
 
-    printf("\033[32m:: Synchronization complete. Manifest updated.\033[0m\n");
+    printf("\033[32m:: Synchronization complete. Manifest updated (%zu bytes).\033[0m\n", size);
     return 0;
 }
 
