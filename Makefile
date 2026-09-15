@@ -321,12 +321,7 @@ build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd
 		--efi-boot boot/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		build/iso -o build/equantos.iso $(DEV_NULL)
-	$(Q)$(call RM,limine-bios-cd.bin)
-	$(Q)$(call RM,limine-bios.sys)
-	$(Q)$(call RM,limine-uefi-cd.bin)
-	$(Q)$(call RM,BOOTX64.EFI)
 	$(call LOG_MSG,$(CLR_OK) EquantOS ISO successfully built at build/equantos.iso)
-
 # ==============================================================================
 # Emulation & Debug
 # ==============================================================================
