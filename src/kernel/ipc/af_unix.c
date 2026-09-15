@@ -307,8 +307,11 @@ static int64_t vfs_sock_write(vfs_node_t *node, uint64_t offset, uint64_t size, 
 }
 
 static void vfs_sock_close(vfs_node_t *node) {
-    if (node && node->ptr) {
-        unix_socket_close((unix_socket_t *)node->ptr);
-        node->ptr = NULL;
+    if (node) {
+        if (node->ptr) {
+            unix_socket_close((unix_socket_t *)node->ptr);
+            node->ptr = NULL;
+        }
+        kfree(node);
     }
 }
