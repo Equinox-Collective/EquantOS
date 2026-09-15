@@ -74,10 +74,6 @@ void ata_identify() {
     term_print("\n");
 }
 
-static inline void insw(uint16_t port, void* addr, uint32_t count) {
-    __asm__ volatile("rep insw" : "+D"(addr), "+c"(count) : "d"(port) : "memory");
-}
-
 /* Этап 8: ATA PIO — невытесняемая секция. Два одновременных процесса
  * (пайплайн `ls | grep`: два execve читают ELF с диска) перемежали свои
  * порт-команды и получали мусор («file not found»/«not a valid ELF» и
@@ -214,10 +210,6 @@ void read_sectors_ata_pio_drive(uint8_t drive, uintptr_t target_address, uint64_
     }
 
     ata_irq_restore(f);
-}
-
-static inline void outsw(uint16_t port, const void *addr, uint32_t count) {
-    __asm__ volatile("rep outsw" : "+S"(addr), "+c"(count) : "d"(port) : "memory");
 }
 
 // Write sectors to ATA drive using PIO mode (supports Master 0 and Slave 1)
