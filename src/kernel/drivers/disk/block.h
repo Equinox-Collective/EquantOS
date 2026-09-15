@@ -12,6 +12,7 @@ typedef struct {
     block_read_fn read;
     block_write_fn write;
     uint32_t sector_size;
+    uint64_t total_sectors; // Точное количество секторов на диске
 } block_device_t;
 
 #endif // BLOCK_H

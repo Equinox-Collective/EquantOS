@@ -25,6 +25,7 @@ block_device_t nvme_get_block_device(void) {
     dev.read = nvme_bdev_read;
     dev.write = nvme_bdev_write;
     dev.sector_size = nvme_ctrl.sector_size ? nvme_ctrl.sector_size : 512;
+    dev.total_sectors = nvme_ctrl.total_sectors; // Передаём реальный размер!
     return dev;
 }
 
@@ -248,6 +249,11 @@ static int nvme_identify_namespace(nvme_controller_t *ctrl) {
 
     if (status == NVME_SUCCESS) {
         uint8_t *ns_data = (uint8_t *)VIRT(buf_phys);
+        
+        // Read 64-bit Total LBA Capacity (NSZE: Bytes 0..7)
+        uint64_t nsze = *(uint64_t *)&ns_data[0];
+        ctrl->total_sectors = (nsze > 0) ? nsze : 131072;
+
         uint8_t flbas = ns_data[26];
         uint8_t lba_format_idx = flbas & 0x0F;
         
@@ -259,6 +265,11 @@ static int nvme_identify_namespace(nvme_controller_t *ctrl) {
         } else {
             ctrl->sector_size = 512;
         }
+
+        char msg[128];
+        snprintf(msg, sizeof(msg), "[NVME] Namespace 1 Active: %llu sectors (%llu MB, sector size: %u)\n",
+                 ctrl->total_sectors, (ctrl->total_sectors * ctrl->sector_size) / (1024 * 1024), ctrl->sector_size);
+        serial_puts(COM1, msg);
     } else {
         ctrl->sector_size = 512;
     }

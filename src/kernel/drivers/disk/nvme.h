@@ -86,6 +86,7 @@ typedef struct {
     uint32_t db_stride;
     uint32_t sector_size; // FIX: Physical sector size (512 or 4096)
     bool initialized;
+    uint64_t total_sectors;
 } nvme_controller_t;
 
 int nvme_init(void);
