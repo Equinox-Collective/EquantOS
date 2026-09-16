@@ -211,19 +211,20 @@ static int __init ramfs_populate_modules_initcall(void) {
         return 0;
     }
 
-    vfs_node_t *installed_bin = vfs_open("/drives/ext2_nvme/bin", 0);
-    if (!installed_bin) installed_bin = vfs_open("/drives/fat32_nvme/bin", 0);
-    if (!installed_bin) installed_bin = vfs_open("/drives/ext2_nvme", 0);
+    vfs_node_t *disk_bin = vfs_open("/drives/ext2_nvme/bin", 0);
+    if (!disk_bin) disk_bin = vfs_open("/drives/fat32_nvme/bin", 0);
+    if (!disk_bin) disk_bin = vfs_open("/drives/ext2_nvme", 0);
 
-    if (installed_bin) {
-        serial_puts(COM1, "[RAMFS] Booted from disk. Populating VFS from installed partition...\n");
+    if (disk_bin) {
+        serial_puts(COM1, "[RAMFS] Booted from installed disk. Initializing system...\n");
         uint32_t idx = 0;
         vfs_node_t *c = NULL;
-        while ((c = vfs_readdir(installed_bin, idx++)) != NULL) {
+        while ((c = vfs_readdir(disk_bin, idx++)) != NULL) {
             if (strstr(c->name, "font.psf") || strstr(c->name, ".psf")) {
                 uint8_t *fbuf = (uint8_t *)kmalloc(c->length);
                 if (fbuf && vfs_read(c, 0, c->length, fbuf) == (int64_t)c->length) {
                     psf2_init_default(fbuf, c->length);
+                    serial_puts(COM1, "[KERNEL] PSF2 Font loaded from installed disk.\n");
                 }
             }
             if (c->flags & FS_FILE) {

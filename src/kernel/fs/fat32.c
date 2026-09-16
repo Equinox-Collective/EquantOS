@@ -4,6 +4,7 @@
 #include "gpt.h"
 #include "../drivers/disk/block.h"
 #include "../drivers/disk/nvme.h"
+#include "../drivers/disk/ata.h"
 #include "ramfs.h"
 #include "../core/mem/memory.h"
 #include "string.h"
@@ -917,48 +918,91 @@ int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, co
     return 0;
 }
 
+static int fat32_ata_bdev_read(uint64_t lba, uint32_t count, void *buf) {
+    read_sectors_ata_pio((uintptr_t)buf, lba, count);
+    return 0;
+}
+
+static int fat32_ata_bdev_write(uint64_t lba, uint32_t count, void *buf) {
+    write_sectors_ata_pio((uintptr_t)buf, lba, count);
+    return 0;
+}
+
 void fat32_init(void) {
     if (!vfs_root) return;
-
-    serial_puts(COM1, "[FAT32] Initializing NVMe Hardware Controller...\n");
-    if (nvme_init() != NVME_SUCCESS) {
-        serial_puts(COM1, "[FAT32 WARNING] NVMe initialization failed or drive not found.\n");
-        return;
-    }
-
-    block_device_t nvme_dev = nvme_get_block_device();
-    disk_partition_scan_device(nvme_dev);
 
     vfs_node_t *drives_dir = vfs_finddir(vfs_root, "drives");
     if (!drives_dir) {
         drives_dir = ramfs_create_directory(vfs_root, "drives");
     }
 
-    int p_count = disk_get_partition_count();
-    for (int i = 0; i < p_count; i++) {
-        partition_info_t *part = disk_get_partition(i);
-        if (!part) continue;
+    if (nvme_init() == NVME_SUCCESS) {
+        block_device_t nvme_dev = nvme_get_block_device();
+        disk_partition_scan_device(nvme_dev);
 
-        vfs_node_t *fat_root = fat32_mount_partition(nvme_dev, part->start_lba, part->sector_count);
-        if (fat_root && drives_dir) {
-            vfs_node_t *disk_dir = ramfs_create_directory(drives_dir, "fat32_nvme");
-            if (disk_dir) {
-                disk_dir->flags |= FS_MOUNTPOINT;
-                disk_dir->ptr = (vfs_node_t *)fat_root;
-                serial_puts(COM1, "[STORAGE] Mounted FAT32 partition at '/drives/fat32_nvme'\n");
+        int p_count = disk_get_partition_count();
+        for (int i = 0; i < p_count; i++) {
+            partition_info_t *part = disk_get_partition(i);
+            if (!part) continue;
+
+            vfs_node_t *fat_root = fat32_mount_partition(nvme_dev, part->start_lba, part->sector_count);
+            if (fat_root && drives_dir) {
+                vfs_node_t *disk_dir = ramfs_create_directory(drives_dir, "fat32_nvme");
+                if (disk_dir) {
+                    disk_dir->flags |= FS_MOUNTPOINT;
+                    disk_dir->ptr = (vfs_node_t *)fat_root;
+                    serial_puts(COM1, "[STORAGE] Mounted NVMe FAT32 at '/drives/fat32_nvme'\n");
+                }
             }
-            continue;
+
+            vfs_node_t *ext2_root = ext2_mount_partition(nvme_dev, part->start_lba);
+            if (ext2_root && drives_dir) {
+                vfs_node_t *ext2_dir = ramfs_create_directory(drives_dir, "ext2_nvme");
+                if (ext2_dir) {
+                    ext2_dir->flags |= FS_MOUNTPOINT;
+                    ext2_dir->ptr = (vfs_node_t *)ext2_root;
+                    serial_puts(COM1, "[STORAGE] Mounted NVMe EXT2 at '/drives/ext2_nvme'\n");
+                }
+            }
         }
+    }
 
-        vfs_node_t *ext2_root = ext2_mount_partition(nvme_dev, part->start_lba);
-        if (ext2_root && drives_dir) {
-            vfs_node_t *ext2_dir = ramfs_create_directory(drives_dir, "ext2_nvme");
-            if (ext2_dir) {
-                ext2_dir->flags |= FS_MOUNTPOINT;
-                ext2_dir->ptr = (vfs_node_t *)ext2_root;
-                serial_puts(COM1, "[STORAGE] Mounted EXT2 partition at '/drives/ext2_nvme'\n");
+    block_device_t ata_dev = {
+        .read = fat32_ata_bdev_read,
+        .write = fat32_ata_bdev_write,
+        .sector_size = 512,
+        .total_sectors = 131072
+    };
+
+    uint8_t probe_mbr[512];
+    if (ata_dev.read(0, 1, probe_mbr) == 0 && probe_mbr[510] == 0x55 && probe_mbr[511] == 0xAA) {
+        disk_partition_scan_device(ata_dev);
+        int p_count = disk_get_partition_count();
+        for (int i = 0; i < p_count; i++) {
+            partition_info_t *part = disk_get_partition(i);
+            if (!part) continue;
+
+            vfs_node_t *fat_root = fat32_mount_partition(ata_dev, part->start_lba, part->sector_count);
+            if (fat_root && drives_dir) {
+                vfs_node_t *disk_dir = vfs_finddir(drives_dir, "fat32_nvme");
+                if (!disk_dir) disk_dir = ramfs_create_directory(drives_dir, "fat32_nvme");
+                if (disk_dir) {
+                    disk_dir->flags |= FS_MOUNTPOINT;
+                    disk_dir->ptr = (vfs_node_t *)fat_root;
+                    serial_puts(COM1, "[STORAGE] Mounted ATA FAT32 at '/drives/fat32_nvme'\n");
+                }
             }
-            continue;
+
+            vfs_node_t *ext2_root = ext2_mount_partition(ata_dev, part->start_lba);
+            if (ext2_root && drives_dir) {
+                vfs_node_t *ext2_dir = vfs_finddir(drives_dir, "ext2_nvme");
+                if (!ext2_dir) ext2_dir = ramfs_create_directory(drives_dir, "ext2_nvme");
+                if (ext2_dir) {
+                    ext2_dir->flags |= FS_MOUNTPOINT;
+                    ext2_dir->ptr = (vfs_node_t *)ext2_root;
+                    serial_puts(COM1, "[STORAGE] Mounted ATA EXT2 at '/drives/ext2_nvme'\n");
+                }
+            }
         }
     }
 }

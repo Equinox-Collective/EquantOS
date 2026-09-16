@@ -36,7 +36,6 @@ QEMU      := qemu-system-x86_64
 QEMUFLAGS := -m 512M \
              -vga std \
              -boot d \
-			 -bios OVMF.fd \
              -netdev user,id=net0 \
              -device rtl8139,netdev=net0 \
 			 -object filter-dump,id=netdump0,netdev=net0,file=net.pcap \
@@ -57,12 +56,12 @@ QEMUBDFLAGS := -m 512M \
                -device qemu-xhci,id=xhci \
                -device usb-kbd,bus=xhci.0 \
                -device usb-mouse,bus=xhci.0 \
-               -drive file=disk_gpt_ext2.img,format=raw,if=none,id=hd0 \
-               -device ide-hd,drive=hd0,bootindex=1 \
+               -drive file=disk_gpt_ext2.img,format=raw,if=none,id=nvme0 \
+               -device nvme,drive=nvme0,serial=deadbeef,bootindex=1 \
                -serial stdio \
-			   -netdev user,id=net0 \
+               -netdev user,id=net0 \
                -device rtl8139,netdev=net0 \
-			   -object filter-dump,id=netdump0,netdev=net0,file=net.pcap \
+               -object filter-dump,id=netdump0,netdev=net0,file=net.pcap \
                -d guest_errors,unimp -D qemu_bd.log
 
 # ==============================================================================
@@ -97,6 +96,7 @@ ifeq ($(USE_POSIX),1)
 
     LOG_STEP = @printf "  %b  %s\n" "$1" "$2"
     LOG_MSG  = @printf "%b\n" "$1"
+	WRITE_NSH = printf "\\EFI\\BOOT\\BOOTX64.EFI\r\n" > build/iso/startup.nsh
 else
     WINPATH = $(subst /,\,$(patsubst %/,%,$1))
     MKDIR   = if not exist "$(call WINPATH,$1)" mkdir "$(call WINPATH,$1)"
@@ -115,6 +115,7 @@ else
 
     LOG_STEP = @echo   $1 $2
     LOG_MSG  = @echo $1
+	WRITE_NSH = (echo \EFI\BOOT\BOOTX64.EFI) > build\iso\startup.nsh
 endif
 
 # Recursive wildcard function
@@ -315,11 +316,13 @@ build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd
 	$(Q)$(call CP,limine-bios.sys,build/iso/boot/limine-bios.sys)
 	$(Q)$(call CP,limine-uefi-cd.bin,build/iso/boot/limine-uefi-cd.bin)
 	$(Q)$(call CP,BOOTX64.EFI,build/iso/EFI/BOOT/BOOTX64.EFI)
+	@echo FS0: > build/iso/startup.nsh
+	@echo \EFI\BOOT\BOOTX64.EFI >> build/iso/startup.nsh
 	$(Q)xorriso -as mkisofs \
-		-r -iso-level 3 -l -allow-leading-dots -relaxed-filenames -allow-lowercase \
+		-R -r -J -iso-level 3 -l -allow-leading-dots -relaxed-filenames -allow-lowercase \
 		-b boot/limine-bios-cd.bin \
-		-no-emul-boot -boot-load-size 4 -boot-info-table \
-		--efi-boot boot/limine-uefi-cd.bin \
+		-no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus \
+		-apm-block-size 2048 --efi-boot boot/limine-uefi-cd.bin \
 		-efi-boot-part --efi-boot-image --protective-msdos-label \
 		build/iso -o build/equantos.iso $(DEV_NULL)
 	$(call LOG_MSG,$(CLR_OK) EquantOS ISO successfully built at build/equantos.iso)
@@ -329,7 +332,8 @@ build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd
 
 run: build/equantos.iso disks
 	$(call LOG_MSG,  $(CLR_INFO) Launching EquantOS in QEMU...)
-	$(Q)$(QEMU) -cdrom build/equantos.iso $(QEMUFLAGS)
+	$(Q)$(QEMU) -drive file=build/equantos.iso,media=cdrom,if=none,id=cdrom0 \
+	            -device ide-cd,drive=cdrom0,bootindex=0 $(QEMUFLAGS)
 
 runbd:
 	$(call LOG_MSG,  $(CLR_INFO) Launching EquantOS from Hard Disk (disk_gpt_ext2.img)...)

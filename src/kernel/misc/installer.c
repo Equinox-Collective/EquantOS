@@ -18,7 +18,7 @@
 
 __attribute__((used, section(".requests")))
 static volatile struct limine_efi_system_table_request efi_table_request = {
-    .id = { 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b, 0x5ceba5163ea4d6fb, 0xebd5a23bcfb9efe1 },
+    .id = { 0xc7b1dd30df4c8b88, 0x0a82e883a194f07b, 0x5ceba5163eaaf6d6, 0x0a6981610cf65fcc },
     .revision = 0,
     .response = NULL
 };
@@ -187,10 +187,13 @@ static void tui_footer(const char *hints) {
     term_print_raw(hints ? hints : "[UP/DN] Navigate   [ENTER] Select   [ESC] Exit");
 }
 
-static void utf16_to_ascii(const uint16_t *src, char *dst, size_t max_len) {
+static void utf16_to_ascii(const void *src, char *dst, size_t max_len) {
+    const uint8_t *s = (const uint8_t *)src;
     size_t i = 0;
-    while (i + 1 < max_len && src[i] != 0) {
-        dst[i] = (char)(src[i] & 0x7F);
+    while (i + 1 < max_len) {
+        uint16_t ch = (uint16_t)s[i * 2] | ((uint16_t)s[i * 2 + 1] << 8);
+        if (ch == 0) break;
+        dst[i] = (char)(ch & 0x7F);
         i++;
     }
     dst[i] = '\0';
@@ -337,6 +340,16 @@ static void scan_disk_topology(installer_disk_t *disk) {
     kfree(entries);
 }
 
+static int installer_ata_read(uint64_t lba, uint32_t count, void *buf) {
+    read_sectors_ata_pio((uintptr_t)buf, lba, count);
+    return 0;
+}
+
+static int installer_ata_write(uint64_t lba, uint32_t count, void *buf) {
+    write_sectors_ata_pio((uintptr_t)buf, lba, count);
+    return 0;
+}
+
 static int probe_hardware_disks(void) {
     g_inst.disk_count = 0;
 
@@ -352,8 +365,8 @@ static int probe_hardware_disks(void) {
     }
 
     block_device_t ata = {
-        .read = (block_read_fn)read_sectors_ata_pio,
-        .write = (block_write_fn)write_sectors_ata_pio,
+        .read = installer_ata_read,
+        .write = installer_ata_write,
         .sector_size = 512,
         .total_sectors = 131072
     };
@@ -657,8 +670,11 @@ static bool run_installer_engine(void) {
         render_log("Configuring Limine UEFI Bootloader on ESP...");
         vfs_node_t *efi_dir = vfs_create(esp_vfs, "EFI", FS_DIRECTORY);
         vfs_node_t *boot_dir = efi_dir ? vfs_create(efi_dir, "BOOT", FS_DIRECTORY) : NULL;
-        vfs_node_t *src_efi = vfs_open("/boot/limine-uefi-cd.bin", 0);
-        if (!src_efi) src_efi = vfs_open("/EFI/BOOT/BOOTX64.EFI", 0);
+
+        vfs_node_t *src_efi = vfs_open("/EFI/BOOT/BOOTX64.EFI", 0);
+        if (!src_efi) src_efi = vfs_open("/boot/BOOTX64.EFI", 0);
+        if (!src_efi) src_efi = vfs_open("/BOOTX64.EFI", 0);
+
         if (src_efi && boot_dir) {
             deploy_file(boot_dir, "BOOTX64.EFI", src_efi, cbuf, COPY_CHUNK_SIZE);
         }
@@ -680,6 +696,10 @@ static bool run_installer_engine(void) {
 
         vfs_node_t *cf = vfs_create(esp_vfs, "limine.conf", FS_FILE);
         if (cf) vfs_write(cf, 0, strlen(lconf), (uint8_t *)lconf);
+
+        const char *nsh = "\\EFI\\BOOT\\BOOTX64.EFI\r\n";
+        vfs_node_t *nsh_file = vfs_create(esp_vfs, "startup.nsh", FS_FILE);
+        if (nsh_file) vfs_write(nsh_file, 0, strlen(nsh), (uint8_t *)nsh);
     }
 
     if (r_etc) {

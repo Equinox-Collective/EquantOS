@@ -11,6 +11,8 @@ static uint32_t *term_fb_address = NULL;
 static uint64_t term_width = 0;
 static uint64_t term_height = 0;
 static uint64_t term_pitch = 0;
+static uint32_t utf8_cp = 0;
+static int utf8_remain = 0;
 
 static size_t cursor_x = 0;
 static size_t cursor_y = 0;
@@ -220,37 +222,28 @@ static void term_clear_entire_line(void) {
 void term_putchar_raw(char c) {
     if (!term_fb_address) return;
 
-    // 1. Полноценная обработка ANSI / VT100 последовательностей
     if (in_escape) {
-        // Завершающий символ последовательности (любая латинская буква, @ или ~)
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '@' || c == '~') {
             esc_buf[esc_len] = '\0';
-            
             if (c == 'm') {
                 parse_ansi_color(esc_buf);
             } else if (c == 'K') {
-                // Readline Line Clear: \033[K или \033[2K
-                if (esc_buf[1] == '2') {
-                    term_clear_entire_line();
-                } else {
-                    term_clear_to_eol();
-                }
+                if (esc_buf[1] == '2') term_clear_entire_line();
+                else term_clear_to_eol();
             } else if (c == 'J') {
                 term_clear_screen();
             }
-
             in_escape = false;
             esc_len = 0;
             return;
         }
-
         if (esc_len < (int)sizeof(esc_buf) - 1) {
             esc_buf[esc_len++] = c;
         }
         return;
     }
 
-    if (c == 27) { // ESC (0x1B)
+    if (c == 27) {
         in_escape = true;
         esc_len = 0;
         return;
@@ -296,12 +289,49 @@ void term_putchar_raw(char c) {
         return;
     }
 
-    // Автоперенос строки по ширине экрана
+    uint8_t b = (uint8_t)c;
+    uint32_t codepoint;
+
+    if (utf8_remain == 0) {
+        if (b < 0x80) {
+            codepoint = b;
+        } else if ((b & 0xE0) == 0xC0) {
+            utf8_cp = b & 0x1F;
+            utf8_remain = 1;
+            term_draw_cursor(true);
+            return;
+        } else if ((b & 0xF0) == 0xE0) {
+            utf8_cp = b & 0x0F;
+            utf8_remain = 2;
+            term_draw_cursor(true);
+            return;
+        } else if ((b & 0xF8) == 0xF0) {
+            utf8_cp = b & 0x07;
+            utf8_remain = 3;
+            term_draw_cursor(true);
+            return;
+        } else {
+            codepoint = b;
+        }
+    } else {
+        if ((b & 0xC0) == 0x80) {
+            utf8_cp = (utf8_cp << 6) | (b & 0x3F);
+            utf8_remain--;
+            if (utf8_remain > 0) {
+                term_draw_cursor(true);
+                return;
+            }
+            codepoint = utf8_cp;
+        } else {
+            utf8_remain = 0;
+            codepoint = b;
+        }
+    }
+
     if (cursor_x + gw >= term_width) {
         term_advance_line();
     }
 
-    // Отрисовка фона символа
     for (size_t y = 0; y < (size_t)gh; y++) {
         size_t py = cursor_y + y;
         if (py >= term_height) break;
@@ -312,16 +342,15 @@ void term_putchar_raw(char c) {
         }
     }
 
-    // Отрисовка глифа шрифта
     if (kernel_psf2_font.loaded && kernel_psf2_font.hdr) {
         int drawn_width = psf2_draw_char(&kernel_psf2_font, term_fb_address, 
                                          (int)term_pitch, (int)term_height, 
                                          (int)cursor_x, (int)cursor_y, 
-                                         (uint32_t)(unsigned char)c, term_fg_color);
+                                         codepoint, term_fg_color);
         cursor_x += drawn_width;
     } else {
-        if ((unsigned char)c < 128) {
-            const uint8_t *glyph = (const uint8_t *)font8x8_basic[(unsigned char)c];
+        if (codepoint < 128) {
+            const uint8_t *glyph = (const uint8_t *)font8x8_basic[codepoint];
             for (size_t y = 0; y < 8; y++) {
                 uint8_t row = glyph[y];
                 for (size_t x = 0; x < 8; x++) {

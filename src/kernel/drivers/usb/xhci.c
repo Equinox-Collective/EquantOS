@@ -191,7 +191,7 @@ static void xhci_configure_hid_endpoint(xhci_slot_device_t *slot) {
     xhci_ep_ctx_t *ep1_in_ctx = (xhci_ep_ctx_t *)xhci_get_ctx_entry(slot->input_ctx_virt, 4);
 
     ctrl_ctx[1] = (1U << 0) | (1U << 3); // Add Flags: A0 + A3
-    slot_ctx->info1 = (3U << 27) | ((slot->port_speed & 0x0F) << 20);
+    slot_ctx->info1 = (4U << 27) | ((slot->port_speed & 0x0F) << 20); // Context Entries = 4 (DCI 3 / EP1 IN)
     slot_ctx->info2 = ((slot->port_num & 0xFF) << 16);
 
     ep1_in_ctx->info0 = (3U << 16); // Interval = 3 (8ms)
@@ -215,6 +215,7 @@ void xhci_handle_events(void) {
         uint8_t trb_type = (event->control >> 10) & 0x3F;
         uint8_t completion_code = (event->status >> 24) & 0xFF;
         uint32_t slot_id = (event->control >> 24) & 0xFF;
+        uint8_t ep_id = (event->control >> 16) & 0x1F;
 
         if (trb_type == TRB_TYPE_CMD_COMPLETION) {
             printf("[XHCI-EVENT] Cmd Complete: Type=%u | Slot=%u | Code=%u\n", trb_type, slot_id, completion_code);
@@ -223,33 +224,31 @@ void xhci_handle_events(void) {
                 xhci_slot_device_t *slot = &g_slots[slot_id];
 
                 if (completion_code != 1) {
-                    printf("[XHCI-ERROR] Slot %u Command Type %u FAILED with Completion Code %u!\n",
-                           slot_id, trb_type, completion_code);
-                    slot->state = XHCI_SLOT_STATE_DISABLED; // <-- Отключаем слот, чтобы не читать мусор
+                    printf("[XHCI-ERROR] Slot %u Command FAILED with Code %u!\n", slot_id, completion_code);
+                    slot->state = XHCI_SLOT_STATE_DISABLED;
                 } else {
                     if (slot->state == XHCI_SLOT_STATE_ENABLING) {
                         slot->state = XHCI_SLOT_STATE_ADDRESSING;
                         xhci_address_device(slot);
-                    } 
-                    else if (slot->state == XHCI_SLOT_STATE_ADDRESSING) {
+                    } else if (slot->state == XHCI_SLOT_STATE_ADDRESSING) {
                         slot->state = XHCI_SLOT_STATE_CONFIGURING;
                         xhci_configure_hid_endpoint(slot);
-                    }
-                    else if (slot->state == XHCI_SLOT_STATE_CONFIGURING) {
+                    } else if (slot->state == XHCI_SLOT_STATE_CONFIGURING) {
                         slot->state = XHCI_SLOT_STATE_ADDRESSED;
-                        printf("[XHCI-STEP] Slot %u Configured! Sending SET_CONFIG & Arming Endpoint...\n", slot_id);
+                        printf("[XHCI-STEP] Slot %u Configured! Setting Configuration...\n", slot_id);
                         xhci_set_configuration(slot);
-                        xhci_arm_hid_endpoint(slot);
                     }
                 }
             }
-        } 
-        else if (trb_type == TRB_TYPE_TRANSFER_EVENT) {
+        } else if (trb_type == TRB_TYPE_TRANSFER_EVENT) {
             if (slot_id < XHCI_MAX_SLOTS_SUPPORTED) {
                 xhci_slot_device_t *slot = &g_slots[slot_id];
 
-                // Обрабатываем отчет ТОЛЬКО если слот успешно сконфигурирован
-                if (slot->state == XHCI_SLOT_STATE_ADDRESSED && slot->report_buf_virt) {
+                if (ep_id == 1) {
+                    // EP0 Control Stage completed: arm Interrupt Endpoint
+                    xhci_arm_hid_endpoint(slot);
+                } else if (ep_id == 3 && slot->state == XHCI_SLOT_STATE_ADDRESSED && slot->report_buf_virt) {
+                    // EP1 IN: Valid keystroke or mouse packet
                     uint32_t residual = event->status & 0x00FFFFFF;
                     size_t bytes_transferred = (residual < 8) ? (8 - residual) : 8;
                     if (bytes_transferred == 0) bytes_transferred = 8;
