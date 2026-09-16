@@ -55,7 +55,7 @@ void __attribute__((noreturn)) kernel_panic(cpu_state_t *state, const char *file
     char buf[32];
     uint64_t cr2_fault_addr = 0;
     if (state != NULL && state->int_no == 14) {
-        __asm__ volatile("mov %%cr2, %0" : "=r"(cr2_fault_addr));
+        term_print("CR2    : 0x"); itoa_hex(cr2_fault_addr, buf); term_print(buf); term_print("\n");
     }
 
     // 1. ВЫВОД В SERIAL ПОРТ

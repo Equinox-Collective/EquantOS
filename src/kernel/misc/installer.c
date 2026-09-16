@@ -667,14 +667,24 @@ static bool run_installer_engine(void) {
         snprintf(p_path, sizeof(p_path), "/%s", payloads[i]);
         vfs_node_t *src = vfs_open(p_path, 0);
         if (!src) {
+            snprintf(p_path, sizeof(p_path), "/boot/%s", payloads[i]);
+            src = vfs_open(p_path, 0);
+        }
+        if (!src) {
             snprintf(p_path, sizeof(p_path), "/sys/bin/%s", payloads[i]);
             src = vfs_open(p_path, 0);
         }
         if (!src) continue;
 
-        vfs_node_t *dest_dir = (strcmp(payloads[i], "kernel.elf") == 0) ? r_boot : r_bin;
-        deploy_file(dest_dir, payloads[i], src, cbuf, COPY_CHUNK_SIZE);
-        deploy_file(root_vfs, payloads[i], src, cbuf, COPY_CHUNK_SIZE);
+        if (strcmp(payloads[i], "kernel.elf") == 0) {
+            deploy_file(r_boot, payloads[i], src, cbuf, COPY_CHUNK_SIZE);
+        } else if (strcmp(payloads[i], ".bashrc") == 0) {
+            deploy_file(r_etc, payloads[i], src, cbuf, COPY_CHUNK_SIZE);
+            vfs_node_t *r_root_dir = vfs_finddir(root_vfs, "root");
+            if (r_root_dir) deploy_file(r_root_dir, payloads[i], src, cbuf, COPY_CHUNK_SIZE);
+        } else {
+            deploy_file(r_bin, payloads[i], src, cbuf, COPY_CHUNK_SIZE);
+        }
     }
 
     if (g_inst.is_uefi_mode && esp_vfs) {
@@ -874,9 +884,9 @@ void installer_run(void) {
                     g_inst.cfg.reuse_existing_esp = true;
                 } else {
                     g_inst.target_esp_start = g_inst.target_root_start;
-                    g_inst.target_esp_sectors = 69632;
-                    g_inst.target_root_start += 69632;
-                    g_inst.target_root_sectors -= 69632;
+                    g_inst.target_esp_sectors = 81920; // 40 MB (>65525 clusters for FAT32!)
+                    g_inst.target_root_start += 81920;
+                    g_inst.target_root_sectors -= 81920;
                     g_inst.cfg.reuse_existing_esp = false;
                 }
             }

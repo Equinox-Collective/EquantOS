@@ -36,6 +36,7 @@ QEMU      := qemu-system-x86_64
 QEMUFLAGS := -m 512M \
              -vga std \
              -boot d \
+			 -bios OVMF.fd \
              -netdev user,id=net0 \
              -device rtl8139,netdev=net0 \
 			 -object filter-dump,id=netdump0,netdev=net0,file=net.pcap \

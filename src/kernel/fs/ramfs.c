@@ -159,18 +159,26 @@ vfs_node_t *ramfs_create_file(vfs_node_t *parent, const char *name, void *data, 
 static int __init ramfs_populate_modules_initcall(void) {
     if (!vfs_root) return 0;
 
-    vfs_node_t *sys_dir = vfs_finddir(vfs_root, "sys");
-    if (!sys_dir) sys_dir = ramfs_create_directory(vfs_root, "sys");
+    const char *standard_dirs[] = {
+        "bin", "boot", "etc", "home", "proc", "root", "sys", "tmp", "drives", NULL
+    };
 
-    vfs_node_t *sys_bin_dir = vfs_finddir(sys_dir, "bin");
-    if (!sys_bin_dir) sys_bin_dir = ramfs_create_directory(sys_dir, "bin");
+    for (int i = 0; standard_dirs[i] != NULL; i++) {
+        if (!vfs_finddir(vfs_root, standard_dirs[i])) {
+            ramfs_create_directory(vfs_root, standard_dirs[i]);
+        }
+    }
 
     vfs_node_t *bin_dir = vfs_finddir(vfs_root, "bin");
-    if (!bin_dir) bin_dir = ramfs_create_directory(vfs_root, "bin");
+    vfs_node_t *sys_dir = vfs_finddir(vfs_root, "sys");
+    vfs_node_t *sys_bin_dir = sys_dir ? vfs_finddir(sys_dir, "bin") : NULL;
+    if (sys_dir && !sys_bin_dir) {
+        sys_bin_dir = ramfs_create_directory(sys_dir, "bin");
+    }
 
     vfs_node_t *iso_root = iso9660_mount_boot_drive();
     if (iso_root) {
-        serial_puts(COM1, "[RAMFS] Mapping files from ISO9660 into RAMFS...\n");
+        serial_puts(COM1, "[RAMFS] LiveCD media detected. Populating /bin...\n");
         uint32_t idx = 0;
         vfs_node_t *entry = NULL;
         while ((entry = vfs_readdir(iso_root, idx++)) != NULL) {
@@ -182,21 +190,8 @@ static int __init ramfs_populate_modules_initcall(void) {
                 }
             }
 
-            entry->parent = vfs_root;
-            entry->next = vfs_root->children;
-            vfs_root->children = entry;
-
             if (entry->flags & FS_FILE) {
-                if (sys_bin_dir) {
-                    vfs_node_t *snode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-                    if (snode) {
-                        memcpy(snode, entry, sizeof(vfs_node_t));
-                        snode->parent = sys_bin_dir;
-                        snode->next = sys_bin_dir->children;
-                        sys_bin_dir->children = snode;
-                    }
-                }
-                if (bin_dir) {
+                if (bin_dir && !vfs_finddir(bin_dir, entry->name)) {
                     vfs_node_t *bnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
                     if (bnode) {
                         memcpy(bnode, entry, sizeof(vfs_node_t));
@@ -205,47 +200,18 @@ static int __init ramfs_populate_modules_initcall(void) {
                         bin_dir->children = bnode;
                     }
                 }
-            }
-        }
-        kfree(iso_root);
-        return 0;
-    }
-
-    vfs_node_t *disk_bin = vfs_open("/drives/ext2_nvme/bin", 0);
-    if (!disk_bin) disk_bin = vfs_open("/drives/fat32_nvme/bin", 0);
-    if (!disk_bin) disk_bin = vfs_open("/drives/ext2_nvme", 0);
-
-    if (disk_bin) {
-        serial_puts(COM1, "[RAMFS] Booted from installed disk. Initializing system...\n");
-        uint32_t idx = 0;
-        vfs_node_t *c = NULL;
-        while ((c = vfs_readdir(disk_bin, idx++)) != NULL) {
-            if (strstr(c->name, "font.psf") || strstr(c->name, ".psf")) {
-                uint8_t *fbuf = (uint8_t *)kmalloc(c->length);
-                if (fbuf && vfs_read(c, 0, c->length, fbuf) == (int64_t)c->length) {
-                    psf2_init_default(fbuf, c->length);
-                    serial_puts(COM1, "[KERNEL] PSF2 Font loaded from installed disk.\n");
-                }
-            }
-            if (c->flags & FS_FILE) {
-                vfs_node_t *rnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-                if (rnode) {
-                    memcpy(rnode, c, sizeof(vfs_node_t));
-                    rnode->parent = vfs_root;
-                    rnode->next = vfs_root->children;
-                    vfs_root->children = rnode;
-                }
-                if (bin_dir) {
-                    vfs_node_t *bnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-                    if (bnode) {
-                        memcpy(bnode, c, sizeof(vfs_node_t));
-                        bnode->parent = bin_dir;
-                        bnode->next = bin_dir->children;
-                        bin_dir->children = bnode;
+                if (sys_bin_dir && !vfs_finddir(sys_bin_dir, entry->name)) {
+                    vfs_node_t *snode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                    if (snode) {
+                        memcpy(snode, entry, sizeof(vfs_node_t));
+                        snode->parent = sys_bin_dir;
+                        snode->next = sys_bin_dir->children;
+                        sys_bin_dir->children = snode;
                     }
                 }
             }
         }
+        kfree(iso_root);
     }
     return 0;
 }

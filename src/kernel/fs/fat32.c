@@ -424,21 +424,28 @@ static int64_t fat32_write(vfs_node_t *node, uint64_t offset, uint64_t size, uin
 }
 
 static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
-    if (!(node->flags & FS_DIRECTORY)) return NULL;
+    if (!node || !(node->flags & FS_DIRECTORY)) return NULL;
 
     uint32_t cluster = (uint32_t)(uintptr_t)node->ptr;
+    if (cluster < 2) return NULL;
+
     uint32_t cluster_size = current_vol.sectors_per_cluster * current_vol.bytes_per_sector;
+    if (cluster_size == 0) return NULL;
+
     uint32_t entries_per_cluster = cluster_size / sizeof(fat32_dir_entry_t);
 
     uint32_t current_index = 0;
     uint8_t *cluster_buf = (uint8_t *)kmalloc(cluster_size);
     if (!cluster_buf) return NULL;
 
-    char lfn_acc[260] = {0};
+    char lfn_acc[260];
+    memset(lfn_acc, 0, sizeof(lfn_acc));
 
     while (cluster >= 2 && cluster < 0x0FFFFFF8) {
         uint32_t lba = fat32_cluster_to_lba(cluster);
-        current_vol.dev.read(lba, current_vol.sectors_per_cluster, cluster_buf);
+        if (current_vol.dev.read(lba, current_vol.sectors_per_cluster, cluster_buf) != 0) {
+            break;
+        }
 
         fat32_dir_entry_t *entries = (fat32_dir_entry_t *)cluster_buf;
         for (uint32_t i = 0; i < entries_per_cluster; i++) {
@@ -451,17 +458,17 @@ static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
             if (entries[i].attribute == FAT32_ATTR_LONG_NAME) {
                 fat32_lfn_entry_t *lfn = (fat32_lfn_entry_t *)&entries[i];
                 uint8_t seq = lfn->order & 0x1F;
-                if (seq > 0 && seq <= 20) {
+                if (seq > 0 && seq <= 19) {
                     size_t char_idx = (seq - 1) * 13;
-                    for (int c = 0; c < 5; c++) {
+                    for (int c = 0; c < 5 && char_idx < sizeof(lfn_acc) - 1; c++) {
                         if (lfn->name1[c] == 0 || lfn->name1[c] == 0xFFFF) break;
                         lfn_acc[char_idx++] = (char)(lfn->name1[c] & 0xFF);
                     }
-                    for (int c = 0; c < 6; c++) {
+                    for (int c = 0; c < 6 && char_idx < sizeof(lfn_acc) - 1; c++) {
                         if (lfn->name2[c] == 0 || lfn->name2[c] == 0xFFFF) break;
                         lfn_acc[char_idx++] = (char)(lfn->name2[c] & 0xFF);
                     }
-                    for (int c = 0; c < 2; c++) {
+                    for (int c = 0; c < 2 && char_idx < sizeof(lfn_acc) - 1; c++) {
                         if (lfn->name3[c] == 0 || lfn->name3[c] == 0xFFFF) break;
                         lfn_acc[char_idx++] = (char)(lfn->name3[c] & 0xFF);
                     }
@@ -471,7 +478,8 @@ static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
 
             char entry_name[260];
             if (lfn_acc[0] != '\0') {
-                strcpy(entry_name, lfn_acc);
+                strncpy(entry_name, lfn_acc, sizeof(entry_name) - 1);
+                entry_name[sizeof(entry_name) - 1] = '\0';
             } else {
                 fat32_format_short_name(&entries[i], entry_name);
             }
@@ -479,7 +487,11 @@ static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
             if (strcmp(entry_name, ".") != 0 && strcmp(entry_name, "..") != 0) {
                 if (current_index == index) {
                     vfs_node_t *vnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-                    strcpy(vnode->name, entry_name);
+                    if (!vnode) {
+                        kfree(cluster_buf);
+                        return NULL;
+                    }
+                    strncpy(vnode->name, entry_name, sizeof(vnode->name) - 1);
                     vnode->length = entries[i].file_size;
                     vnode->inode = ((uint32_t)entries[i].first_cluster_high << 16) | entries[i].first_cluster_low;
                     vnode->ptr = (vfs_node_t *)(uintptr_t)vnode->inode;
@@ -940,6 +952,7 @@ void fat32_init(void) {
     vfs_node_t *bin_dir = vfs_finddir(vfs_root, "bin");
     if (!bin_dir) bin_dir = ramfs_create_directory(vfs_root, "bin");
 
+    // 1. Scan NVMe Controller
     if (nvme_init() == NVME_SUCCESS) {
         block_device_t nvme_dev = nvme_get_block_device();
         disk_partition_scan_device(nvme_dev);
@@ -967,7 +980,6 @@ void fat32_init(void) {
                     ext2_dir->ptr = (vfs_node_t *)ext2_root;
                     serial_puts(COM1, "[STORAGE] Mounted NVMe EXT2 at '/drives/ext2_nvme'\n");
 
-                    // Direct bootstrap from installed disk
                     vfs_node_t *inst_bin = vfs_finddir(ext2_root, "bin");
                     if (inst_bin) {
                         uint32_t idx = 0;
@@ -979,15 +991,8 @@ void fat32_init(void) {
                                     psf2_init_default(fbuf, c->length);
                                 }
                             }
-                            if (c->flags & FS_FILE) {
-                                vfs_node_t *rnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-                                if (rnode) {
-                                    memcpy(rnode, c, sizeof(vfs_node_t));
-                                    rnode->parent = vfs_root;
-                                    rnode->next = vfs_root->children;
-                                    vfs_root->children = rnode;
-                                }
-                                if (bin_dir) {
+                            if ((c->flags & FS_FILE) && bin_dir) {
+                                if (!vfs_finddir(bin_dir, c->name)) {
                                     vfs_node_t *bnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
                                     if (bnode) {
                                         memcpy(bnode, c, sizeof(vfs_node_t));
@@ -1004,6 +1009,12 @@ void fat32_init(void) {
         }
     }
 
+    // 2. Scan ATA / IDE ONLY if hardware is physically present
+    extern int ata_drive_present;
+    if (!ata_drive_present) {
+        return;
+    }
+
     block_device_t ata_dev = {
         .read = fat32_ata_bdev_read,
         .write = fat32_ata_bdev_write,
@@ -1012,6 +1023,8 @@ void fat32_init(void) {
     };
 
     uint8_t probe_mbr[512];
+    memset(probe_mbr, 0, sizeof(probe_mbr));
+
     if (ata_dev.read(0, 1, probe_mbr) == 0 && probe_mbr[510] == 0x55 && probe_mbr[511] == 0xAA) {
         disk_partition_scan_device(ata_dev);
         int p_count = disk_get_partition_count();
@@ -1021,23 +1034,23 @@ void fat32_init(void) {
 
             vfs_node_t *fat_root = fat32_mount_partition(ata_dev, part->start_lba, part->sector_count);
             if (fat_root && drives_dir) {
-                vfs_node_t *disk_dir = vfs_finddir(drives_dir, "fat32_nvme");
-                if (!disk_dir) disk_dir = ramfs_create_directory(drives_dir, "fat32_nvme");
+                vfs_node_t *disk_dir = vfs_finddir(drives_dir, "fat32_ata");
+                if (!disk_dir) disk_dir = ramfs_create_directory(drives_dir, "fat32_ata");
                 if (disk_dir) {
                     disk_dir->flags |= FS_MOUNTPOINT;
                     disk_dir->ptr = (vfs_node_t *)fat_root;
-                    serial_puts(COM1, "[STORAGE] Mounted ATA FAT32 at '/drives/fat32_nvme'\n");
+                    serial_puts(COM1, "[STORAGE] Mounted ATA FAT32 at '/drives/fat32_ata'\n");
                 }
             }
 
             vfs_node_t *ext2_root = ext2_mount_partition(ata_dev, part->start_lba);
             if (ext2_root && drives_dir) {
-                vfs_node_t *ext2_dir = vfs_finddir(drives_dir, "ext2_nvme");
-                if (!ext2_dir) ext2_dir = ramfs_create_directory(drives_dir, "ext2_nvme");
+                vfs_node_t *ext2_dir = vfs_finddir(drives_dir, "ext2_ata");
+                if (!ext2_dir) ext2_dir = ramfs_create_directory(drives_dir, "ext2_ata");
                 if (ext2_dir) {
                     ext2_dir->flags |= FS_MOUNTPOINT;
                     ext2_dir->ptr = (vfs_node_t *)ext2_root;
-                    serial_puts(COM1, "[STORAGE] Mounted ATA EXT2 at '/drives/ext2_nvme'\n");
+                    serial_puts(COM1, "[STORAGE] Mounted ATA EXT2 at '/drives/ext2_ata'\n");
                 }
             }
         }

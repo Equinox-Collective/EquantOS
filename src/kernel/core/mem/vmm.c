@@ -176,7 +176,7 @@ void vmm_page_fault_handler(cpu_state_t *state) {
     uint64_t pd_idx   = (fault_addr >> 21) & 0x1FF;
     uint64_t pt_idx   = (fault_addr >> 12) & 0x1FF;
 
-    // 1. Handle Copy-On-Write Fault (COW)
+    // 1. Copy-On-Write (COW)
     if (pml4[pml4_idx] & PTE_PRESENT) {
         page_table_t *pdpt = (page_table_t *)VIRT(pml4[pml4_idx] & PTE_ADDR_MASK);
         if (pdpt[pdpt_idx] & PTE_PRESENT) {
@@ -200,14 +200,13 @@ void vmm_page_fault_handler(cpu_state_t *state) {
 
                     pt[pt_idx] = ((uint64_t)new_phys & PTE_ADDR_MASK) | new_flags;
                     invlpg(fault_addr);
-                    return; // COW Resolved cleanly!
+                    return;
                 }
             }
         }
     }
 
-    // 2. DEMAND PAGING: Automatic User Stack Expansion
-    // User stack range: 0x7FFF00000000 .. 0x800000000000
+    // 2. User Stack Expansion
     if (fault_addr >= 0x7FE000000000ULL && fault_addr < 0x0000800000000000ULL) {
         void *new_stack_page = pmm_alloc();
         if (new_stack_page) {
@@ -215,18 +214,14 @@ void vmm_page_fault_handler(cpu_state_t *state) {
             vmm_map(pml4, fault_addr & ~0xFFFULL, (uint64_t)new_stack_page,
                     PTE_PRESENT | PTE_WRITABLE | PTE_USER);
             invlpg(fault_addr);
-            return; // Stack page allocated on the fly!
+            return;
         }
     }
 
-    // 3. TRUE RING 3 ISOLATION:
-    // If a user-space program crashed (or kernel faulted on bad user pointer):
-    // DO NOT PANIC! Kill ONLY the rogue process, keep the OS and shell alive!
     bool from_user = (state->cs == 0x23) || ((state->error_code & 0x04) != 0);
-    bool is_user_addr = (fault_addr < 0x0000800000000000ULL);
 
-    if (from_user || is_user_addr) {
-        serial_puts(COM1, "\n[VMM FAULT] Page Fault at virtual address: 0x");
+    if (from_user) {
+        serial_puts(COM1, "\n[VMM FAULT] User Page Fault at: 0x");
         char buf[32];
         itoa_hex(fault_addr, buf);
         serial_puts(COM1, buf);
@@ -238,14 +233,16 @@ void vmm_page_fault_handler(cpu_state_t *state) {
         kernel_panic(state, __FILE__, __LINE__, "Unhandled User Memory Fault");
     }
 
-    // 4. Genuine Kernel Panic: ONLY if the kernel's OWN higher-half code/data is corrupted!
-    serial_puts(COM1, "[VMM] Fatal Kernel Mode Page Fault at: 0x");
     char buf[32];
+    serial_puts(COM1, "\n[VMM KERNEL PANIC] Fatal Kernel Page Fault at CR2: 0x");
     itoa_hex(fault_addr, buf);
+    serial_puts(COM1, buf);
+    serial_puts(COM1, " | RIP: 0x");
+    itoa_hex(state->rip, buf);
     serial_puts(COM1, buf);
     serial_puts(COM1, "\n");
 
-    kernel_panic(state, __FILE__, __LINE__, "Fatal Unhandled Kernel Page Fault (#PF)");
+    kernel_panic(state, __FILE__, __LINE__, "Fatal Kernel Page Fault (#PF)");
 }
 
 uint64_t vmm_get_phys(page_table_t *pml4, uint64_t virt) {

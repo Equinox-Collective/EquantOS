@@ -151,39 +151,39 @@ static void nvme_submit_command(nvme_controller_t *ctrl, nvme_queue_pair_t *qp, 
 static int nvme_wait_completion(nvme_controller_t *ctrl, nvme_queue_pair_t *qp, uint16_t cid, uint16_t qid) {
     if (!ctrl->bar0) return NVME_ERR_HARDWARE;
 
-    uint32_t timeout = 10000000;
+    extern volatile uint32_t tick;
+    uint32_t start_tick = tick;
+    uint32_t timeout_ticks = 300; // 3 full seconds based on PIT hardware timer
 
-    while (timeout--) {
+    while ((tick - start_tick) < timeout_ticks) {
         volatile nvme_cq_entry_t *cqe = &qp->cq[qp->cq_head];
-
-        // FIX FOR REAL HARDWARE: Invalidate L1 CPU cache line for CQE to fetch DMA updates from RAM
-        __asm__ volatile("clflush (%0)" : : "r"((void *)cqe) : "memory");
-        __asm__ volatile("mfence" ::: "memory");
 
         uint16_t cqe_status = cqe->status;
         uint8_t phase = (uint8_t)(cqe_status & 1);
 
         if (phase == qp->cq_phase) {
-            if (cqe->cid == cid) {
-                uint16_t status = (uint16_t)((cqe_status >> 1) & 0x7FF);
+            uint16_t completed_cid = cqe->cid;
+            uint16_t status = (uint16_t)((cqe_status >> 1) & 0x7FF);
 
-                qp->cq_head = (qp->cq_head + 1) % qp->cq_size;
-                if (qp->cq_head == 0) {
-                    qp->cq_phase = !qp->cq_phase;
-                }
+            qp->cq_head = (qp->cq_head + 1) % qp->cq_size;
+            if (qp->cq_head == 0) {
+                qp->cq_phase = !qp->cq_phase;
+            }
 
-                nvme_write32(ctrl, nvme_cq_doorbell_offset(ctrl, qid), qp->cq_head);
+            nvme_write32(ctrl, nvme_cq_doorbell_offset(ctrl, qid), qp->cq_head);
 
+            if (completed_cid == cid) {
                 if (status != 0) {
                     serial_puts(COM1, "[NVME] Command completed with status error code!\n");
                     return NVME_ERR_HARDWARE;
                 }
-
                 return NVME_SUCCESS;
             }
         }
+
+        __asm__ volatile("pause");
     }
-    
+
     serial_puts(COM1, "[NVME] Command completion timeout!\n");
     return NVME_ERR_TIMEOUT;
 }
