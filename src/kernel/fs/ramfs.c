@@ -160,18 +160,13 @@ static int __init ramfs_populate_modules_initcall(void) {
     if (!vfs_root) return 0;
 
     vfs_node_t *sys_dir = vfs_finddir(vfs_root, "sys");
-    if (!sys_dir) {
-        sys_dir = ramfs_create_directory(vfs_root, "sys");
-    }
+    if (!sys_dir) sys_dir = ramfs_create_directory(vfs_root, "sys");
+
     vfs_node_t *sys_bin_dir = vfs_finddir(sys_dir, "bin");
-    if (!sys_bin_dir) {
-        sys_bin_dir = ramfs_create_directory(sys_dir, "bin");
-    }
+    if (!sys_bin_dir) sys_bin_dir = ramfs_create_directory(sys_dir, "bin");
 
     vfs_node_t *bin_dir = vfs_finddir(vfs_root, "bin");
-    if (!bin_dir) {
-        bin_dir = ramfs_create_directory(vfs_root, "bin");
-    }
+    if (!bin_dir) bin_dir = ramfs_create_directory(vfs_root, "bin");
 
     vfs_node_t *iso_root = iso9660_mount_boot_drive();
     if (iso_root) {
@@ -181,28 +176,15 @@ static int __init ramfs_populate_modules_initcall(void) {
         while ((entry = vfs_readdir(iso_root, idx++)) != NULL) {
             if (strstr(entry->name, "font.psf") || strstr(entry->name, ".psf")) {
                 uint8_t *fbuf = (uint8_t *)kmalloc(entry->length);
-                if (fbuf) {
-                    if (vfs_read(entry, 0, entry->length, fbuf) == (int64_t)entry->length) {
-                        psf2_init_default(fbuf, entry->length);
-                        serial_puts(COM1, "[KERNEL] PSF2 Font loaded from ISO9660.\n");
-                    }
+                if (fbuf && vfs_read(entry, 0, entry->length, fbuf) == (int64_t)entry->length) {
+                    psf2_init_default(fbuf, entry->length);
+                    serial_puts(COM1, "[KERNEL] PSF2 Font loaded from ISO9660.\n");
                 }
             }
 
             entry->parent = vfs_root;
             entry->next = vfs_root->children;
             vfs_root->children = entry;
-
-            if (strcmp(entry->name, "_bashrc") == 0) {
-                vfs_node_t *alias = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
-                if (alias) {
-                    memcpy(alias, entry, sizeof(vfs_node_t));
-                    strcpy(alias->name, ".bashrc");
-                    alias->parent = vfs_root;
-                    alias->next = vfs_root->children;
-                    vfs_root->children = alias;
-                }
-            }
 
             if (entry->flags & FS_FILE) {
                 if (sys_bin_dir) {
@@ -224,27 +206,43 @@ static int __init ramfs_populate_modules_initcall(void) {
                     }
                 }
             }
-
-            serial_puts(COM1, "[RAMFS] ISO node registered: ");
-            serial_puts(COM1, entry->name);
-            serial_puts(COM1, "\n");
         }
         kfree(iso_root);
         return 0;
     }
 
-    if (module_request.response != NULL && module_request.response->module_count > 0) {
-        for (uint64_t i = 0; i < module_request.response->module_count; i++) {
-            struct limine_file *mod = module_request.response->modules[i];
-            const char *filename = strrchr(mod->path, '/');
-            filename = (filename != NULL) ? filename + 1 : mod->path;
+    vfs_node_t *installed_bin = vfs_open("/drives/ext2_nvme/bin", 0);
+    if (!installed_bin) installed_bin = vfs_open("/drives/fat32_nvme/bin", 0);
+    if (!installed_bin) installed_bin = vfs_open("/drives/ext2_nvme", 0);
 
-            ramfs_create_file(vfs_root, filename, mod->address, mod->size);
-            if (sys_bin_dir) {
-                ramfs_create_file(sys_bin_dir, filename, mod->address, mod->size);
+    if (installed_bin) {
+        serial_puts(COM1, "[RAMFS] Booted from disk. Populating VFS from installed partition...\n");
+        uint32_t idx = 0;
+        vfs_node_t *c = NULL;
+        while ((c = vfs_readdir(installed_bin, idx++)) != NULL) {
+            if (strstr(c->name, "font.psf") || strstr(c->name, ".psf")) {
+                uint8_t *fbuf = (uint8_t *)kmalloc(c->length);
+                if (fbuf && vfs_read(c, 0, c->length, fbuf) == (int64_t)c->length) {
+                    psf2_init_default(fbuf, c->length);
+                }
             }
-            if (bin_dir) {
-                ramfs_create_file(bin_dir, filename, mod->address, mod->size);
+            if (c->flags & FS_FILE) {
+                vfs_node_t *rnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                if (rnode) {
+                    memcpy(rnode, c, sizeof(vfs_node_t));
+                    rnode->parent = vfs_root;
+                    rnode->next = vfs_root->children;
+                    vfs_root->children = rnode;
+                }
+                if (bin_dir) {
+                    vfs_node_t *bnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                    if (bnode) {
+                        memcpy(bnode, c, sizeof(vfs_node_t));
+                        bnode->parent = bin_dir;
+                        bnode->next = bin_dir->children;
+                        bin_dir->children = bnode;
+                    }
+                }
             }
         }
     }

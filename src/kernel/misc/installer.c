@@ -120,9 +120,9 @@ static void tui_draw_box(int col, int row, int width, int height, const char *ti
 
     tui_gotoxy(col, row);
     term_set_custom_colors(fg, bg);
-    term_putchar_raw('+');
-    for (int i = 0; i < width - 2; i++) term_putchar_raw('-');
-    term_putchar_raw('+');
+    term_print_raw("\xe2\x94\x8c");
+    for (int i = 0; i < width - 2; i++) term_print_raw("\xe2\x94\x80");
+    term_print_raw("\xe2\x94\x90");
 
     if (title && *title) {
         int tlen = strlen(title);
@@ -139,16 +139,16 @@ static void tui_draw_box(int col, int row, int width, int height, const char *ti
     for (int r = 1; r < height - 1; r++) {
         tui_gotoxy(col, row + r);
         term_set_custom_colors(fg, bg);
-        term_putchar_raw('|');
+        term_print_raw("\xe2\x94\x82");
         tui_gotoxy(col + width - 1, row + r);
-        term_putchar_raw('|');
+        term_print_raw("\xe2\x94\x82");
     }
 
     tui_gotoxy(col, row + height - 1);
     term_set_custom_colors(fg, bg);
-    term_putchar_raw('+');
-    for (int i = 0; i < width - 2; i++) term_putchar_raw('-');
-    term_putchar_raw('+');
+    term_print_raw("\xe2\x94\x94");
+    for (int i = 0; i < width - 2; i++) term_print_raw("\xe2\x94\x80");
+    term_print_raw("\xe2\x94\x98");
 }
 
 static void tui_header(const char *title) {
@@ -372,10 +372,22 @@ static int probe_hardware_disks(void) {
     return g_inst.disk_count;
 }
 
+static void tui_pad(char *dest, const char *src, int width) {
+    int len = 0;
+    while (src && src[len] && len < width) {
+        dest[len] = src[len];
+        len++;
+    }
+    while (len < width) {
+        dest[len++] = ' ';
+    }
+    dest[len] = '\0';
+}
+
 static void draw_disk_visual_bar(installer_disk_t *disk, int col, int row, int width) {
     tui_gotoxy(col, row);
     term_set_custom_colors(COLOR_ARCH_MUTED, COLOR_ARCH_PANEL);
-    term_putchar_raw('[');
+    term_print_raw("\xe2\x96\x8c");
 
     int bar_cols = width - 2;
     uint64_t total = disk->total_sectors ? disk->total_sectors : 1;
@@ -393,11 +405,11 @@ static void draw_disk_visual_bar(installer_disk_t *disk, int col, int row, int w
         else if (r->type == REGION_TYPE_LINUX_ROOT) c = COLOR_ARCH_KEY;
 
         term_set_custom_colors(c, COLOR_ARCH_PANEL);
-        for (int b = 0; b < w; b++) term_putchar_raw('#');
+        for (int b = 0; b < w; b++) term_print_raw("\xe2\x96\x88");
     }
 
     term_set_custom_colors(COLOR_ARCH_MUTED, COLOR_ARCH_PANEL);
-    term_putchar_raw(']');
+    term_print_raw("\xe2\x96\x90");
 }
 
 static bool confirm_destructive_overwrite(disk_region_t *reg) {
@@ -752,17 +764,33 @@ void installer_run(void) {
             term_set_custom_colors(fg, bg);
             term_print_raw(sel ? "> " : "  ");
 
-            char lbuf[128];
             uint64_t mb = (r->sector_count * 512) / (1024 * 1024);
             const char *tname = (r->type == REGION_TYPE_FREE_SPACE) ? "FREE" :
                                 (r->type == REGION_TYPE_ESP) ? "ESP" :
                                 (r->type == REGION_TYPE_WINDOWS_NTFS) ? "WIN11" :
-                                (r->type == REGION_TYPE_RECOVERY) ? "RECOVERY" : "DATA";
+                                (r->type == REGION_TYPE_RECOVERY) ? "RECOVERY" : "ROOT";
 
-            snprintf(lbuf, sizeof(lbuf), "%-4s %-12s %-7s %-8lluMB %-24s",
-                     (r->part_index >= 0) ? "PART" : "HOLE",
-                     tname, r->fs_label, mb, r->name);
-            term_print_raw(lbuf);
+            char col_kind[8], col_type[12], col_fs[8], col_sz[16], col_name[32];
+            tui_pad(col_kind, (r->part_index >= 0) ? "PART" : "HOLE", 5);
+            tui_pad(col_type, tname, 10);
+            tui_pad(col_fs, r->fs_label, 7);
+
+            char sz_buf[16], num_buf[16];
+            itoa((int64_t)mb, 10, num_buf);
+            strcpy(sz_buf, num_buf);
+            strcat(sz_buf, " MB");
+            tui_pad(col_sz, sz_buf, 10);
+
+            tui_pad(col_name, r->name, 24);
+
+            char row_str[128];
+            strcpy(row_str, col_kind);
+            strcat(row_str, col_type);
+            strcat(row_str, col_fs);
+            strcat(row_str, col_sz);
+            strcat(row_str, col_name);
+
+            term_print_raw(row_str);
         }
 
         disk_region_t *selected = &disk->regions[cur_reg_idx];
