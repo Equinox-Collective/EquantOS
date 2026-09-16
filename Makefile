@@ -295,7 +295,7 @@ disks:
 	$(call LOG_MSG,  $(CLR_INFO) Generating raw test disk images...)
 	$(Q)python create_disks.py
 
-limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
+.limine.stamp:
 	$(call LOG_MSG,  $(CLR_INFO) Downloading Limine Bootloader binaries...)
 	$(Q)curl -Lo limine-binary.tar.gz https://github.com/limine-bootloader/limine/releases/latest/download/limine-binary.tar.gz
 	$(Q)tar -xzf limine-binary.tar.gz
@@ -305,6 +305,9 @@ limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI:
 	$(Q)$(call CP,limine-binary/BOOTX64.EFI,BOOTX64.EFI)
 	$(Q)$(call RMDIR,limine-binary)
 	$(Q)$(call RM,limine-binary.tar.gz)
+	@echo done > .limine.stamp
+
+limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI: .limine.stamp
 
 build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd.bin limine-uefi-cd.bin
 	$(call LOG_MSG,  $(CLR_ISO) Constructing bootable ISO image...)
@@ -351,6 +354,7 @@ clean:
 	$(call LOG_MSG,  $(CLR_INFO) Removing build artifacts...)
 	$(Q)$(call RMDIR,build)
 	$(Q)$(call RM,net.pcap)
+	$(Q)$(call RM,.limine.stamp)
 
 clean-disks:
 	$(call LOG_MSG,  $(CLR_INFO) Removing virtual disks...)

@@ -400,7 +400,7 @@ static void tui_pad(char *dest, const char *src, int width) {
 static void draw_disk_visual_bar(installer_disk_t *disk, int col, int row, int width) {
     tui_gotoxy(col, row);
     term_set_custom_colors(COLOR_ARCH_MUTED, COLOR_ARCH_PANEL);
-    term_print_raw("\xe2\x96\x8c");
+    term_putchar_raw('[');
 
     int bar_cols = width - 2;
     uint64_t total = disk->total_sectors ? disk->total_sectors : 1;
@@ -422,7 +422,7 @@ static void draw_disk_visual_bar(installer_disk_t *disk, int col, int row, int w
     }
 
     term_set_custom_colors(COLOR_ARCH_MUTED, COLOR_ARCH_PANEL);
-    term_print_raw("\xe2\x96\x90");
+    term_putchar_raw(']');
 }
 
 static bool confirm_destructive_overwrite(disk_region_t *reg) {
@@ -629,6 +629,17 @@ static bool run_installer_engine(void) {
 
     vfs_node_t *esp_vfs = NULL;
     if (g_inst.is_uefi_mode) {
+        if (!g_inst.cfg.reuse_existing_esp) {
+            render_log("Formatting new EFI System Partition with FAT32...");
+            if (mkfs_fat32(disk->bdev, (uint32_t)g_inst.target_esp_start,
+                           (uint32_t)g_inst.target_esp_sectors, "ESP") != 0) {
+                strcpy(g_inst.error_msg, "Failed to format EFI System Partition.");
+                return false;
+            }
+            commit_gpt_slot(disk, g_inst.target_esp_start, g_inst.target_esp_sectors,
+                            GUID_ESP, "EFI System");
+        }
+
         render_log("Mounting EFI System Partition (FAT32)...");
         esp_vfs = fat32_mount_partition(disk->bdev, (uint32_t)g_inst.target_esp_start,
                                         (uint32_t)g_inst.target_esp_sectors);
