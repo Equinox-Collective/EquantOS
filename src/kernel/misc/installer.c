@@ -697,7 +697,7 @@ static bool run_installer_engine(void) {
         vfs_node_t *cf = vfs_create(esp_vfs, "limine.conf", FS_FILE);
         if (cf) vfs_write(cf, 0, strlen(lconf), (uint8_t *)lconf);
 
-        const char *nsh = "\\EFI\\BOOT\\BOOTX64.EFI\r\n";
+        const char *nsh = "FS0:\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\nFS1:\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\n";
         vfs_node_t *nsh_file = vfs_create(esp_vfs, "startup.nsh", FS_FILE);
         if (nsh_file) vfs_write(nsh_file, 0, strlen(nsh), (uint8_t *)nsh);
     }

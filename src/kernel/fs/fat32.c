@@ -11,6 +11,7 @@
 #include "../drivers/serial/serial.h"
 #include "../core/initcall.h"
 #include "ext2.h"
+#include "../drivers/display/psf2.h"
 
 typedef struct {
     uint32_t lead_sig;      // 0x41615252 ("RRaA")
@@ -936,6 +937,9 @@ void fat32_init(void) {
         drives_dir = ramfs_create_directory(vfs_root, "drives");
     }
 
+    vfs_node_t *bin_dir = vfs_finddir(vfs_root, "bin");
+    if (!bin_dir) bin_dir = ramfs_create_directory(vfs_root, "bin");
+
     if (nvme_init() == NVME_SUCCESS) {
         block_device_t nvme_dev = nvme_get_block_device();
         disk_partition_scan_device(nvme_dev);
@@ -962,6 +966,39 @@ void fat32_init(void) {
                     ext2_dir->flags |= FS_MOUNTPOINT;
                     ext2_dir->ptr = (vfs_node_t *)ext2_root;
                     serial_puts(COM1, "[STORAGE] Mounted NVMe EXT2 at '/drives/ext2_nvme'\n");
+
+                    // Direct bootstrap from installed disk
+                    vfs_node_t *inst_bin = vfs_finddir(ext2_root, "bin");
+                    if (inst_bin) {
+                        uint32_t idx = 0;
+                        vfs_node_t *c = NULL;
+                        while ((c = vfs_readdir(inst_bin, idx++)) != NULL) {
+                            if (strstr(c->name, "font.psf") || strstr(c->name, ".psf")) {
+                                uint8_t *fbuf = (uint8_t *)kmalloc(c->length);
+                                if (fbuf && vfs_read(c, 0, c->length, fbuf) == (int64_t)c->length) {
+                                    psf2_init_default(fbuf, c->length);
+                                }
+                            }
+                            if (c->flags & FS_FILE) {
+                                vfs_node_t *rnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                                if (rnode) {
+                                    memcpy(rnode, c, sizeof(vfs_node_t));
+                                    rnode->parent = vfs_root;
+                                    rnode->next = vfs_root->children;
+                                    vfs_root->children = rnode;
+                                }
+                                if (bin_dir) {
+                                    vfs_node_t *bnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                                    if (bnode) {
+                                        memcpy(bnode, c, sizeof(vfs_node_t));
+                                        bnode->parent = bin_dir;
+                                        bnode->next = bin_dir->children;
+                                        bin_dir->children = bnode;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
