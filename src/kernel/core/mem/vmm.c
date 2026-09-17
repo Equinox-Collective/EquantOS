@@ -221,8 +221,13 @@ void vmm_page_fault_handler(cpu_state_t *state) {
     bool from_user = (state->cs == 0x23) || ((state->error_code & 0x04) != 0);
 
     if (from_user) {
-        serial_puts(COM1, "\n[VMM FAULT] User Page Fault at: 0x");
+        serial_puts(COM1, "\n[VMM FAULT] Segmentation Fault in User Process (PID: ");
         char buf[32];
+        if (current_task && current_task->process) {
+            itoa(current_task->process->pid, 10, buf);
+            serial_puts(COM1, buf);
+        }
+        serial_puts(COM1, ") at CR2: 0x");
         itoa_hex(fault_addr, buf);
         serial_puts(COM1, buf);
         serial_puts(COM1, " | RIP: 0x");
@@ -230,7 +235,17 @@ void vmm_page_fault_handler(cpu_state_t *state) {
         serial_puts(COM1, buf);
         serial_puts(COM1, "\n");
 
-        kernel_panic(state, __FILE__, __LINE__, "Unhandled User Memory Fault");
+        term_print("\n\033[31mSegmentation fault (core dumped)\033[0m\n");
+
+        if (current_task && current_task->process) {
+            current_task->process->exit_code = 139; // 128 + SIGSEGV
+            current_task->process->exited = true;
+            current_task->state = TASK_STATE_ZOMBIE;
+            current_task->running = false;
+        }
+
+        sched_yield();
+        for (;;) { __asm__ volatile("hlt"); }
     }
 
     char buf[32];
