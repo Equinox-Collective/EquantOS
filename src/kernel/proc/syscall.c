@@ -273,6 +273,9 @@ static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, in
     resolve_user_path(pathname, resolved, sizeof(resolved));
 
     vfs_node_t *node = vfs_open(resolved, 0);
+    if (node && (flags & O_CREAT) && (flags & O_EXCL)) {
+        return -EEXIST;
+    }
 
     if (!node && (flags & O_CREAT)) {
         char parent_path[256];

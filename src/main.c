@@ -62,10 +62,10 @@ void _start(void) {
     vmm_init();
     init_heap(0, 0);
 
+    asm volatile ("sti");
+
     serial_puts(COM1, "[KERNEL] Executing Initcalls...\n");
     do_initcalls();
-
-    asm volatile ("sti");
 
     tty_print("\nWelcome to EquantOS!\n\n");
     kernel_start_userland();
