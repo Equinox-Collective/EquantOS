@@ -462,50 +462,67 @@ int nvme_init(void) {
         return NVME_ERR_NOTFOUND;
     }
 
+    // 1. Включаем Bus Master & Memory Space в PCI Command Register
     uint32_t pci_cmd = pci_read_dword(bus, slot, func, 0x04);
     pci_cmd |= (1 << 1) | (1 << 2);
     pci_write_word(bus, slot, func, 0x04, (uint16_t)pci_cmd);
 
+    // 2. Получаем BAR0
     uint64_t bar0_phys = nvme_get_bar0(bus, slot, func);
     if (!bar0_phys) {
         return NVME_ERR_HARDWARE;
     }
 
+    // Мапим регистры MMIO
     nvme_ctrl.bar0 = (volatile uint8_t *)pci_map_mmio(bar0_phys, 0x4000);
     if (!nvme_ctrl.bar0) {
         return NVME_ERR_HARDWARE;
     }
 
+    // 3. Вычисляем Doorbell Stride
     uint64_t cap = nvme_read64(&nvme_ctrl, NVME_REG_CAP);
     uint32_t dstrd = (uint32_t)((cap >> 32) & 0xF);
     nvme_ctrl.db_stride = 4 << dstrd;
 
+    // 4. Сброс контроллера: гасим CC.EN, если он был включен
     uint32_t cc = nvme_read32(&nvme_ctrl, NVME_REG_CC);
-    cc &= ~NVME_CC_ENABLE;
-    nvme_write32(&nvme_ctrl, NVME_REG_CC, cc);
+    if (cc & NVME_CC_ENABLE) {
+        cc &= ~NVME_CC_ENABLE;
+        nvme_write32(&nvme_ctrl, NVME_REG_CC, cc);
 
-    // Даем честные 1.5 секунды на сброс контроллера
-    uint32_t timeout = 15000;
-    while ((nvme_read32(&nvme_ctrl, NVME_REG_CSTS) & NVME_CSTS_RDY) && --timeout) {
-        for (volatile int i = 0; i < 20000; i++) {
-            __asm__ volatile("pause");
+        // Ждем, пока CSTS.RDY станет 0 (до 1.5 секунд)
+        uint32_t timeout = 15000;
+        while ((nvme_read32(&nvme_ctrl, NVME_REG_CSTS) & NVME_CSTS_RDY) && --timeout) {
+            for (volatile int i = 0; i < 20000; i++) {
+                __asm__ volatile("pause");
+            }
+        }
+        if (timeout == 0) {
+            serial_puts(COM1, "[NVME ERROR] CSTS.RDY failed to clear within timeout!\n");
+            return NVME_ERR_TIMEOUT;
         }
     }
-    if (timeout == 0) {
-        serial_puts(COM1, "[NVME ERROR] CSTS.RDY failed to clear within timeout!\n");
-        return NVME_ERR_TIMEOUT;
+
+    // 5. КРИТИЧЕСКИЙ ШАГ: Выделяем физическую память под Admin Queue!
+    if (nvme_init_queue_pair(&nvme_ctrl.admin_queue, NVME_ADMIN_QUEUE_SIZE, NVME_ADMIN_QUEUE_SIZE) != NVME_SUCCESS) {
+        serial_puts(COM1, "[NVME ERROR] Failed to allocate Admin Queue!\n");
+        return NVME_ERR_NOMEM;
     }
 
+    // 6. Прописываем физические адреса очередей в контроллер
     nvme_write64(&nvme_ctrl, NVME_REG_ASQ, nvme_ctrl.admin_queue.sq_phys);
     nvme_write64(&nvme_ctrl, NVME_REG_ACQ, nvme_ctrl.admin_queue.cq_phys);
 
+    // Настраиваем размер очередей AQA (0-based)
     uint32_t aqa = ((NVME_ADMIN_QUEUE_SIZE - 1) << 16) | (NVME_ADMIN_QUEUE_SIZE - 1);
     nvme_write32(&nvme_ctrl, NVME_REG_AQA, aqa);
 
+    // 7. Включаем контроллер (CC.EN = 1)
     cc = NVME_CC_ENABLE | NVME_CC_CSS_NVM | NVME_CC_AMS_RR | NVME_CC_SHN_NONE | NVME_CC_IOSQES | NVME_CC_IOCQES;
     nvme_write32(&nvme_ctrl, NVME_REG_CC, cc);
 
-    timeout = 30000;
+    // Ждем, пока CSTS.RDY перейдет в 1 (готов к приему команд)
+    uint32_t timeout = 30000;
     while (!(nvme_read32(&nvme_ctrl, NVME_REG_CSTS) & NVME_CSTS_RDY) && --timeout) {
         for (volatile int i = 0; i < 20000; i++) {
             __asm__ volatile("pause");
@@ -518,15 +535,25 @@ int nvme_init(void) {
 
     nvme_ctrl.command_id = 0;
 
+    // 8. Идентификация контроллера и пространства имен (LBA)
     if (nvme_identify_controller(&nvme_ctrl) != NVME_SUCCESS) {
+        serial_puts(COM1, "[NVME ERROR] Identify Controller failed!\n");
         return NVME_ERR_HARDWARE;
     }
 
     nvme_identify_namespace(&nvme_ctrl);
 
-    if (nvme_create_io_cq(&nvme_ctrl) != NVME_SUCCESS) return NVME_ERR_HARDWARE;
-    if (nvme_create_io_sq(&nvme_ctrl) != NVME_SUCCESS) return NVME_ERR_HARDWARE;
+    // 9. Создаем очереди ввода-вывода (IO Submission & Completion Queues)
+    if (nvme_create_io_cq(&nvme_ctrl) != NVME_SUCCESS) {
+        serial_puts(COM1, "[NVME ERROR] Create IO CQ failed!\n");
+        return NVME_ERR_HARDWARE;
+    }
+    if (nvme_create_io_sq(&nvme_ctrl) != NVME_SUCCESS) {
+        serial_puts(COM1, "[NVME ERROR] Create IO SQ failed!\n");
+        return NVME_ERR_HARDWARE;
+    }
 
     nvme_ctrl.initialized = true;
+    serial_puts(COM1, "[NVME SUCCESS] NVMe Controller and IO Queues fully initialized.\n");
     return NVME_SUCCESS;
 }
