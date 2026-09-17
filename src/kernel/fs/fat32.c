@@ -841,9 +841,18 @@ int mkfs_fat32(block_device_t dev, uint32_t start_lba, uint32_t sector_count, co
     uint8_t  num_fats = 2;
     uint32_t root_cluster = 2;
 
-    uint32_t total_clusters = (sector_count - reserved_sectors) / sectors_per_cluster;
-    uint32_t fat_size_sectors = ((total_clusters * 4) + (bytes_per_sector - 1)) / bytes_per_sector;
+    uint32_t total_data_sectors = sector_count - reserved_sectors;
+    uint32_t fat_size_sectors = ((total_data_sectors * 4) + (bytes_per_sector * sectors_per_cluster) - 1) / 
+                                (bytes_per_sector * sectors_per_cluster + (num_fats * 4));
+    
+    // Точный расчет кластеров данных
+    uint32_t actual_data_sectors = sector_count - (reserved_sectors + (num_fats * fat_size_sectors));
+    uint32_t total_clusters = actual_data_sectors / sectors_per_cluster;
 
+    if (total_clusters < 65525) {
+        serial_puts(COM1, "[FAT32 ERROR] Partition too small for FAT32 cluster limit!\n");
+        return -1;
+    }
     uint8_t *sec_buf = (uint8_t *)kzalloc(512);
     if (!sec_buf) return -1;
 
