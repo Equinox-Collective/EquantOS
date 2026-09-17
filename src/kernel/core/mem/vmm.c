@@ -267,6 +267,7 @@ uint64_t vmm_get_phys(page_table_t *pml4, uint64_t virt) {
 
 void vmm_destroy_address_space(uint64_t cr3_phys) {
     page_table_t *pml4 = (page_table_t *)VIRT(cr3_phys & PTE_ADDR_MASK);
+    uint64_t max_ram_phys = pmm_get_total_memory();
 
     for (int i = 0; i < 256; i++) {
         if (pml4[i] & PTE_PRESENT) {
@@ -279,7 +280,11 @@ void vmm_destroy_address_space(uint64_t cr3_phys) {
                             page_table_t *pt = (page_table_t *)VIRT(pd[k] & PTE_ADDR_MASK);
                             for (int l = 0; l < 512; l++) {
                                 if (pt[l] & PTE_PRESENT) {
-                                    pmm_free((void *)(pt[l] & PTE_ADDR_MASK));
+                                    uint64_t phys_page = pt[l] & PTE_ADDR_MASK;
+                                    // КРИТИЧЕСКИЙ ФИКС: НЕ освобождаем MMIO (VRAM) и адреса за пределами RAM!
+                                    if (!(pt[l] & PTE_PCD) && phys_page < max_ram_phys) {
+                                        pmm_free((void *)phys_page);
+                                    }
                                 }
                             }
                             pmm_free((void *)(pd[k] & PTE_ADDR_MASK));
@@ -291,6 +296,5 @@ void vmm_destroy_address_space(uint64_t cr3_phys) {
             pmm_free((void *)(pml4[i] & PTE_ADDR_MASK));
         }
     }
-    // Clean up the PML4 root page itself
     pmm_free((void *)(cr3_phys & PTE_ADDR_MASK));
 }
