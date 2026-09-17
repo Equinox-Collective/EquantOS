@@ -35,6 +35,28 @@ static vfs_node_t dev_tty_master_node = {
     .next = NULL
 };
 
+static void push_to_user_stack(page_table_t *pml4, uint64_t *sp, const void *data, size_t len) {
+    *sp -= len;
+    uint64_t curr = *sp;
+    const uint8_t *src = (const uint8_t *)data;
+
+    while (len > 0) {
+        uint64_t page_vaddr = curr & ~0xFFFULL;
+        uint64_t offset_in_page = curr & 0xFFFULL;
+        uint64_t phys_page = vmm_get_phys(pml4, page_vaddr) & ~0xFFFULL;
+        if (!phys_page) return;
+
+        uint64_t chunk = PAGE_SIZE - offset_in_page;
+        if (chunk > len) chunk = len;
+
+        memcpy((void *)VIRT(phys_page + offset_in_page), src, chunk);
+
+        curr += chunk;
+        src += chunk;
+        len -= chunk;
+    }
+}
+
 bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     if (!elf_data || size < sizeof(Elf64_Ehdr)) return false;
 
