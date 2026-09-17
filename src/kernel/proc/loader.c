@@ -1,4 +1,4 @@
-// src/kernel/proc/loader.c - ELF Loader with Stdio Initialization
+// src/kernel/proc/loader.c - ELF Loader with Stdio Initialization & Dynamic Args
 #include "loader.h"
 #include "task.h"
 #include "../core/mem/vmm.h"
@@ -12,14 +12,6 @@
 task_t *last_spawned_task = NULL;
 
 extern uint64_t hhdm_offset;
-#define VIRT(addr) ((uint64_t)(addr) + hhdm_offset)
-#define PHYS(addr) ((uint64_t)(addr) - hhdm_offset)
-
-// Static dummy VFS nodes for stdin, stdout, stderr
-static vfs_node_t tty_stdin_node  = { .name = "stdin",  .flags = FS_FILE, .length = 0 };
-static vfs_node_t tty_stdout_node = { .name = "stdout", .flags = FS_FILE, .length = 0 };
-static vfs_node_t tty_stderr_node = { .name = "stderr", .flags = FS_FILE, .length = 0 };
-
 extern vfs_file_operations_t g_tty_fops;
 
 static vfs_node_t dev_tty_master_node = {
@@ -66,7 +58,6 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         return false;
     }
 
-    // Support both Static Executables (ET_EXEC = 2) and Position-Independent (ET_DYN = 3)
     uint64_t load_base = (ehdr->e_type == 3) ? 0x400000ULL : 0ULL;
 
     page_table_t *new_pml4 = vmm_create_address_space();
@@ -103,11 +94,9 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         }
     }
 
-    // Allocate 8 MB user stack
     uint32_t stack_pages = 2048;
     uint64_t user_stack_top = 0x7FFFF0000000ULL;
     uint64_t user_stack_bottom = user_stack_top - ((uint64_t)stack_pages * PAGE_SIZE);
-    void *top_stack_phys = NULL;
 
     for (uint32_t j = 0; j < stack_pages; j++) {
         void *phys = pmm_alloc();
@@ -116,13 +105,9 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         vmm_map(new_pml4, user_stack_bottom + ((uint64_t)j * PAGE_SIZE), 
                 (uint64_t)phys, 
                 PTE_PRESENT | PTE_WRITABLE | PTE_USER);
-
-        if (j == stack_pages - 1) top_stack_phys = phys;
     }
 
-    uint64_t stack_top = user_stack_top;
-    uint8_t *topk = (uint8_t *)VIRT(top_stack_phys);
-    uint64_t sp = stack_top;
+    uint64_t sp = user_stack_top;
 
     if (argc <= 0 || !argv) {
         argc = 1;
@@ -134,10 +119,10 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     for (int i = 0; i < argc; i++) {
         const char *s = (argv && argv[i]) ? argv[i] : "";
         size_t len = strlen(s) + 1;
-        sp -= len;
-        memcpy(topk + (PAGE_SIZE - (stack_top - sp)), s, len);
+        push_to_user_stack(new_pml4, &sp, s, len);
         argv_u[i] = sp;
     }
+    argv_u[argc] = 0;
 
     const char *default_env[] = {
         "PATH=/bin:/usr/bin:/sys/bin:/sbin:/usr/sbin:/drives/ext2_nvme/bin",
@@ -154,27 +139,28 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     uint64_t envp_u[16];
     for (int i = 0; i < envc; i++) {
         size_t len = strlen(default_env[i]) + 1;
-        sp -= len;
-        memcpy(topk + (PAGE_SIZE - (stack_top - sp)), default_env[i], len);
+        push_to_user_stack(new_pml4, &sp, default_env[i], len);
         envp_u[i] = sp;
     }
+    envp_u[envc] = 0;
 
-    sp -= 16;
-    memset(topk + (PAGE_SIZE - (stack_top - sp)), 0x42, 16);
+    uint8_t rand_bytes[16];
+    memset(rand_bytes, 0x42, 16);
+    push_to_user_stack(new_pml4, &sp, rand_bytes, 16);
     uint64_t at_random = sp;
 
     sp &= ~0xFULL;
 
     uint64_t phdr_vaddr = 0;
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == 6) { // PT_PHDR
+        if (phdr[i].p_type == 6) {
             phdr_vaddr = phdr[i].p_vaddr + load_base;
             break;
         }
     }
     if (!phdr_vaddr) {
         for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
-            if (phdr[i].p_type == 1) { // PT_LOAD
+            if (phdr[i].p_type == 1) {
                 if (phdr[i].p_offset <= ehdr->e_phoff &&
                     ehdr->e_phoff < phdr[i].p_offset + phdr[i].p_filesz) {
                     phdr_vaddr = phdr[i].p_vaddr + load_base + (ehdr->e_phoff - phdr[i].p_offset);
@@ -190,33 +176,34 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
 
     uint64_t aux[32]; 
     int an = 0;
-    aux[an++] = 3;  aux[an++] = phdr_vaddr;           // AT_PHDR: Now guaranteed valid for both Bash and PIE!
-    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;   // AT_PHENT
-    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;       // AT_PHNUM
-    aux[an++] = 6;  aux[an++] = PAGE_SIZE;           // AT_PAGESZ
-    aux[an++] = 7;  aux[an++] = (ehdr->e_type == 3) ? load_base : 0; // AT_BASE
-    aux[an++] = 8;  aux[an++] = 0;                   // AT_FLAGS
-    aux[an++] = 9;  aux[an++] = entry_point;         // AT_ENTRY
-    aux[an++] = 11; aux[an++] = 0;                   // AT_UID
-    aux[an++] = 12; aux[an++] = 0;                   // AT_EUID
-    aux[an++] = 13; aux[an++] = 0;                   // AT_GID
-    aux[an++] = 14; aux[an++] = 0;                   // AT_EGID
-    aux[an++] = 23; aux[an++] = 0;                   // AT_SECURE
-    aux[an++] = 25; aux[an++] = at_random;           // AT_RANDOM
-    aux[an++] = 0;  aux[an++] = 0;                   // AT_NULL
+    aux[an++] = 3;  aux[an++] = phdr_vaddr;
+    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;
+    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;
+    aux[an++] = 6;  aux[an++] = PAGE_SIZE;
+    aux[an++] = 7;  aux[an++] = (ehdr->e_type == 3) ? load_base : 0;
+    aux[an++] = 8;  aux[an++] = 0;
+    aux[an++] = 9;  aux[an++] = entry_point;
+    aux[an++] = 11; aux[an++] = 0;
+    aux[an++] = 12; aux[an++] = 0;
+    aux[an++] = 13; aux[an++] = 0;
+    aux[an++] = 14; aux[an++] = 0;
+    aux[an++] = 23; aux[an++] = 0;
+    aux[an++] = 25; aux[an++] = at_random;
+    aux[an++] = 0;  aux[an++] = 0;
 
     int total_words = 1 + (argc + 1) + (envc + 1) + an;
     if (total_words & 1) sp -= 8;
-    sp -= (uint64_t)total_words * 8;
 
-    uint64_t *w = (uint64_t *)(topk + (PAGE_SIZE - (stack_top - sp)));
+    uint64_t vector_table[128];
     int idx = 0;
-    w[idx++] = (uint64_t)argc;
-    for (int i = 0; i < argc; i++) w[idx++] = argv_u[i];
-    w[idx++] = 0;
-    for (int i = 0; i < envc; i++) w[idx++] = envp_u[i];
-    w[idx++] = 0;
-    for (int i = 0; i < an; i++)   w[idx++] = aux[i];
+    vector_table[idx++] = (uint64_t)argc;
+    for (int i = 0; i < argc; i++) vector_table[idx++] = argv_u[i];
+    vector_table[idx++] = 0;
+    for (int i = 0; i < envc; i++) vector_table[idx++] = envp_u[i];
+    vector_table[idx++] = 0;
+    for (int i = 0; i < an; i++)   vector_table[idx++] = aux[i];
+
+    push_to_user_stack(new_pml4, &sp, vector_table, total_words * sizeof(uint64_t));
 
     uint64_t initial_user_rsp = sp;
 
@@ -250,11 +237,11 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
 
     uint64_t *stack = (uint64_t *)task->kstack_at_bottom;
 
-    *--stack = 0x1B;                  // SS (User Data)
-    *--stack = initial_user_rsp;      // User Stack Pointer
-    *--stack = 0x202;                 // RFLAGS (IF=1)
-    *--stack = 0x23;                  // CS (User Code)
-    *--stack = entry_point;           // RIP (Target Entry with Base)
+    *--stack = 0x1B;
+    *--stack = initial_user_rsp;
+    *--stack = 0x202;
+    *--stack = 0x23;
+    *--stack = entry_point;
 
     *--stack = 0;
     *--stack = 0;
@@ -299,7 +286,6 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
     uint64_t max_vaddr_end = 0;
     Elf64_Phdr *phdr = (Elf64_Phdr *)((uint8_t *)elf_data + ehdr->e_phoff);
 
-    // 1. Safe page-by-page mapping and zeroing for all PT_LOAD segments
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type != 1) continue;
 
@@ -348,11 +334,9 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         }
     }
 
-    // 2. Allocate 8 MB user stack
     uint32_t stack_pages = 2048;
     uint64_t user_stack_top = 0x7FFFF0000000ULL;
     uint64_t user_stack_bottom = user_stack_top - ((uint64_t)stack_pages * PAGE_SIZE);
-    void *top_stack_phys = NULL;
 
     for (uint32_t j = 0; j < stack_pages; j++) {
         void *phys = pmm_alloc();
@@ -364,12 +348,9 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         vmm_map(new_pml4, user_stack_bottom + ((uint64_t)j * PAGE_SIZE), 
                 (uint64_t)phys, 
                 PTE_PRESENT | PTE_WRITABLE | PTE_USER);
-        if (j == stack_pages - 1) top_stack_phys = phys;
     }
 
-    uint64_t stack_top = user_stack_top;
-    uint8_t *topk = (uint8_t *)VIRT(top_stack_phys);
-    uint64_t sp = stack_top;
+    uint64_t sp = user_stack_top;
 
     if (argc <= 0 || !argv) {
         argc = 1;
@@ -377,13 +358,11 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
     }
     if (argc > 16) argc = 16;
 
-    // 3. Arguments & Environment Strings
     uint64_t argv_u[17];
     for (int i = 0; i < argc; i++) {
         const char *s = argv[i] ? argv[i] : "";
         size_t len = strlen(s) + 1;
-        sp -= len;
-        memcpy(topk + (PAGE_SIZE - (stack_top - sp)), s, len);
+        push_to_user_stack(new_pml4, &sp, s, len);
         argv_u[i] = sp;
     }
     argv_u[argc] = 0;
@@ -403,29 +382,28 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
     uint64_t envp_u[16];
     for (int i = 0; i < envc; i++) {
         size_t len = strlen(default_env[i]) + 1;
-        sp -= len;
-        memcpy(topk + (PAGE_SIZE - (stack_top - sp)), default_env[i], len);
+        push_to_user_stack(new_pml4, &sp, default_env[i], len);
         envp_u[i] = sp;
     }
     envp_u[envc] = 0;
 
-    sp -= 16;
-    memset(topk + (PAGE_SIZE - (stack_top - sp)), 0x42, 16);
+    uint8_t rand_bytes[16];
+    memset(rand_bytes, 0x42, 16);
+    push_to_user_stack(new_pml4, &sp, rand_bytes, 16);
     uint64_t at_random = sp;
 
     sp &= ~0xFULL;
 
-    // 4. Calculate AT_PHDR properly
     uint64_t phdr_vaddr = 0;
     for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == 6) { // PT_PHDR
+        if (phdr[i].p_type == 6) {
             phdr_vaddr = phdr[i].p_vaddr + load_base;
             break;
         }
     }
     if (!phdr_vaddr) {
         for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
-            if (phdr[i].p_type == 1) { // PT_LOAD containing phdr
+            if (phdr[i].p_type == 1) {
                 if (phdr[i].p_offset <= ehdr->e_phoff &&
                     ehdr->e_phoff < phdr[i].p_offset + phdr[i].p_filesz) {
                     phdr_vaddr = phdr[i].p_vaddr + load_base + (ehdr->e_phoff - phdr[i].p_offset);
@@ -440,39 +418,38 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
 
     uint64_t entry_point = ehdr->e_entry + load_base;
 
-    // 5. Auxiliary Vector
     uint64_t aux[32]; 
     int an = 0;
-    aux[an++] = 3;  aux[an++] = phdr_vaddr;                            // AT_PHDR
-    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;                    // AT_PHENT
-    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;                        // AT_PHNUM
-    aux[an++] = 6;  aux[an++] = PAGE_SIZE;                            // AT_PAGESZ
-    aux[an++] = 7;  aux[an++] = (ehdr->e_type == 3) ? load_base : 0; // AT_BASE
-    aux[an++] = 8;  aux[an++] = 0;                                    // AT_FLAGS
-    aux[an++] = 9;  aux[an++] = entry_point;                          // AT_ENTRY
-    aux[an++] = 11; aux[an++] = 0;                                    // AT_UID
-    aux[an++] = 12; aux[an++] = 0;                                    // AT_EUID
-    aux[an++] = 13; aux[an++] = 0;                                    // AT_GID
-    aux[an++] = 14; aux[an++] = 0;                                    // AT_EGID
-    aux[an++] = 23; aux[an++] = 0;                                    // AT_SECURE
-    aux[an++] = 25; aux[an++] = at_random;                            // AT_RANDOM
-    aux[an++] = 0;  aux[an++] = 0;                                    // AT_NULL
+    aux[an++] = 3;  aux[an++] = phdr_vaddr;
+    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;
+    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;
+    aux[an++] = 6;  aux[an++] = PAGE_SIZE;
+    aux[an++] = 7;  aux[an++] = (ehdr->e_type == 3) ? load_base : 0;
+    aux[an++] = 8;  aux[an++] = 0;
+    aux[an++] = 9;  aux[an++] = entry_point;
+    aux[an++] = 11; aux[an++] = 0;
+    aux[an++] = 12; aux[an++] = 0;
+    aux[an++] = 13; aux[an++] = 0;
+    aux[an++] = 14; aux[an++] = 0;
+    aux[an++] = 23; aux[an++] = 0;
+    aux[an++] = 25; aux[an++] = at_random;
+    aux[an++] = 0;  aux[an++] = 0;
 
-    // 6. Push vector table with strict 16-byte alignment
     int total_words = 1 + (argc + 1) + (envc + 1) + an;
     if (total_words % 2 != 0) {
         sp -= 8;
     }
-    sp -= (uint64_t)total_words * 8;
 
-    uint64_t *w = (uint64_t *)(topk + (PAGE_SIZE - (stack_top - sp)));
+    uint64_t vector_table[128];
     int idx = 0;
-    w[idx++] = (uint64_t)argc;
-    for (int i = 0; i < argc; i++) w[idx++] = argv_u[i];
-    w[idx++] = 0;
-    for (int i = 0; i < envc; i++) w[idx++] = envp_u[i];
-    w[idx++] = 0;
-    for (int i = 0; i < an; i++)   w[idx++] = aux[i];
+    vector_table[idx++] = (uint64_t)argc;
+    for (int i = 0; i < argc; i++) vector_table[idx++] = argv_u[i];
+    vector_table[idx++] = 0;
+    for (int i = 0; i < envc; i++) vector_table[idx++] = envp_u[i];
+    vector_table[idx++] = 0;
+    for (int i = 0; i < an; i++)   vector_table[idx++] = aux[i];
+
+    push_to_user_stack(new_pml4, &sp, vector_table, total_words * sizeof(uint64_t));
 
     if (current_task && current_task->process) {
         current_task->process->brk = (max_vaddr_end + PAGE_SIZE - 1) & ~0xFFFULL;
