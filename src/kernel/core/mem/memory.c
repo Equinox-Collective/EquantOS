@@ -30,8 +30,9 @@ typedef struct {
 static kmem_bucket_t buckets[NUM_SLAB_BUCKETS];
 
 // Large Allocation Header for allocations > 2048 bytes
-typedef struct large_alloc_header {
+typedef struct __attribute__((aligned(16))) large_alloc_header {
     uint32_t magic;
+    uint32_t reserved; // Явный паддинг для кратности 16
     size_t page_count;
     size_t size;
 } large_alloc_header_t;
