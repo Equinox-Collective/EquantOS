@@ -240,6 +240,16 @@ static void scan_disk_topology(installer_disk_t *disk) {
 
     gpt_header_raw_t *gpt = (gpt_header_raw_t *)sec_buf;
     if (gpt->signature != 0x5452415020494645ULL) {
+        // Диск без GPT: весь объем доступен под установку
+        disk_region_t *free_reg = &disk->regions[disk->region_count++];
+        free_reg->type = REGION_TYPE_FREE_SPACE;
+        free_reg->part_index = -1;
+        free_reg->start_lba = 2048;
+        free_reg->sector_count = (disk->total_sectors > 2082) ? (disk->total_sectors - 2082) : 0;
+        strcpy(free_reg->name, "[ UNALLOCATED DISK ]");
+        strcpy(free_reg->fs_label, "RAW");
+        free_reg->is_writable_target = true;
+        free_reg->is_esp = false;
         return;
     }
 
@@ -258,20 +268,40 @@ static void scan_disk_topology(installer_disk_t *disk) {
         return;
     }
 
-    uint64_t cur_lba = gpt->first_usable_lba;
-    if (cur_lba < 2048) cur_lba = 2048;
+    gpt_entry_raw_t valid_entries[INSTALLER_MAX_REGIONS];
+    int valid_count = 0;
 
-    for (uint32_t i = 0; i < num_entries; i++) {
+    for (uint32_t i = 0; i < num_entries && valid_count < INSTALLER_MAX_REGIONS; i++) {
         gpt_entry_raw_t *e = (gpt_entry_raw_t *)(entries + (i * entry_size));
         bool empty = true;
         for (int b = 0; b < 16; b++) {
             if (e->type_guid[b] != 0) { empty = false; break; }
         }
-        if (empty) continue;
+        if (!empty) {
+            valid_entries[valid_count++] = *e;
+        }
+    }
+
+    // Сортировка пузырьком по starting_lba
+    for (int i = 0; i < valid_count - 1; i++) {
+        for (int j = 0; j < valid_count - i - 1; j++) {
+            if (valid_entries[j].starting_lba > valid_entries[j + 1].starting_lba) {
+                gpt_entry_raw_t tmp = valid_entries[j];
+                valid_entries[j] = valid_entries[j + 1];
+                valid_entries[j + 1] = tmp;
+            }
+        }
+    }
+
+    uint64_t cur_lba = gpt->first_usable_lba;
+    if (cur_lba < 2048) cur_lba = 2048;
+
+    for (int i = 0; i < valid_count; i++) {
+        gpt_entry_raw_t *e = &valid_entries[i];
 
         if (e->starting_lba > cur_lba) {
             uint64_t gap = e->starting_lba - cur_lba;
-            if (gap >= 65536 && disk->region_count < INSTALLER_MAX_REGIONS) {
+            if (gap >= 131072 && disk->region_count < INSTALLER_MAX_REGIONS) {
                 disk_region_t *free_reg = &disk->regions[disk->region_count++];
                 free_reg->type = REGION_TYPE_FREE_SPACE;
                 free_reg->part_index = -1;
@@ -325,7 +355,7 @@ static void scan_disk_topology(installer_disk_t *disk) {
 
     if (cur_lba < gpt->last_usable_lba && disk->region_count < INSTALLER_MAX_REGIONS) {
         uint64_t tail_gap = gpt->last_usable_lba - cur_lba + 1;
-        if (tail_gap >= 65536) {
+        if (tail_gap >= 131072) {
             disk_region_t *tail_reg = &disk->regions[disk->region_count++];
             tail_reg->type = REGION_TYPE_FREE_SPACE;
             tail_reg->part_index = -1;
@@ -339,54 +369,6 @@ static void scan_disk_topology(installer_disk_t *disk) {
     }
 
     kfree(entries);
-}
-
-static bool ensure_gpt_initialized(installer_disk_t *disk) {
-    if (disk->has_gpt) return true;
-
-    render_log("Writing Protective MBR & Initializing new GPT Table...");
-
-    uint8_t sec[512];
-    memset(sec, 0, 512);
-
-    // 1. Protective MBR (LBA 0)
-    protective_mbr_t *pmbr = (protective_mbr_t *)sec;
-    pmbr->signature = 0xAA55;
-    pmbr->partition_record.boot_indicator = 0x00;
-    pmbr->partition_record.os_type = 0xEE; // GPT Protective
-    pmbr->partition_record.starting_lba = 1;
-    pmbr->partition_record.total_sectors = (disk->total_sectors > 0xFFFFFFFF) ? 0xFFFFFFFF : (uint32_t)(disk->total_sectors - 1);
-    disk->bdev.write(0, 1, sec);
-
-    // 2. Первичный GPT Header (LBA 1)
-    memset(sec, 0, 512);
-    gpt_header_raw_t *hdr = (gpt_header_raw_t *)sec;
-    hdr->signature = 0x5452415020494645ULL; // "EFI PART"
-    hdr->revision = 0x00010000;
-    hdr->header_size = sizeof(gpt_header_raw_t);
-    hdr->current_lba = 1;
-    hdr->backup_lba = disk->total_sectors - 1;
-    hdr->first_usable_lba = 2048; // 1MB Offset
-    hdr->last_usable_lba = disk->total_sectors - 34;
-    hdr->partition_entries_lba = 2;
-    hdr->num_partition_entries = 128;
-    hdr->size_partition_entry = sizeof(gpt_entry_raw_t);
-
-    // Очищаем массив разделов (LBA 2..33)
-    uint8_t empty_entries[512];
-    memset(empty_entries, 0, 512);
-    for (uint32_t s = 2; s < 34; s++) {
-        disk->bdev.write(s, 1, empty_entries);
-        disk->bdev.write(hdr->backup_lba - 33 + (s - 2), 1, empty_entries);
-    }
-
-    hdr->partition_array_crc32 = crc32(empty_entries, 512); // базовый CRC
-    hdr->header_crc32 = 0;
-    hdr->header_crc32 = crc32(hdr, hdr->header_size);
-    disk->bdev.write(1, 1, sec);
-
-    disk->has_gpt = true;
-    return true;
 }
 
 static int installer_ata_read(uint64_t lba, uint32_t count, void *buf) {
@@ -637,11 +619,62 @@ static void render_log(const char *msg) {
     if (g_log_row > g_screen_rows - 4) g_log_row = 15;
 }
 
+static bool ensure_gpt_initialized(installer_disk_t *disk) {
+    if (disk->has_gpt) return true;
+
+    render_log("Writing Protective MBR & Initializing new GPT Table...");
+
+    uint8_t sec[512];
+    memset(sec, 0, 512);
+
+    protective_mbr_t *pmbr = (protective_mbr_t *)sec;
+    pmbr->signature = 0xAA55;
+    pmbr->partition_record.boot_indicator = 0x00;
+    pmbr->partition_record.os_type = 0xEE;
+    pmbr->partition_record.starting_lba = 1;
+    pmbr->partition_record.total_sectors = (disk->total_sectors > 0xFFFFFFFF) ? 0xFFFFFFFF : (uint32_t)(disk->total_sectors - 1);
+    disk->bdev.write(0, 1, sec);
+
+    memset(sec, 0, 512);
+    gpt_header_raw_t *hdr = (gpt_header_raw_t *)sec;
+    hdr->signature = 0x5452415020494645ULL;
+    hdr->revision = 0x00010000;
+    hdr->header_size = sizeof(gpt_header_raw_t);
+    hdr->current_lba = 1;
+    hdr->backup_lba = disk->total_sectors - 1;
+    hdr->first_usable_lba = 2048;
+    hdr->last_usable_lba = disk->total_sectors - 34;
+    hdr->partition_entries_lba = 2;
+    hdr->num_partition_entries = 128;
+    hdr->size_partition_entry = sizeof(gpt_entry_raw_t);
+
+    uint8_t empty_entries[512];
+    memset(empty_entries, 0, 512);
+    for (uint32_t s = 2; s < 34; s++) {
+        disk->bdev.write(s, 1, empty_entries);
+        disk->bdev.write(hdr->backup_lba - 33 + (s - 2), 1, empty_entries);
+    }
+
+    hdr->partition_array_crc32 = crc32(empty_entries, 512);
+    hdr->header_crc32 = 0;
+    hdr->header_crc32 = crc32(hdr, hdr->header_size);
+    disk->bdev.write(1, 1, sec);
+
+    disk->has_gpt = true;
+    return true;
+}
+
 static bool run_installer_engine(void) {
     installer_disk_t *disk = &g_inst.disks[g_inst.selected_disk_idx];
     tui_clear(COLOR_ARCH_PANEL);
     tui_header("Deployment Pipeline");
     g_log_row = 4;
+
+    render_log("Checking target storage device...");
+    if (!ensure_gpt_initialized(disk)) {
+        strcpy(g_inst.error_msg, "Failed to initialize GPT on target disk.");
+        return false;
+    }
 
     render_log("Locking target storage device...");
 
@@ -923,7 +956,7 @@ void installer_run(void) {
 
         disk_region_t *selected = &disk->regions[cur_reg_idx];
         tui_gotoxy(4, box_h);
-        if (selected->type == REGION_TYPE_FREE_SPACE) {
+        if (selected && selected->type == REGION_TYPE_FREE_SPACE) {
             term_set_custom_colors(COLOR_ARCH_GREEN, COLOR_ARCH_PANEL);
             term_print_raw("STATUS: SAFE TO INSTALL (No data loss)");
         } else {
@@ -950,6 +983,8 @@ void installer_run(void) {
             g_inst.selected_disk_idx = cur_disk_idx;
             g_inst.selected_region_idx = cur_reg_idx;
 
+            if (!selected) continue;
+
             if (selected->type == REGION_TYPE_FREE_SPACE) {
                 g_inst.action = INSTALL_ACTION_USE_FREE_SPACE;
                 g_inst.target_root_start = selected->start_lba;
@@ -970,10 +1005,19 @@ void installer_run(void) {
                     g_inst.target_esp_sectors = esp->sector_count;
                     g_inst.cfg.reuse_existing_esp = true;
                 } else {
+                    uint64_t esp_sectors = 204800; // 100 МБ
+                    if (g_inst.target_root_sectors <= esp_sectors + 65536) {
+                        tui_draw_box(4, 4, g_screen_cols - 8, 6, " ERROR ", COLOR_ARCH_WARN, COLOR_ARCH_PANEL);
+                        tui_gotoxy(6, 6);
+                        term_set_custom_colors(COLOR_ARCH_WARN, COLOR_ARCH_PANEL);
+                        term_print_raw("Not enough space for EFI System Partition (requires >= 150 MB free)!");
+                        while (tty_getchar_raw() != KEY_ESC);
+                        continue;
+                    }
                     g_inst.target_esp_start = g_inst.target_root_start;
-                    g_inst.target_esp_sectors = 204800; // 40 MB (>65525 clusters for FAT32!)
-                    g_inst.target_root_start += 81920;
-                    g_inst.target_root_sectors -= 81920;
+                    g_inst.target_esp_sectors = esp_sectors;
+                    g_inst.target_root_start += esp_sectors;
+                    g_inst.target_root_sectors -= esp_sectors;
                     g_inst.cfg.reuse_existing_esp = false;
                 }
             }
