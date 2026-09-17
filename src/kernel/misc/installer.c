@@ -717,20 +717,33 @@ static bool run_installer_engine(void) {
         vfs_node_t *efi_dir = vfs_create(esp_vfs, "EFI", FS_DIRECTORY);
         vfs_node_t *boot_dir = efi_dir ? vfs_create(efi_dir, "BOOT", FS_DIRECTORY) : NULL;
 
-        vfs_node_t *src_efi = vfs_open("/EFI/BOOT/BOOTX64.EFI", 0);
-        if (!src_efi) src_efi = vfs_open("/boot/BOOTX64.EFI", 0);
-        if (!src_efi) src_efi = vfs_open("/BOOTX64.EFI", 0);
+        vfs_node_t *src_efi = vfs_open("/BOOTX64.EFI", 0);
+        if (!src_efi) src_efi = vfs_open("/cdrom/EFI/BOOT/BOOTX64.EFI", 0);
+        if (!src_efi) src_efi = vfs_open("/cdrom/BOOTX64.EFI", 0);
+        if (!src_efi) src_efi = vfs_open("/EFI/BOOT/BOOTX64.EFI", 0);
+        if (!src_efi) src_efi = vfs_open("/bin/BOOTX64.EFI", 0);
 
-        if (src_efi && boot_dir) {
-            deploy_file(boot_dir, "BOOTX64.EFI", src_efi, cbuf, COPY_CHUNK_SIZE);
+        if (!src_efi || !boot_dir) {
+            strcpy(g_inst.error_msg, "CRITICAL: BOOTX64.EFI not found on media!");
+            return false;
+        }
+        deploy_file(boot_dir, "BOOTX64.EFI", src_efi, cbuf, COPY_CHUNK_SIZE);
+
+        vfs_node_t *src_kern = vfs_open("/kernel.elf", 0);
+        if (!src_kern) src_kern = vfs_open("/cdrom/boot/kernel.elf", 0);
+        if (!src_kern) src_kern = vfs_open("/cdrom/kernel.elf", 0);
+        if (!src_kern) src_kern = vfs_open("/boot/kernel.elf", 0);
+
+        if (!src_kern) {
+            strcpy(g_inst.error_msg, "CRITICAL: kernel.elf not found on media!");
+            return false;
         }
 
-        vfs_node_t *src_kern = vfs_open("/boot/kernel.elf", 0);
-        if (!src_kern) src_kern = vfs_open("/kernel.elf", 0);
         vfs_node_t *esp_boot_dir = vfs_create(esp_vfs, "boot", FS_DIRECTORY);
-        if (src_kern && esp_boot_dir) {
+        if (esp_boot_dir) {
             deploy_file(esp_boot_dir, "kernel.elf", src_kern, cbuf, COPY_CHUNK_SIZE);
         }
+        deploy_file(r_boot, "kernel.elf", src_kern, cbuf, COPY_CHUNK_SIZE);
 
         char lconf[256];
         snprintf(lconf, sizeof(lconf),
@@ -743,7 +756,7 @@ static bool run_installer_engine(void) {
         vfs_node_t *cf = vfs_create(esp_vfs, "limine.conf", FS_FILE);
         if (cf) vfs_write(cf, 0, strlen(lconf), (uint8_t *)lconf);
 
-        const char *nsh = "FS0:\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\nFS1:\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\n";
+        const char *nsh = "FS0:\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\n";
         vfs_node_t *nsh_file = vfs_create(esp_vfs, "startup.nsh", FS_FILE);
         if (nsh_file) vfs_write(nsh_file, 0, strlen(nsh), (uint8_t *)nsh);
     }
