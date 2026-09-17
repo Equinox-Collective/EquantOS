@@ -662,35 +662,34 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
     uint32_t sectors_per_block = block_size / 512;
     uint32_t total_blocks = sector_count / sectors_per_block;
 
-    if (total_blocks < 100) {
+    if (total_blocks < 150) {
         serial_puts(COM1, "[MKFS-EXT2 ERROR] Total block count too low for Ext2 layout!\n");
         return -1;
     }
 
     uint32_t blocks_per_group = 8192;
     uint32_t inodes_per_group = 1024;
-    uint32_t num_groups = 1;
     total_blocks = (total_blocks > blocks_per_group) ? blocks_per_group : total_blocks;
 
-    uint32_t total_inodes = inodes_per_group * num_groups;
+    uint32_t total_inodes = inodes_per_group;
     uint32_t inode_size = 128;
-    uint32_t inode_table_blocks = (inodes_per_group * inode_size) / block_size; // 128 blocks
+    uint32_t inode_table_blocks = (inodes_per_group * inode_size) / block_size; // 128 блоков
 
     uint32_t block_bitmap_blk = 3;
     uint32_t inode_bitmap_blk = 4;
     uint32_t inode_table_blk  = 5;
-    uint32_t root_dir_blk     = 5 + inode_table_blocks; // 133
+    uint32_t root_dir_blk     = 5 + inode_table_blocks; // Блок 133
 
-    uint32_t reserved_system_blocks = root_dir_blk; // 133 system blocks (Blocks 1..133)
+    // КРИТИЧЕСКИЙ ФИКС: блоки 0..133 (всего 134 блока) ДОЛЖНЫ быть заняты!
+    uint32_t reserved_system_blocks = root_dir_blk + 1; // 134
 
-    // 1. Prepare Superblock
     ext2_superblock_t sb;
     memset(&sb, 0, sizeof(ext2_superblock_t));
 
     sb.s_inodes_count       = total_inodes;
     sb.s_blocks_count       = total_blocks;
     sb.s_r_blocks_count     = 0;
-    sb.s_free_blocks_count  = total_blocks - reserved_system_blocks - 1;
+    sb.s_free_blocks_count  = total_blocks - reserved_system_blocks;
     sb.s_free_inodes_count  = total_inodes - 11;
     sb.s_first_data_block   = 1;
     sb.s_log_block_size     = 0;
@@ -701,8 +700,6 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
     sb.s_magic              = EXT2_SUPER_MAGIC;
     sb.s_state              = EXT2_VALID_FS;
     sb.s_errors             = 1;
-    sb.s_minor_rev_level    = 0;
-    sb.s_rev_level          = 0;
     sb.s_first_ino          = 11;
     sb.s_inode_size         = 128;
     sb.s_block_group_nr     = 0;
@@ -710,7 +707,7 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
     if (vol_label) {
         strncpy(sb.s_volume_name, vol_label, 15);
     } else {
-        strcpy(sb.s_volume_name, "EQUANT_EXT2");
+        strcpy(sb.s_volume_name, "EQUANT_ROOT");
     }
 
     uint8_t *block_buf = (uint8_t *)kzalloc(block_size);
@@ -719,10 +716,8 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
     memcpy(block_buf, &sb, sizeof(ext2_superblock_t));
     dev.write(start_lba + (1 * sectors_per_block), sectors_per_block, block_buf);
 
-    // 2. Prepare Block Group Descriptor Table (BGD)
     ext2_bgd_t bgd;
     memset(&bgd, 0, sizeof(ext2_bgd_t));
-
     bgd.bg_block_bitmap      = block_bitmap_blk;
     bgd.bg_inode_bitmap      = inode_bitmap_blk;
     bgd.bg_inode_table       = inode_table_blk;
@@ -734,30 +729,29 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
     memcpy(block_buf, &bgd, sizeof(ext2_bgd_t));
     dev.write(start_lba + (2 * sectors_per_block), sectors_per_block, block_buf);
 
-    // 3. Write Block Bitmap
+    // Помечаем 0..133 (134 блока) в Bitmap
     memset(block_buf, 0, block_size);
-    for (uint32_t i = 0; i <= reserved_system_blocks - 1; i++) {
+    for (uint32_t i = 0; i < reserved_system_blocks; i++) {
         block_buf[i / 8] |= (1 << (i % 8));
     }
     dev.write(start_lba + (block_bitmap_blk * sectors_per_block), sectors_per_block, block_buf);
 
-    // 4. Write Inode Bitmap
+    // Inode bitmap (резервируем первые 10 индов)
     memset(block_buf, 0, block_size);
     for (uint32_t i = 0; i < 10; i++) {
         block_buf[i / 8] |= (1 << (i % 8));
     }
     dev.write(start_lba + (inode_bitmap_blk * sectors_per_block), sectors_per_block, block_buf);
 
-    // 5. Zero out Inode Table (STRICT MEMSET TO PREVENT GARBAGE INODES)
+    // Зануляем Inode Table
     memset(block_buf, 0, block_size);
     for (uint32_t i = 0; i < inode_table_blocks; i++) {
         dev.write(start_lba + ((inode_table_blk + i) * sectors_per_block), sectors_per_block, block_buf);
     }
 
-    // 6. Write Root Inode (#2)
+    // Записываем Inode #2 (Root directory)
     ext2_inode_t root_inode;
     memset(&root_inode, 0, sizeof(ext2_inode_t));
-
     root_inode.i_mode        = EXT2_S_IFDIR | 0755;
     root_inode.i_size        = block_size;
     root_inode.i_links_count = 2;
@@ -768,9 +762,8 @@ int mkfs_ext2(block_device_t dev, uint32_t start_lba, uint32_t sector_count, con
     memcpy(block_buf + inode_size, &root_inode, sizeof(ext2_inode_t));
     dev.write(start_lba + (inode_table_blk * sectors_per_block), sectors_per_block, block_buf);
 
-    // 7. Initialize Root Directory Data Block
+    // Инициализируем содержимое каталога "." и ".."
     memset(block_buf, 0, block_size);
-
     ext2_dir_entry_t *entry_dot = (ext2_dir_entry_t *)block_buf;
     entry_dot->inode     = 2;
     entry_dot->rec_len   = 12;
