@@ -484,12 +484,16 @@ int nvme_init(void) {
     cc &= ~NVME_CC_ENABLE;
     nvme_write32(&nvme_ctrl, NVME_REG_CC, cc);
 
-    uint32_t timeout = 5000000;
-    while ((nvme_read32(&nvme_ctrl, NVME_REG_CSTS) & NVME_CSTS_RDY) && --timeout);
-    if (timeout == 0) return NVME_ERR_TIMEOUT;
-
-    if (nvme_init_queue_pair(&nvme_ctrl.admin_queue, NVME_ADMIN_QUEUE_SIZE, NVME_ADMIN_QUEUE_SIZE) != NVME_SUCCESS) {
-        return NVME_ERR_NOMEM;
+    // Даем честные 1.5 секунды на сброс контроллера
+    uint32_t timeout = 15000;
+    while ((nvme_read32(&nvme_ctrl, NVME_REG_CSTS) & NVME_CSTS_RDY) && --timeout) {
+        for (volatile int i = 0; i < 20000; i++) {
+            __asm__ volatile("pause");
+        }
+    }
+    if (timeout == 0) {
+        serial_puts(COM1, "[NVME ERROR] CSTS.RDY failed to clear within timeout!\n");
+        return NVME_ERR_TIMEOUT;
     }
 
     nvme_write64(&nvme_ctrl, NVME_REG_ASQ, nvme_ctrl.admin_queue.sq_phys);
@@ -501,9 +505,16 @@ int nvme_init(void) {
     cc = NVME_CC_ENABLE | NVME_CC_CSS_NVM | NVME_CC_AMS_RR | NVME_CC_SHN_NONE | NVME_CC_IOSQES | NVME_CC_IOCQES;
     nvme_write32(&nvme_ctrl, NVME_REG_CC, cc);
 
-    timeout = 5000000;
-    while (!(nvme_read32(&nvme_ctrl, NVME_REG_CSTS) & NVME_CSTS_RDY) && --timeout);
-    if (timeout == 0) return NVME_ERR_TIMEOUT;
+    timeout = 30000;
+    while (!(nvme_read32(&nvme_ctrl, NVME_REG_CSTS) & NVME_CSTS_RDY) && --timeout) {
+        for (volatile int i = 0; i < 20000; i++) {
+            __asm__ volatile("pause");
+        }
+    }
+    if (timeout == 0) {
+        serial_puts(COM1, "[NVME ERROR] Controller failed to become ready (CSTS.RDY=0)!\n");
+        return NVME_ERR_TIMEOUT;
+    }
 
     nvme_ctrl.command_id = 0;
 
