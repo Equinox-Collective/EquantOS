@@ -8,6 +8,7 @@
 #include "../fs/vfs.h"
 #include "../fs/ext2.h"
 #include "../fs/fat32.h"
+#include "../fs/gpt.h"
 #include "../core/mem/memory.h"
 #include "string.h"
 #include "stdio.h"
@@ -338,6 +339,54 @@ static void scan_disk_topology(installer_disk_t *disk) {
     }
 
     kfree(entries);
+}
+
+static bool ensure_gpt_initialized(installer_disk_t *disk) {
+    if (disk->has_gpt) return true;
+
+    render_log("Writing Protective MBR & Initializing new GPT Table...");
+
+    uint8_t sec[512];
+    memset(sec, 0, 512);
+
+    // 1. Protective MBR (LBA 0)
+    protective_mbr_t *pmbr = (protective_mbr_t *)sec;
+    pmbr->signature = 0xAA55;
+    pmbr->partition_record.boot_indicator = 0x00;
+    pmbr->partition_record.os_type = 0xEE; // GPT Protective
+    pmbr->partition_record.starting_lba = 1;
+    pmbr->partition_record.total_sectors = (disk->total_sectors > 0xFFFFFFFF) ? 0xFFFFFFFF : (uint32_t)(disk->total_sectors - 1);
+    disk->bdev.write(0, 1, sec);
+
+    // 2. Первичный GPT Header (LBA 1)
+    memset(sec, 0, 512);
+    gpt_header_raw_t *hdr = (gpt_header_raw_t *)sec;
+    hdr->signature = 0x5452415020494645ULL; // "EFI PART"
+    hdr->revision = 0x00010000;
+    hdr->header_size = sizeof(gpt_header_raw_t);
+    hdr->current_lba = 1;
+    hdr->backup_lba = disk->total_sectors - 1;
+    hdr->first_usable_lba = 2048; // 1MB Offset
+    hdr->last_usable_lba = disk->total_sectors - 34;
+    hdr->partition_entries_lba = 2;
+    hdr->num_partition_entries = 128;
+    hdr->size_partition_entry = sizeof(gpt_entry_raw_t);
+
+    // Очищаем массив разделов (LBA 2..33)
+    uint8_t empty_entries[512];
+    memset(empty_entries, 0, 512);
+    for (uint32_t s = 2; s < 34; s++) {
+        disk->bdev.write(s, 1, empty_entries);
+        disk->bdev.write(hdr->backup_lba - 33 + (s - 2), 1, empty_entries);
+    }
+
+    hdr->partition_array_crc32 = crc32(empty_entries, 512); // базовый CRC
+    hdr->header_crc32 = 0;
+    hdr->header_crc32 = crc32(hdr, hdr->header_size);
+    disk->bdev.write(1, 1, sec);
+
+    disk->has_gpt = true;
+    return true;
 }
 
 static int installer_ata_read(uint64_t lba, uint32_t count, void *buf) {
@@ -922,7 +971,7 @@ void installer_run(void) {
                     g_inst.cfg.reuse_existing_esp = true;
                 } else {
                     g_inst.target_esp_start = g_inst.target_root_start;
-                    g_inst.target_esp_sectors = 81920; // 40 MB (>65525 clusters for FAT32!)
+                    g_inst.target_esp_sectors = 204800; // 40 MB (>65525 clusters for FAT32!)
                     g_inst.target_root_start += 81920;
                     g_inst.target_root_sectors -= 81920;
                     g_inst.cfg.reuse_existing_esp = false;
