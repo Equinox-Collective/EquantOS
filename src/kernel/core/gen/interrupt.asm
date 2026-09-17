@@ -134,17 +134,19 @@ irq0_handler_asm:
     push qword 32     
     SAVE_REGS         
 
+    ; 1. Немедленно квитируем прерывание в PIC
+    mov al, 0x20
+    out 0x20, al
+
+    ; 2. Обновляем тики и таймеры ядра
     sub rsp, 8
     call timer_callback  
     add rsp, 8
 
+    ; 3. Переключаем задачу
     mov rdi, rsp      
     call schedule     
-    
     mov rsp, rax      
-
-    mov al, 0x20
-    out 0x20, al
 
     RESTORE_REGS      
     add rsp, 16       
