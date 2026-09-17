@@ -36,8 +36,9 @@ void pci_write_word(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uin
 }
 
 void *pci_map_mmio(uint64_t phys_addr, uint32_t size) {
-    // ВСЕГДА используем master kernel_pml4, чтобы MMIO было видно во всех процессах ядра
-    extern page_table_t *kernel_pml4;
+    uint64_t cr3_val;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
+    page_table_t *pml4 = (page_table_t *)VIRT(cr3_val & ~0xFFFULL);
 
     static uint64_t mmio_virt_ptr = 0xFFFFC20000000000;
     uint64_t virt_start = mmio_virt_ptr;
@@ -46,7 +47,7 @@ void *pci_map_mmio(uint64_t phys_addr, uint32_t size) {
     mmio_virt_ptr += (pages * PAGE_SIZE);
 
     for (uint32_t i = 0; i < pages; i++) {
-        vmm_map(kernel_pml4, virt_start + (i * PAGE_SIZE), (phys_addr & ~0xFFFULL) + (i * PAGE_SIZE),
+        vmm_map(pml4, virt_start + (i * PAGE_SIZE), (phys_addr & ~0xFFFULL) + (i * PAGE_SIZE),
                 PTE_PRESENT | PTE_WRITABLE | PTE_PCD | PTE_PWT);
     }
 
