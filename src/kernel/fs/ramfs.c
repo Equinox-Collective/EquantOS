@@ -156,11 +156,35 @@ vfs_node_t *ramfs_create_file(vfs_node_t *parent, const char *name, void *data, 
     return file;
 }
 
+static void ramfs_create_busybox_links(vfs_node_t *bin_dir, vfs_node_t *bbox_node) {
+    if (!bin_dir || !bbox_node) return;
+
+    static const char *applets[] = {
+        "ls", "cat", "cp", "mv", "rm", "mkdir", "rmdir", "touch",
+        "clear", "echo", "grep", "head", "tail", "wc", "uname",
+        "date", "df", "free", "ps", "kill", "sleep", "chmod", "chown",
+        "sh", NULL
+    };
+
+    for (int i = 0; applets[i] != NULL; i++) {
+        if (!vfs_finddir(bin_dir, applets[i])) {
+            vfs_node_t *link = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+            if (link) {
+                memcpy(link, bbox_node, sizeof(vfs_node_t));
+                strncpy(link->name, applets[i], sizeof(link->name) - 1);
+                link->parent = bin_dir;
+                link->next = bin_dir->children;
+                bin_dir->children = link;
+            }
+        }
+    }
+}
+
 static int __init ramfs_populate_modules_initcall(void) {
     if (!vfs_root) return 0;
 
     const char *standard_dirs[] = {
-        "bin", "boot", "etc", "home", "proc", "root", "sys", "tmp", "drives", NULL
+        "bin", "boot", "etc", "home", "proc", "root", "sys", "tmp", "drives", "cdrom", NULL
     };
 
     for (int i = 0; standard_dirs[i] != NULL; i++) {
@@ -170,15 +194,26 @@ static int __init ramfs_populate_modules_initcall(void) {
     }
 
     vfs_node_t *bin_dir = vfs_finddir(vfs_root, "bin");
+    vfs_node_t *etc_dir = vfs_finddir(vfs_root, "etc");
+    vfs_node_t *root_dir = vfs_finddir(vfs_root, "root");
+    vfs_node_t *cdrom_dir = vfs_finddir(vfs_root, "cdrom");
     vfs_node_t *sys_dir = vfs_finddir(vfs_root, "sys");
     vfs_node_t *sys_bin_dir = sys_dir ? vfs_finddir(sys_dir, "bin") : NULL;
     if (sys_dir && !sys_bin_dir) {
         sys_bin_dir = ramfs_create_directory(sys_dir, "bin");
     }
 
+    vfs_node_t *bbox_node = NULL;
+    vfs_node_t *bashrc_node = NULL;
+
     vfs_node_t *iso_root = iso9660_mount_boot_drive();
     if (iso_root) {
-        serial_puts(COM1, "[RAMFS] LiveCD media detected. Populating /bin...\n");
+        serial_puts(COM1, "[RAMFS] LiveCD media detected. Mounting /cdrom and populating /bin...\n");
+        if (cdrom_dir) {
+            cdrom_dir->flags |= FS_MOUNTPOINT;
+            cdrom_dir->ptr = iso_root;
+        }
+
         uint32_t idx = 0;
         vfs_node_t *entry = NULL;
         while ((entry = vfs_readdir(iso_root, idx++)) != NULL) {
@@ -190,6 +225,31 @@ static int __init ramfs_populate_modules_initcall(void) {
                 }
             }
 
+            if (strcmp(entry->name, "bash.elf") == 0) {
+                vfs_node_t *bsh = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                if (bsh && bin_dir) {
+                    memcpy(bsh, entry, sizeof(vfs_node_t));
+                    strcpy(bsh->name, "bash");
+                    bsh->parent = bin_dir;
+                    bsh->next = bin_dir->children;
+                    bin_dir->children = bsh;
+                }
+            }
+
+            if (strcmp(entry->name, ".bashrc") == 0 || strcmp(entry->name, "_bashrc") == 0) {
+                bashrc_node = entry;
+            }
+
+            if (strcmp(entry->name, "BOOTX64.EFI") == 0 || strcmp(entry->name, "kernel.elf") == 0) {
+                vfs_node_t *knode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                if (knode) {
+                    memcpy(knode, entry, sizeof(vfs_node_t));
+                    knode->parent = vfs_root;
+                    knode->next = vfs_root->children;
+                    vfs_root->children = knode;
+                }
+            }
+
             if (entry->flags & FS_FILE) {
                 if (bin_dir && !vfs_finddir(bin_dir, entry->name)) {
                     vfs_node_t *bnode = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
@@ -198,6 +258,7 @@ static int __init ramfs_populate_modules_initcall(void) {
                         bnode->parent = bin_dir;
                         bnode->next = bin_dir->children;
                         bin_dir->children = bnode;
+                        if (strstr(entry->name, "busybox")) bbox_node = bnode;
                     }
                 }
                 if (sys_bin_dir && !vfs_finddir(sys_bin_dir, entry->name)) {
@@ -211,8 +272,28 @@ static int __init ramfs_populate_modules_initcall(void) {
                 }
             }
         }
-        kfree(iso_root);
     }
+
+    if (bbox_node && bin_dir) {
+        ramfs_create_busybox_links(bin_dir, bbox_node);
+    }
+
+    if (bashrc_node) {
+        vfs_node_t *targets[] = { etc_dir, root_dir, vfs_root, NULL };
+        for (int i = 0; targets[i] != NULL; i++) {
+            if (!vfs_finddir(targets[i], ".bashrc")) {
+                vfs_node_t *rc = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                if (rc) {
+                    memcpy(rc, bashrc_node, sizeof(vfs_node_t));
+                    strcpy(rc->name, ".bashrc");
+                    rc->parent = targets[i];
+                    rc->next = targets[i]->children;
+                    targets[i]->children = rc;
+                }
+            }
+        }
+    }
+
     return 0;
 }
 fs_initcall(ramfs_populate_modules_initcall);

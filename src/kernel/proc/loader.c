@@ -118,9 +118,9 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     }
 
     const char *default_env[] = {
-        "PATH=/bin/:/usr/bin/:/sbin/:/usr/sbin/:/sys/bin/",
+        "PATH=/bin:/usr/bin:/sys/bin:/sbin:/usr/sbin:/drives/ext2_nvme/bin",
         "USER=root",
-        "HOME=/",
+        "HOME=/root",
         "TERM=linux",
         "SHELL=/bin/bash",
         "DISPLAY=:0",

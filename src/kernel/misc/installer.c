@@ -662,10 +662,16 @@ static bool run_installer_engine(void) {
     };
     int p_count = sizeof(payloads) / sizeof(payloads[0]);
 
+    vfs_node_t *bbox_src = NULL;
+
     for (int i = 0; i < p_count; i++) {
         char p_path[64];
-        snprintf(p_path, sizeof(p_path), "/%s", payloads[i]);
+        snprintf(p_path, sizeof(p_path), "/bin/%s", payloads[i]);
         vfs_node_t *src = vfs_open(p_path, 0);
+        if (!src) {
+            snprintf(p_path, sizeof(p_path), "/%s", payloads[i]);
+            src = vfs_open(p_path, 0);
+        }
         if (!src) {
             snprintf(p_path, sizeof(p_path), "/boot/%s", payloads[i]);
             src = vfs_open(p_path, 0);
@@ -676,14 +682,33 @@ static bool run_installer_engine(void) {
         }
         if (!src) continue;
 
+        if (strstr(payloads[i], "busybox")) {
+            bbox_src = src;
+        }
+
         if (strcmp(payloads[i], "kernel.elf") == 0) {
             deploy_file(r_boot, payloads[i], src, cbuf, COPY_CHUNK_SIZE);
         } else if (strcmp(payloads[i], ".bashrc") == 0) {
-            deploy_file(r_etc, payloads[i], src, cbuf, COPY_CHUNK_SIZE);
+            deploy_file(r_etc, ".bashrc", src, cbuf, COPY_CHUNK_SIZE);
             vfs_node_t *r_root_dir = vfs_finddir(root_vfs, "root");
-            if (r_root_dir) deploy_file(r_root_dir, payloads[i], src, cbuf, COPY_CHUNK_SIZE);
+            if (r_root_dir) deploy_file(r_root_dir, ".bashrc", src, cbuf, COPY_CHUNK_SIZE);
+            deploy_file(root_vfs, ".bashrc", src, cbuf, COPY_CHUNK_SIZE);
         } else {
             deploy_file(r_bin, payloads[i], src, cbuf, COPY_CHUNK_SIZE);
+            if (strcmp(payloads[i], "bash.elf") == 0) {
+                deploy_file(r_bin, "bash", src, cbuf, COPY_CHUNK_SIZE);
+            }
+        }
+    }
+
+    if (bbox_src && r_bin) {
+        render_log("Creating BusyBox core utility symlinks in /bin...");
+        static const char *core_utils[] = {
+            "ls", "cat", "cp", "mv", "rm", "mkdir", "rmdir", "touch",
+            "clear", "echo", "grep", "uname", "df", "free", "ps", "sh", NULL
+        };
+        for (int u = 0; core_utils[u] != NULL; u++) {
+            deploy_file(r_bin, core_utils[u], bbox_src, cbuf, COPY_CHUNK_SIZE);
         }
     }
 

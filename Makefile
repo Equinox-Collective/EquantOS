@@ -314,12 +314,14 @@ build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd
 	$(call LOG_MSG,  $(CLR_ISO) Constructing bootable ISO image...)
 	@$(call MKDIR,build/iso/boot)
 	@$(call MKDIR,build/iso/EFI/BOOT)
+	$(Q)$(call CP,build/kernel.elf,build/iso/kernel.elf)
 	$(Q)$(call CP,build/kernel.elf,build/iso/boot/kernel.elf)
+	$(Q)$(call CP,BOOTX64.EFI,build/iso/BOOTX64.EFI)
+	$(Q)$(call CP,BOOTX64.EFI,build/iso/EFI/BOOT/BOOTX64.EFI)
 	$(Q)$(call CP,limine.conf,build/iso/limine.conf)
 	$(Q)$(call CP,limine-bios-cd.bin,build/iso/boot/limine-bios-cd.bin)
 	$(Q)$(call CP,limine-bios.sys,build/iso/boot/limine-bios.sys)
 	$(Q)$(call CP,limine-uefi-cd.bin,build/iso/boot/limine-uefi-cd.bin)
-	$(Q)$(call CP,BOOTX64.EFI,build/iso/EFI/BOOT/BOOTX64.EFI)
 	@echo FS0: > build/iso/startup.nsh
 	@echo \EFI\BOOT\BOOTX64.EFI >> build/iso/startup.nsh
 	$(Q)xorriso -as mkisofs \
