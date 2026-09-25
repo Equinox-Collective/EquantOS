@@ -348,8 +348,9 @@ static void scan_disk_topology(installer_disk_t *disk) {
         }
 
         cur_lba = e->ending_lba + 1;
-        if (cur_lba % 2048 != 0) {
-            cur_lba = (cur_lba + 2047) & ~2047ULL;
+        uint64_t aligned_lba = (cur_lba + 2047) & ~2047ULL;
+        if (i + 1 < valid_count && aligned_lba < valid_entries[i + 1].starting_lba) {
+            cur_lba = aligned_lba;
         }
     }
 
@@ -784,63 +785,71 @@ static bool run_installer_engine(void) {
     }
 
     if (bbox_src && r_bin) {
-        render_log("Creating BusyBox core utility symlinks in /bin...");
-        static const char *core_utils[] = {
-            "ls", "cat", "cp", "mv", "rm", "mkdir", "rmdir", "touch",
-            "clear", "echo", "grep", "uname", "df", "free", "ps", "sh", NULL
-        };
-        for (int u = 0; core_utils[u] != NULL; u++) {
-            deploy_file(r_bin, core_utils[u], bbox_src, cbuf, COPY_CHUNK_SIZE);
-        }
+        render_log("Deploying core BusyBox shell binary...");
+        deploy_file(r_bin, "busybox", bbox_src, cbuf, COPY_CHUNK_SIZE);
+        deploy_file(r_bin, "sh", bbox_src, cbuf, COPY_CHUNK_SIZE);
     }
 
     if (g_inst.is_uefi_mode && esp_vfs) {
         render_log("Configuring Limine UEFI Bootloader on ESP...");
-        vfs_node_t *efi_dir = vfs_create(esp_vfs, "EFI", FS_DIRECTORY);
-        vfs_node_t *boot_dir = efi_dir ? vfs_create(efi_dir, "BOOT", FS_DIRECTORY) : NULL;
+
+        vfs_node_t *efi_dir = vfs_finddir(esp_vfs, "EFI");
+        if (!efi_dir) efi_dir = vfs_create(esp_vfs, "EFI", FS_DIRECTORY);
+        if (!efi_dir) {
+            strcpy(g_inst.error_msg, "Failed to locate/create /EFI directory on ESP");
+            kfree(cbuf);
+            return false;
+        }
+
+        vfs_node_t *boot_dir = vfs_finddir(efi_dir, "BOOT");
+        if (!boot_dir) boot_dir = vfs_create(efi_dir, "BOOT", FS_DIRECTORY);
+        if (!boot_dir) {
+            strcpy(g_inst.error_msg, "Failed to locate/create /EFI/BOOT directory on ESP");
+            kfree(cbuf);
+            return false;
+        }
 
         vfs_node_t *src_efi = vfs_open("/BOOTX64.EFI", 0);
         if (!src_efi) src_efi = vfs_open("/cdrom/EFI/BOOT/BOOTX64.EFI", 0);
         if (!src_efi) src_efi = vfs_open("/cdrom/BOOTX64.EFI", 0);
-        if (!src_efi) src_efi = vfs_open("/EFI/BOOT/BOOTX64.EFI", 0);
         if (!src_efi) src_efi = vfs_open("/bin/BOOTX64.EFI", 0);
 
-        if (!src_efi || !boot_dir) {
-            strcpy(g_inst.error_msg, "CRITICAL: BOOTX64.EFI not found on media!");
+        if (!src_efi) {
+            strcpy(g_inst.error_msg, "CRITICAL: BOOTX64.EFI payload missing on media");
+            kfree(cbuf);
             return false;
         }
         deploy_file(boot_dir, "BOOTX64.EFI", src_efi, cbuf, COPY_CHUNK_SIZE);
 
         vfs_node_t *src_kern = vfs_open("/kernel.elf", 0);
         if (!src_kern) src_kern = vfs_open("/cdrom/boot/kernel.elf", 0);
-        if (!src_kern) src_kern = vfs_open("/cdrom/kernel.elf", 0);
         if (!src_kern) src_kern = vfs_open("/boot/kernel.elf", 0);
-
         if (!src_kern) {
-            strcpy(g_inst.error_msg, "CRITICAL: kernel.elf not found on media!");
+            strcpy(g_inst.error_msg, "CRITICAL: kernel.elf payload missing on media");
+            kfree(cbuf);
             return false;
         }
 
-        vfs_node_t *esp_boot_dir = vfs_create(esp_vfs, "boot", FS_DIRECTORY);
+        vfs_node_t *esp_boot_dir = vfs_finddir(esp_vfs, "boot");
+        if (!esp_boot_dir) esp_boot_dir = vfs_create(esp_vfs, "boot", FS_DIRECTORY);
         if (esp_boot_dir) {
             deploy_file(esp_boot_dir, "kernel.elf", src_kern, cbuf, COPY_CHUNK_SIZE);
         }
         deploy_file(r_boot, "kernel.elf", src_kern, cbuf, COPY_CHUNK_SIZE);
 
-        char lconf[256];
+        char lconf[512];
         snprintf(lconf, sizeof(lconf),
                  "timeout: %d\n\n"
                  "/EquantOS (Installed)\n"
                  "    protocol: limine\n"
-                 "    kernel_path: boot():/boot/kernel.elf\n",
+                 "    kernel_path: boot():/boot/kernel.elf\n\n"
+                 "/Windows 11\n"
+                 "    protocol: efi_chainload\n"
+                 "    image_path: boot():/EFI/Microsoft/Boot/bootmgfw.efi\n",
                  g_inst.cfg.boot_timeout);
 
         vfs_node_t *cf = vfs_create(esp_vfs, "limine.conf", FS_FILE);
         if (cf) vfs_write(cf, 0, strlen(lconf), (uint8_t *)lconf);
-
-        const char *nsh = "FS0:\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\n";
-        vfs_node_t *nsh_file = vfs_create(esp_vfs, "startup.nsh", FS_FILE);
-        if (nsh_file) vfs_write(nsh_file, 0, strlen(nsh), (uint8_t *)nsh);
     }
 
     if (r_etc) {

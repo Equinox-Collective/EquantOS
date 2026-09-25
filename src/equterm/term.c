@@ -225,14 +225,68 @@ void term_putchar_raw(char c) {
     if (in_escape) {
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '@' || c == '~') {
             esc_buf[esc_len] = '\0';
+            
+            // 1. Цвета SGR
             if (c == 'm') {
                 parse_ansi_color(esc_buf);
-            } else if (c == 'K') {
+            } 
+            // 2. Очистка строки
+            else if (c == 'K') {
                 if (esc_buf[1] == '2') term_clear_entire_line();
                 else term_clear_to_eol();
-            } else if (c == 'J') {
+            } 
+            // 3. Очистка экрана
+            else if (c == 'J') {
                 term_clear_screen();
             }
+            // 4. ПОЗИЦИОНИРОВАНИЕ КУРСОРА: \x1b[H или \x1b[row;colH
+            else if (c == 'H' || c == 'f') {
+                int r = 1, col = 1;
+                char *p = esc_buf;
+                if (*p == '[') p++;
+                if (*p >= '0' && *p <= '9') {
+                    r = 0;
+                    while (*p >= '0' && *p <= '9') {
+                        r = r * 10 + (*p++ - '0');
+                    }
+                    if (*p == ';') {
+                        p++;
+                        col = 0;
+                        while (*p >= '0' && *p <= '9') {
+                            col = col * 10 + (*p++ - '0');
+                        }
+                    }
+                }
+                if (r < 1) r = 1;
+                if (col < 1) col = 1;
+
+                int gw = get_glyph_width();
+                int lh = get_line_height();
+
+                term_draw_cursor(false);
+                cursor_x = (size_t)(col - 1) * gw;
+                cursor_y = (size_t)(r - 1) * lh;
+                if (cursor_x >= term_width) cursor_x = term_width - gw;
+                if (cursor_y >= term_height) cursor_y = term_height - lh;
+                term_draw_cursor(true);
+            }
+            // 5. Включение режимов терминала (курсор и альт-экран)
+            else if (c == 'h') {
+                if (strcmp(esc_buf, "[?25") == 0) {
+                    term_draw_cursor(true);
+                } else if (strcmp(esc_buf, "[?1049") == 0) {
+                    term_clear_screen();
+                }
+            }
+            // 6. Выключение режимов терминала
+            else if (c == 'l') {
+                if (strcmp(esc_buf, "[?25") == 0) {
+                    term_draw_cursor(false);
+                } else if (strcmp(esc_buf, "[?1049") == 0) {
+                    term_clear_screen();
+                }
+            }
+
             in_escape = false;
             esc_len = 0;
             return;

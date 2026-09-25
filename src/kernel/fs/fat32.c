@@ -588,6 +588,11 @@ static vfs_node_t *fat32_finddir(vfs_node_t *node, const char *name) {
 }
 
 static vfs_node_t *fat32_create(vfs_node_t *dir, const char *name, uint32_t flags) {
+    vfs_node_t *existing = fat32_finddir(dir, name);
+    if (existing) {
+        return existing;
+    }
+
     uint32_t parent_cluster = (uint32_t)(uintptr_t)dir->ptr;
     uint32_t cluster_size = current_vol.sectors_per_cluster * current_vol.bytes_per_sector;
     uint32_t entries_per_cluster = cluster_size / sizeof(fat32_dir_entry_t);

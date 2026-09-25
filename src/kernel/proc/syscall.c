@@ -140,21 +140,22 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
         return unix_socket_read((unix_socket_t *)node->ptr, buf, count, nonblock);
     }
 
-    if (nonblock) {
-        if (strncmp(node->name, "tty", 3) == 0 || 
-            strcmp(node->name, "input0") == 0 || 
-            strcmp(node->name, "mouse") == 0) {
+    bool is_tty_input = (fd == 0) || (strncmp(node->name, "tty", 3) == 0);
+
+    if (is_tty_input) {
+        if (nonblock) {
             if (!tty_has_input()) {
                 return -EAGAIN;
             }
+        } else {
+            // БЛОКИРУЮЩИЙ РЕЖИМ: усыпляем процесс, пока юзер не нажмет клавишу!
+            while (!tty_has_input()) {
+                __asm__ volatile("sti; pause");
+                sched_yield();
+            }
         }
     }
-    // Return -EAGAIN on non-blocking mouse read if buffer is empty
-    if (nonblock && (node->ops == &g_mousedev_fops || node->ops == &g_evdev_mouse_fops)) {
-        if (!evdev_mouse_can_read()) {
-            return -EAGAIN;
-        }
-    }
+
     if (!node->ops->read) return -EBADF;
     uint64_t offset = current_task->process->file_offsets[fd];
     int64_t bytes = vfs_read(node, offset, count, (uint8_t *)buf);
@@ -469,8 +470,12 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
             uint64_t gh = (uint64_t)term_get_glyph_height();
             if (gw == 0) gw = 8;
             if (gh == 0) gh = 16;
+            
+            // ВАЖНО: делим на полную высоту строки с учетом межстрочного интервала!
+            uint64_t lh = gh + 4; 
+
             ws->ws_col = (unsigned short)(term_get_fb_width() / gw);
-            ws->ws_row = (unsigned short)(term_get_fb_height() / gh);
+            ws->ws_row = (unsigned short)(term_get_fb_height() / lh);
             ws->ws_xpixel = (unsigned short)term_get_fb_width();
             ws->ws_ypixel = (unsigned short)term_get_fb_height();
             return 0;
