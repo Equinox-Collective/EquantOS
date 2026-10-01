@@ -61,7 +61,7 @@ typedef struct unix_socket {
 unix_socket_t *unix_socket_create(int type);
 int unix_socket_bind(unix_socket_t *sock, const struct sockaddr_un *addr);
 int unix_socket_listen(unix_socket_t *sock, int backlog);
-int unix_socket_accept(unix_socket_t *server_sock, unix_socket_t **out_client);
+int unix_socket_accept(unix_socket_t *server_sock, unix_socket_t **out_client, bool nonblock);
 int unix_socket_connect(unix_socket_t *client_sock, const struct sockaddr_un *addr);
 
 int64_t unix_socket_read(unix_socket_t *sock, void *buf, size_t count, bool nonblock);

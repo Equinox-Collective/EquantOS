@@ -497,7 +497,7 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
         if (req == TCGETS && arg) {
             struct termios *tio = (struct termios *)arg;
             memset(tio, 0, sizeof(struct termios));
-            tio->c_iflag = 0x4500;
+            tio->c_iflag = 0x4100; // Выключен IXON (Ctrl+S и Ctrl+Q больше не перехватываются терминалом!)
             tio->c_oflag = 0x0005;
             tio->c_cflag = 0x00BF;
             tio->c_lflag = 0x8A3B;

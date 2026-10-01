@@ -22,8 +22,9 @@
 
 Long Term:
 GPU (Through LinuxKPI)
-Own Package Manager (EUR)
+~~Own Package Manager (EUR)~~ - Done (can be improved)
 Sound (PC Speaker > Intel Cards...)
 GUI (Qt, WebView (NEVER), GTK, X11/Wayland, Your own) | OR | Eon (GRAPHICAL DSL LANGUAGE)
 Root / User / Passwords
-Net (Including HTTPS)
+~~Net (Including HTTPS)~~ - DONE
+Installer on real HW

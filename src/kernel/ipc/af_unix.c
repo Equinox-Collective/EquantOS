@@ -128,12 +128,18 @@ int unix_socket_connect(unix_socket_t *client_sock, const struct sockaddr_un *ad
     return 0;
 }
 
-int unix_socket_accept(unix_socket_t *server_sock, unix_socket_t **out_client) {
+int unix_socket_accept(unix_socket_t *server_sock, unix_socket_t **out_client, bool nonblock) {
     if (!server_sock || !out_client) return -EINVAL;
     if (server_sock->state != UNIX_STATE_LISTENING) return -EINVAL;
 
-    // Block until a client connects
     while (server_sock->backlog_count == 0) {
+        if (server_sock->peer_closed) {
+            return -ECONNABORTED;
+        }
+        if (nonblock) {
+            return -EAGAIN;
+        }
+
         if (current_task) {
             server_sock->blocked_accept = current_task;
             sched_block(current_task);
@@ -144,7 +150,6 @@ int unix_socket_accept(unix_socket_t *server_sock, unix_socket_t **out_client) {
         }
     }
 
-    // Pop the first connection from backlog FIFO
     unix_socket_t *accepted = server_sock->backlog[0];
     for (uint32_t i = 0; i < server_sock->backlog_count - 1; i++) {
         server_sock->backlog[i] = server_sock->backlog[i + 1];
