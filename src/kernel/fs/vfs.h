@@ -107,10 +107,11 @@ typedef struct vfs_node {
     char name[128];
     uint32_t flags;
     uint32_t permissions;
+    uint32_t refcount; // Reference counter (POSIX fhold / fdrop style)
     uint64_t length;
     uint64_t inode;
     vfs_file_operations_t *ops;
-    struct vfs_node *ptr; // Used for mountpoints or private driver data
+    struct vfs_node *ptr;
     
     // Tree hierarchy links
     struct vfs_node *parent;

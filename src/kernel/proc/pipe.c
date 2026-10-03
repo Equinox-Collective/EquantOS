@@ -159,11 +159,13 @@ int pipe_create(int pipefd[2]) {
 
     strcpy(r_node->name, "pipe:r");
     r_node->flags = FS_FILE;
+    r_node->refcount = 1;
     r_node->ops = &pipe_read_ops;
     r_node->ptr = (struct vfs_node *)p;
 
     strcpy(w_node->name, "pipe:w");
     w_node->flags = FS_FILE;
+    w_node->refcount = 1;
     w_node->ops = &pipe_write_ops;
     w_node->ptr = (struct vfs_node *)p;
 

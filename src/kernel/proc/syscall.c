@@ -69,6 +69,7 @@ static int alloc_fd(vfs_node_t *node, uint32_t flags) {
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
         if (current_task->process->files[i] == NULL) {
             current_task->process->files[i] = node;
+            if (node->refcount == 0) node->refcount = 1;
             current_task->process->file_offsets[i] = 0;
             current_task->process->file_flags[i] = flags;
             return i;
@@ -266,6 +267,29 @@ static int64_t sys_writev_handler(int fd, const struct iovec *iov, int iovcnt) {
     return total;
 }
 
+
+static int64_t sys_close_handler(int fd) {
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    current_task->process->files[fd] = NULL;
+    current_task->process->file_offsets[fd] = 0;
+    current_task->process->file_flags[fd] = 0;
+
+    // FreeBSD style: drop reference. Free memory strictly when last descriptor closes!
+    if (node->refcount > 1) {
+        node->refcount--;
+        return 0;
+    }
+
+    node->refcount = 0;
+    vfs_close(node);
+    return 0;
+}
+
 static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, int mode) {
     (void)dirfd;
     if (!pathname) return -EFAULT;
@@ -328,6 +352,7 @@ static int64_t sys_dup_handler(int oldfd) {
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
         if (current_task->process->files[i] == NULL) {
             current_task->process->files[i] = current_task->process->files[oldfd];
+            current_task->process->files[i]->refcount++;
             current_task->process->file_offsets[i] = current_task->process->file_offsets[oldfd];
             current_task->process->file_flags[i] = current_task->process->file_flags[oldfd];
             return i;
@@ -343,9 +368,11 @@ static int64_t sys_dup2_handler(int oldfd, int newfd) {
     if (oldfd == newfd) return newfd;
 
     if (current_task->process->files[newfd]) {
-        vfs_close(current_task->process->files[newfd]);
+        sys_close_handler(newfd);
     }
+
     current_task->process->files[newfd] = current_task->process->files[oldfd];
+    current_task->process->files[newfd]->refcount++;
     current_task->process->file_offsets[newfd] = current_task->process->file_offsets[oldfd];
     current_task->process->file_flags[newfd] = current_task->process->file_flags[oldfd];
     return newfd;
@@ -977,25 +1004,6 @@ static vfs_file_operations_t inet_socket_vfs_ops = {
     .mmap    = NULL
 };
 
-
-static int64_t sys_close_handler(int fd) {
-    if (!current_task || !current_task->process) return -EBADF;
-    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
-
-    vfs_node_t *node = current_task->process->files[fd];
-    if (!node) return -EBADF;
-
-    vfs_close(node);
-    if (node->ops && (node->ops->read == inet_socket_read_op || 
-                      node->ops->write == inet_socket_write_op)) {
-        kfree(node);
-    }
-    current_task->process->files[fd] = NULL;
-    current_task->process->file_offsets[fd] = 0;
-    current_task->process->file_flags[fd] = 0;
-    return 0;
-}
-
 static int64_t sys_munmap_handler(uint64_t addr, size_t length) {
     if (length == 0 || (addr & (PAGE_SIZE - 1)) != 0) return -EINVAL;
     if (!current_task || !current_task->process) return -EINVAL;
@@ -1187,6 +1195,9 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
 
         for (int i = 0; i < MAX_OPEN_FILES; i++) {
             child_proc->files[i] = current_task->process->files[i];
+            if (child_proc->files[i]) {
+                child_proc->files[i]->refcount++;
+            }
             child_proc->file_offsets[i] = current_task->process->file_offsets[i];
             child_proc->file_flags[i] = current_task->process->file_flags[i];
         }

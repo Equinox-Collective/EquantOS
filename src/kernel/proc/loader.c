@@ -76,21 +76,38 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
             uint64_t vaddr_end = (p_vaddr + p_memsz + 0xFFF) & ~0xFFFULL;
             if (vaddr_end > max_vaddr_end) max_vaddr_end = vaddr_end;
 
-            uint64_t total_size = vaddr_end - vaddr_aligned;
-            uint32_t page_count = total_size / PAGE_SIZE;
-
-            void *phys_pages = pmm_alloc_continuous(page_count);
-            if (!phys_pages) return false;
-
-            for (uint32_t j = 0; j < page_count; j++) {
-                uint64_t virt_page = vaddr_aligned + (j * PAGE_SIZE);
-                uint64_t phys_page = (uint64_t)phys_pages + (j * PAGE_SIZE);
-                vmm_map(new_pml4, virt_page, phys_page, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+            // Allocate individual 4KB pages to avoid physical memory fragmentation
+            for (uint64_t vpage = vaddr_aligned; vpage < vaddr_end; vpage += PAGE_SIZE) {
+                uint64_t existing_phys = vmm_get_phys(new_pml4, vpage);
+                if (!existing_phys) {
+                    void *new_phys = pmm_alloc();
+                    if (!new_phys) {
+                        vmm_destroy_address_space(PHYS(new_pml4));
+                        return false;
+                    }
+                    memset((void *)VIRT((uint64_t)new_phys), 0, PAGE_SIZE);
+                    vmm_map(new_pml4, vpage, (uint64_t)new_phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+                }
             }
 
-            memset((void *)VIRT((uint64_t)phys_pages + (p_vaddr - vaddr_aligned)), 0, p_memsz);
-            memcpy((void *)VIRT((uint64_t)phys_pages + (p_vaddr - vaddr_aligned)), 
-                   (uint8_t *)elf_data + p_offset, p_filesz);
+            uint64_t bytes_copied = 0;
+            while (bytes_copied < p_filesz) {
+                uint64_t curr_vaddr = p_vaddr + bytes_copied;
+                uint64_t page_off   = curr_vaddr & 0xFFFULL;
+                uint64_t chunk      = PAGE_SIZE - page_off;
+                if (chunk > (p_filesz - bytes_copied)) {
+                    chunk = p_filesz - bytes_copied;
+                }
+
+                uint64_t phys = vmm_get_phys(new_pml4, curr_vaddr);
+                uint64_t phys_page = phys & ~0xFFFULL;
+
+                memcpy((void *)VIRT(phys_page + page_off),
+                       (uint8_t *)elf_data + p_offset + bytes_copied,
+                       chunk);
+
+                bytes_copied += chunk;
+            }
         }
     }
 
