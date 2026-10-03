@@ -159,7 +159,9 @@ ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/start.sh \
                  build/iso/twm.elf \
                  build/iso/system.twmrc \
-				 build/iso/epacmg.elf
+				 build/iso/epacmg.elf \
+				 build/iso/icewm.elf \
+				 build/iso/preferences
 
 # ==============================================================================
 # Master Targets
@@ -283,6 +285,16 @@ build/iso/system.twmrc: res/system.twmrc
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/system.twmrc,$@)
+
+build/iso/icewm.elf: res/icewm.elf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/icewm.elf,$@)
+
+build/iso/preferences: res/preferences
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/preferences,$@)
 
 # Auto-Dependency Inclusion
 -include $(DEP_FILES)
