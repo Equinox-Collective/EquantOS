@@ -1,4 +1,0 @@
-prog "Terminal" xterm /bin/bash
-prog "Xeyes" xeyes /bin/xeyes.elf
-prog "Memory Diagnostic" memory /bin/equantmemtest.elf
-restart "Restart IceWM" icewm

@@ -79,7 +79,9 @@ void kernel_start_userland(void) {
         for (;;) { tty_poll_input(); sched_yield(); }
     }
 
+    // Put kernel init thread to sleep instead of burning 100% CPU in a yield loop
     while (last_spawned_task && last_spawned_task->state != TASK_STATE_ZOMBIE) {
+        sched_block(current_task);
         sched_yield();
     }
 

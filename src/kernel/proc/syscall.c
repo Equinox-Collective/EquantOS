@@ -1,13 +1,19 @@
 // src/kernel/proc/syscall.c - Native x86_64 Linux System Call Dispatcher
 #include "syscall.h"
 
+#define STRACE_DEBUG_ENABLED 0
+
 static void strace_log(const char *fmt, ...) {
+#if STRACE_DEBUG_ENABLED
     char buf[256];
     va_list args;
     va_start(args, fmt);
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    serial_puts(COM1, buf); // Пишет только в окно хоста MINGW64!
+    serial_puts(COM1, buf);
+#else
+    (void)fmt;
+#endif
 }
 
 __attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
@@ -1579,16 +1585,15 @@ static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int tim
     uint64_t start_tick = tick;
     uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : ((uint64_t)timeout / 10);
 
-    // Sleep path: Yield until events occur or timeout expires
+    // Sleep path: sleep until next tick or timeout instead of busy-looping
     while (ready == 0) {
         if (timeout >= 0 && (tick - start_tick) >= max_ticks) {
             break;
         }
 
-        __asm__ volatile("sti; pause");
+        sched_make_sleep(current_task, tick + 1);
         sched_yield();
 
-        // Re-scan both TTY and Sockets on each iteration
         ready = poll_scan_fds(fds, nfds);
     }
 
@@ -1729,7 +1734,7 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
             return ready;
         }
 
-        // Timeout checks
+        // Return immediately if zero timeout
         if (timeout && timeout->tv_sec == 0 && timeout->tv_nsec == 0) {
             return 0;
         }
@@ -1738,7 +1743,8 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
             return 0;
         }
 
-        __asm__ volatile("sti; pause");
+        // Put task to sleep until next timer tick instead of burning CPU cycles
+        sched_make_sleep(current_task, tick + 1);
         sched_yield();
     }
 }
@@ -2287,22 +2293,24 @@ void syscall_handler(void *regs_ptr) {
     uint64_t syscall_no = regs->rax;
     int64_t ret = -ENOSYS;
 
+#if STRACE_DEBUG_ENABLED
     uint32_t pid = (current_task && current_task->process) ? (uint32_t)current_task->process->pid : 0;
     const char *name = get_syscall_name(syscall_no);
 
-    // 1. LOG ENTRY (видно ДО того, как сисколл зависнет внутри!)
-    bool quiet = (syscall_no == 16 && regs->rsi == 0x4B46) ||
-                 (syscall_no == SYS_CLOCK_GETTIME) ||
+    bool quiet = (syscall_no == SYS_POLL) ||
+                 (syscall_no == SYS_PPOLL) ||
                  (syscall_no == SYS_SELECT) ||
                  (syscall_no == SYS_PSELECT6) ||
-                 (syscall_no == SYS_POLL) ||
-                 (syscall_no == SYS_PPOLL) ||
-                 ((syscall_no == SYS_READ || syscall_no == SYS_WRITE) && regs->rdi <= 2);
+                 (syscall_no == SYS_CLOCK_GETTIME) ||
+                 (syscall_no == SYS_IOCTL) ||
+                 (syscall_no == SYS_READ) ||
+                 (syscall_no == SYS_WRITE);
 
     if (!quiet) {
         strace_log("[STRACE %u] > %s(%d) args=(0x%llx, 0x%llx, 0x%llx)\n",
                    pid, name, (int)syscall_no, regs->rdi, regs->rsi, regs->rdx);
     }
+#endif
 
     switch (syscall_no) {
         case SYS_READ:

@@ -12,13 +12,28 @@
 // Strictly strips flags (0..11), OS bits (52..62) and NX bit (63)
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
 #define PTE_FLAGS_MASK (~PTE_ADDR_MASK)
-#define PTE_PAGE_SIZE  (1ULL << 7) // Huge page flag (2MB / 1GB)
 
 static page_table_t *kernel_pml4;
 uint64_t kernel_cr3;
 
 static inline void invlpg(uint64_t virt) {
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+}
+
+void pat_init(void) {
+    // Configure IA32_PAT MSR (0x277)
+    // PA0: WB  (0x06) - Default RAM
+    // PA1: WT  (0x04)
+    // PA2: UC- (0x07)
+    // PA3: WC  (0x01) - Write-Combining (PCD=1, PWT=1)
+    // PA4: WB  (0x06)
+    // PA5: WT  (0x04)
+    // PA6: UC- (0x07)
+    // PA7: UC  (0x00)
+    uint64_t pat = read_msr(0x277);
+    pat &= ~(0xFFULL << 24);
+    pat |= (0x01ULL << 24); // Write-Combining on PA3
+    write_msr(0x277, pat);
 }
 
 static page_table_t *get_next_level(page_table_t *table, uint64_t index, bool allocate) {
@@ -39,6 +54,22 @@ static page_table_t *get_next_level(page_table_t *table, uint64_t index, bool al
     table[index] = ((uint64_t)next_level_phys & PTE_ADDR_MASK) | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
 
     return (page_table_t *)VIRT((uint64_t)next_level_phys);
+}
+
+// Map 2MB Huge Page directly into Page Directory (PDE)
+void vmm_map_2mb(page_table_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
+    virt &= ~0x1FFFFFULL;
+    phys &= ~0x1FFFFFULL;
+
+    uint64_t pml4_idx = (virt >> 39) & 0x1FF;
+    uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
+    uint64_t pd_idx   = (virt >> 21) & 0x1FF;
+
+    page_table_t *pdpt = get_next_level(pml4, pml4_idx, true);
+    page_table_t *pd   = get_next_level(pdpt, pdpt_idx, true);
+
+    pd[pd_idx] = phys | (flags & PTE_FLAGS_MASK) | PTE_PRESENT | PTE_HUGE;
+    invlpg(virt);
 }
 
 void vmm_map(page_table_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
@@ -77,13 +108,6 @@ void vmm_unmap(page_table_t *pml4, uint64_t virt) {
 
     pt[pt_idx] = 0;
     invlpg(virt);
-}
-
-void pat_init(void) {
-    uint64_t pat = read_msr(0x277);
-    pat &= ~(0xFFULL << 24);
-    pat |= (0x01ULL << 24); // Set Write-Combining (WC)
-    write_msr(0x277, pat);
 }
 
 void vmm_init(void) {
