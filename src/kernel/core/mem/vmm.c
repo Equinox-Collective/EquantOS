@@ -166,6 +166,18 @@ page_table_t *vmm_clone_address_space(uint64_t parent_cr3_phys) {
 void vmm_page_fault_handler(cpu_state_t *state) {
     uint64_t fault_addr;
     __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
+     if (fault_addr < PAGE_SIZE) {
+        bool from_user = (state->cs == 0x23) || ((state->error_code & 0x04) != 0);
+        if (from_user && current_task && current_task->process) {
+            current_task->process->exit_code = 139;
+            current_task->process->exited = true;
+            current_task->state = TASK_STATE_ZOMBIE;
+            current_task->running = false;
+            sched_yield();
+            for (;;) { __asm__ volatile("hlt"); }
+        }
+        kernel_panic(state, __FILE__, __LINE__, "Fatal NULL pointer dereference (#PF)");
+    }
 
     uint64_t cr3_val;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));

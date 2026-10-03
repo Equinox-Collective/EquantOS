@@ -268,7 +268,7 @@ static int64_t sys_writev_handler(int fd, const struct iovec *iov, int iovcnt) {
 
 static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, int mode) {
     (void)dirfd;
-    if (!pathname) return -EINVAL;
+    if (!pathname) return -EFAULT;
 
     char resolved[256];
     resolve_user_path(pathname, resolved, sizeof(resolved));
@@ -301,11 +301,15 @@ static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, in
 
         vfs_node_t *parent_dir = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
         if (parent_dir) {
-            node = vfs_create(parent_dir, filename_buf, mode ? mode : 0644);
+            node = vfs_create(parent_dir, filename_buf, FS_FILE);
+            if (node) {
+                node->permissions = (uint32_t)(mode & 0777);
+            }
         }
     }
 
     if (!node) return -ENOENT;
+
     if ((flags & O_DIRECTORY) && !(node->flags & FS_DIRECTORY)) {
         return -ENOTDIR;
     }
@@ -662,8 +666,22 @@ static int64_t sys_chdir_handler(const char *path) {
 static int64_t sys_mkdirat_handler(int dirfd, const char *pathname, int mode) {
     (void)dirfd;
     if (!pathname) return -EFAULT;
+
     char resolved[256];
     resolve_user_path(pathname, resolved, sizeof(resolved));
+
+    // Remove any trailing slashes
+    size_t rlen = strlen(resolved);
+    while (rlen > 1 && resolved[rlen - 1] == '/') {
+        resolved[--rlen] = '\0';
+    }
+
+    // If target directory already exists, return 0 (POSIX requirement for mkdir -p)
+    vfs_node_t *existing = vfs_open(resolved, 0);
+    if (existing) {
+        if (existing->flags & FS_DIRECTORY) return 0;
+        return -EEXIST;
+    }
 
     char parent_path[256];
     char name_buf[128];
@@ -671,7 +689,6 @@ static int64_t sys_mkdirat_handler(int dirfd, const char *pathname, int mode) {
     const char *last_slash = strrchr(resolved, '/');
     if (last_slash) {
         if (last_slash == resolved) {
-            // Root-level directory (e.g. "/var" -> parent: "/", name: "var")
             strcpy(parent_path, "/");
             strncpy(name_buf, last_slash + 1, sizeof(name_buf) - 1);
         } else {
@@ -690,7 +707,7 @@ static int64_t sys_mkdirat_handler(int dirfd, const char *pathname, int mode) {
     if (!parent) return -ENOENT;
 
     vfs_node_t *created = vfs_create(parent, name_buf, FS_DIRECTORY | (mode ? mode : 0755));
-    return created ? 0 : -EEXIST;
+    return created ? 0 : -EIO;
 }
 
 static int64_t sys_unlinkat_handler(int dirfd, const char *pathname, int flags) {
@@ -1005,14 +1022,27 @@ static int64_t sys_mprotect_handler(uint64_t addr, size_t len, int prot) {
 static int64_t sys_mremap_handler(uint64_t old_address, size_t old_size, size_t new_size, int flags) {
     (void)flags;
     if (new_size == 0) return -EINVAL;
+    if ((old_address & (PAGE_SIZE - 1)) != 0) return -EINVAL;
+
+    // Shrinking mapping
+    if (new_size <= old_size) {
+        size_t excess = old_size - new_size;
+        if (excess >= PAGE_SIZE) {
+            sys_munmap_handler(old_address + new_size, excess);
+        }
+        return (int64_t)old_address;
+    }
+
+    // Expanding mapping with relocation
     int64_t new_addr = sys_mmap_handler(0, new_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (new_addr < 0) return new_addr;
 
     if (old_address && old_size) {
-        size_t copy_len = (old_size < new_size) ? old_size : new_size;
+        size_t copy_len = old_size;
         memcpy((void *)new_addr, (void *)old_address, copy_len);
         sys_munmap_handler(old_address, old_size);
     }
+
     return new_addr;
 }
 
@@ -2025,13 +2055,18 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         char alt[256];
         snprintf(alt, sizeof(alt), "/bin/%s", filename);
         file = vfs_open(alt, 0);
+        if (file) {
+            strncpy(resolved, alt, sizeof(resolved) - 1);
+        }
         if (!file) {
             snprintf(alt, sizeof(alt), "/bin/%s.elf", filename);
             file = vfs_open(alt, 0);
+            if (file) strncpy(resolved, alt, sizeof(resolved) - 1);
         }
         if (!file) {
             snprintf(alt, sizeof(alt), "%s.elf", filename);
             file = vfs_open(alt, 0);
+            if (file) strncpy(resolved, alt, sizeof(resolved) - 1);
         }
     }
 
@@ -2047,7 +2082,7 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         return -EIO;
     }
 
-    // 1. Check for Shebang script execution (#!/bin/sh, #!/bin/bash)
+    // 1. Check for Shebang script execution (#!/bin/bash, #!/bin/sh)
     if (file->length >= 2 && file_buf[0] == '#' && file_buf[1] == '!') {
         char interp_line[128];
         size_t idx = 2;
@@ -2060,7 +2095,6 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         interp_line[l_idx] = '\0';
         kfree(file_buf);
 
-        // Tokenize interpreter and optional arguments
         char *interp_argv[18];
         int new_argc = 0;
         char *token = interp_line;
@@ -2072,7 +2106,8 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
             if (*token) *token++ = '\0';
         }
 
-        interp_argv[new_argc++] = (char *)filename;
+        // Pass full resolved script path so interpreter finds it from any working directory
+        interp_argv[new_argc++] = resolved;
         if (argv) {
             for (int i = 1; argv[i] != NULL && new_argc < 16; i++) {
                 interp_argv[new_argc++] = argv[i];
@@ -2115,15 +2150,18 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
     __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
     vmm_destroy_address_space(old_cr3);
 
+    // Initialize FPU/SSE control state for new binary
+    task_init_fpu(current_task);
+    __asm__ volatile("fxrstor64 (%0)" :: "r"(task_fpu_area(current_task)) : "memory");
+
     regs->rip = new_entry;
-    regs->rcx = new_entry; // Required for SYSRETQ target
-    regs->rsp = new_rsp;   // Strictly 16-byte aligned user RSP
+    regs->rcx = new_entry;
+    regs->rsp = new_rsp;
     regs->cs = 0x23;
     regs->ss = 0x1B;
     regs->rflags = 0x202;
-    regs->r11 = 0x202;    // Required for SYSRETQ flags
+    regs->r11 = 0x202;
 
-    // System V AMD64 ABI defines %rdx = 0 on entry (rtld_fini)
     regs->rax = 0;
     regs->rbx = 0;
     regs->rdx = 0;
@@ -2203,6 +2241,14 @@ static const char *get_syscall_name(uint64_t no) {
         case 97: return "getrlimit";
         case 98: return "getrusage";
         case 99: return "sysinfo";
+        case 104: return "getgid";
+        case 105: return "setuid";
+        case 106: return "setgid";
+        case 107: return "geteuid";
+        case 108: return "getegid";
+        case 273: return "set_robust_list";
+        case 288: return "accept4";
+        case 334: return "rseq";
         case 158: return "arch_prctl";
         case 186: return "gettid";
         case 202: return "futex";
@@ -2420,7 +2466,13 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_FORK:
         case SYS_VFORK:
-            ret = sys_clone_handler(0, 0, NULL, NULL, 0, regs);
+            ret = sys_clone_handler(SIGCHLD, 0, NULL, NULL, 0, regs);
+            break;
+        case SYS_SET_ROBUST_LIST:
+            ret = 0;
+            break;
+        case SYS_RSEQ:
+            ret = -ENOSYS;
             break;
         case SYS_EXECVE:
             ret = sys_execve_handler((const char *)regs->rdi, (char *const *)regs->rsi, (char *const *)regs->rdx, regs);

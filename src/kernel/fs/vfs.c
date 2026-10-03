@@ -110,14 +110,18 @@ vfs_node_t *vfs_open(const char *path, uint32_t flags) {
 }
 
 vfs_node_t *vfs_create(vfs_node_t *dir, const char *name, uint32_t flags) {
-    if (!dir) return NULL;
-    if (dir->flags & FS_MOUNTPOINT && dir->ptr) {
+    if (!dir || !name || name[0] == '\0') return NULL;
+
+    if ((dir->flags & FS_MOUNTPOINT) && dir->ptr) {
         dir = (vfs_node_t *)dir->ptr;
     }
-    if (!(dir->flags & FS_DIRECTORY) || !dir->ops || !dir->ops->create) {
+
+    if (!dir || !(dir->flags & FS_DIRECTORY) || !dir->ops || !dir->ops->create) {
         return NULL;
     }
-    return dir->ops->create(dir, name, flags);
+
+    uint32_t type = flags & (FS_FILE | FS_DIRECTORY | FS_SOCKET | FS_SYMLINK);
+    return dir->ops->create(dir, name, type ? type : FS_FILE);
 }
 
 int64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
@@ -144,12 +148,16 @@ vfs_node_t *vfs_readdir(vfs_node_t *node, uint32_t index) {
 }
 
 vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
-    if (node->flags & FS_MOUNTPOINT && node->ptr) {
+    if (!node || !name) return NULL;
+
+    if ((node->flags & FS_MOUNTPOINT) && node->ptr) {
         node = (vfs_node_t *)node->ptr;
     }
-    if (!(node->flags & FS_DIRECTORY) || !node->ops || !node->ops->finddir) {
+
+    if (!node || !(node->flags & FS_DIRECTORY) || !node->ops || !node->ops->finddir) {
         return NULL;
     }
+
     return node->ops->finddir(node, name);
 }
 
