@@ -23,6 +23,10 @@ for tool in $EQ_KERNEL_TOOLS; do
 done
 unset tool EQ_KERNEL_TOOLS
 
+# Shortcuts for Graphical Environment
+alias xstart="/start.sh"
+alias icewm="/icewm.elf"
+
 # 5. Colorful High-Contrast Prompt (root in Green, cwd in Blue)
 PS1='\[\033[01;32m\]root@equantos\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]# '
 

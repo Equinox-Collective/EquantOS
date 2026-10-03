@@ -1245,8 +1245,21 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
     return (int64_t)child_task->id;
 }
 
+static int64_t sys_readlink_handler(const char *path, char *buf, size_t bufsiz) {
+    if (!path || !buf || bufsiz == 0) return -EINVAL;
+
+    if (strcmp(path, "/proc/self/exe") == 0) {
+        const char *default_exe = "/bin/icewm";
+        size_t len = strlen(default_exe);
+        if (len > bufsiz) len = bufsiz;
+        memcpy(buf, default_exe, len);
+        return (int64_t)len;
+    }
+
+    return -EINVAL;
+}
+
 static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
-    (void)options;
     if (!current_task || !current_task->process) return -ECHILD;
 
     extern task_t *task_list;
@@ -1307,12 +1320,17 @@ static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
             return -ECHILD;
         }
 
+        if (options & 1) {
+            return 0;
+        }
+
         current_task->state = TASK_STATE_BLOCKED;
         current_task->running = false;
         sched_dequeue(current_task);
         sched_yield();
     }
 }
+
 
 static int64_t sys_arch_prctl_handler(int code, uint64_t addr) {
     if (!current_task) return -EINVAL;
@@ -1845,8 +1863,10 @@ static int64_t sys_accept_handler(int fd, struct sockaddr_un *addr, uint32_t *ad
     vfs_node_t *node = current_task->process->files[fd];
     if (node->ops != &unix_socket_vfs_ops || !node->ptr) return -ENOTSOCK;
 
+    bool nonblock = (current_task->process->file_flags[fd] & O_NONBLOCK) != 0;
+
     unix_socket_t *client_sock = NULL;
-    int err = unix_socket_accept((unix_socket_t *)node->ptr, &client_sock);
+    int err = unix_socket_accept((unix_socket_t *)node->ptr, &client_sock, nonblock);
     if (err < 0) return err;
 
     vfs_node_t *client_node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
@@ -1860,7 +1880,7 @@ static int64_t sys_accept_handler(int fd, struct sockaddr_un *addr, uint32_t *ad
     client_node->ops = &unix_socket_vfs_ops;
     client_node->ptr = (struct vfs_node *)client_sock;
 
-    int new_fd = alloc_fd(client_node, O_RDWR);
+    int new_fd = alloc_fd(client_node, nonblock ? (O_RDWR | O_NONBLOCK) : O_RDWR);
     if (new_fd < 0) {
         kfree(client_node);
         unix_socket_close(client_sock);
@@ -2296,9 +2316,23 @@ void syscall_handler(void *regs_ptr) {
             ret = sys_pipe2_handler((int *)regs->rdi, 0);
             break;
         case SYS_SELECT:
-        case SYS_PSELECT6: // 270
+            ret = sys_select_handler((int)regs->rdi, (void *)regs->rsi, (void *)regs->rdx, 
+                                     (void *)regs->r10, (const struct linux_timeval *)regs->r8);
+            break;
+        case SYS_PSELECT6:
             ret = sys_pselect6_handler((int)regs->rdi, (void *)regs->rsi, (void *)regs->rdx, 
                                        (void *)regs->r10, (const struct linux_timespec *)regs->r8, (const void *)regs->r9);
+            break;
+        case SYS_ACCEPT:
+        case SYS_ACCEPT4:
+            ret = sys_accept_handler((int)regs->rdi, (struct sockaddr_un *)regs->rsi, (uint32_t *)regs->rdx);
+            break;
+        case SYS_SIGALTSTACK:
+            ret = 0;
+            break;
+        case SYS_READLINK:
+        case SYS_READLINKAT:
+            ret = sys_readlink_handler((const char *)regs->rdi, (char *)regs->rsi, (size_t)regs->rdx);
             break;
         case SYS_PPOLL:
             ret = sys_ppoll_handler((struct linux_pollfd *)regs->rdi, regs->rsi, 
@@ -2361,9 +2395,6 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_LISTEN:
             ret = sys_listen_handler((int)regs->rdi, (int)regs->rsi);
-            break;
-        case SYS_ACCEPT:
-            ret = sys_accept_handler((int)regs->rdi, (struct sockaddr_un *)regs->rsi, (uint32_t *)regs->rdx);
             break;
         case SYS_LINK:
             ret = sys_link_handler((const char *)regs->rdi, (const char *)regs->rsi);
@@ -2471,9 +2502,6 @@ void syscall_handler(void *regs_ptr) {
         case SYS_RMDIR:
         case SYS_UNLINK:
             ret = sys_unlinkat_handler(AT_FDCWD, (const char *)regs->rdi, 0);
-            break;
-        case SYS_READLINK:
-            ret = -EINVAL;
             break;
         case SYS_CHMOD:
             ret = sys_chmod_handler((const char *)regs->rdi, (int)regs->rsi);
