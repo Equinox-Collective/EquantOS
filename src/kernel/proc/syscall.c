@@ -1846,7 +1846,8 @@ static int64_t sys_accept_handler(int fd, struct sockaddr_un *addr, uint32_t *ad
     if (node->ops != &unix_socket_vfs_ops || !node->ptr) return -ENOTSOCK;
 
     unix_socket_t *client_sock = NULL;
-    int err = unix_socket_accept((unix_socket_t *)node->ptr, &client_sock);
+    bool nonblock = (current_task->process->file_flags[fd] & O_NONBLOCK) != 0;
+    int err = unix_socket_accept((unix_socket_t *)node->ptr, &client_sock, nonblock);
     if (err < 0) return err;
 
     vfs_node_t *client_node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));

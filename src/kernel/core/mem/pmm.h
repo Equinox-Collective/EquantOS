@@ -36,5 +36,6 @@ void pmm_free(void *ptr); // Order 0 helper
 
 uint64_t pmm_get_used_memory(void);
 uint64_t pmm_get_total_memory(void);
+uint64_t pmm_get_free_pages(void);
 
 #endif // PMM_H

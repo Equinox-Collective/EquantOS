@@ -292,6 +292,11 @@ build/iso/system.twmrc: res/system.twmrc
 # Bootable ISO & Disks Construction
 # ==============================================================================
 
+# Vendored Limine binaries (tracked in git). `make .limine.stamp` refreshes them.
+LIMINE_DIR   := limine
+LIMINE_FILES := $(LIMINE_DIR)/limine-bios-cd.bin $(LIMINE_DIR)/limine-bios.sys \
+                $(LIMINE_DIR)/limine-uefi-cd.bin $(LIMINE_DIR)/BOOTX64.EFI
+
 disks:
 	$(call LOG_MSG,  $(CLR_INFO) Generating raw test disk images...)
 	$(Q)python create_disks.py
@@ -300,28 +305,26 @@ disks:
 	$(call LOG_MSG,  $(CLR_INFO) Downloading Limine Bootloader binaries...)
 	$(Q)curl -Lo limine-binary.tar.gz https://github.com/limine-bootloader/limine/releases/latest/download/limine-binary.tar.gz
 	$(Q)tar -xzf limine-binary.tar.gz
-	$(Q)$(call CP,limine-binary/limine-bios-cd.bin,limine-bios-cd.bin)
-	$(Q)$(call CP,limine-binary/limine-bios.sys,limine-bios.sys)
-	$(Q)$(call CP,limine-binary/limine-uefi-cd.bin,limine-uefi-cd.bin)
-	$(Q)$(call CP,limine-binary/BOOTX64.EFI,BOOTX64.EFI)
+	$(Q)$(call CP,limine-binary/limine-bios-cd.bin,$(LIMINE_DIR)/limine-bios-cd.bin)
+	$(Q)$(call CP,limine-binary/limine-bios.sys,$(LIMINE_DIR)/limine-bios.sys)
+	$(Q)$(call CP,limine-binary/limine-uefi-cd.bin,$(LIMINE_DIR)/limine-uefi-cd.bin)
+	$(Q)$(call CP,limine-binary/BOOTX64.EFI,$(LIMINE_DIR)/BOOTX64.EFI)
 	$(Q)$(call RMDIR,limine-binary)
 	$(Q)$(call RM,limine-binary.tar.gz)
 	@echo done > .limine.stamp
 
-limine-bios-cd.bin limine-bios.sys limine-uefi-cd.bin BOOTX64.EFI: .limine.stamp
-
-build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd.bin limine-uefi-cd.bin
+build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf $(LIMINE_FILES)
 	$(call LOG_MSG,  $(CLR_ISO) Constructing bootable ISO image...)
 	@$(call MKDIR,build/iso/boot)
 	@$(call MKDIR,build/iso/EFI/BOOT)
 	$(Q)$(call CP,build/kernel.elf,build/iso/kernel.elf)
 	$(Q)$(call CP,build/kernel.elf,build/iso/boot/kernel.elf)
-	$(Q)$(call CP,BOOTX64.EFI,build/iso/BOOTX64.EFI)
-	$(Q)$(call CP,BOOTX64.EFI,build/iso/EFI/BOOT/BOOTX64.EFI)
+	$(Q)$(call CP,$(LIMINE_DIR)/BOOTX64.EFI,build/iso/BOOTX64.EFI)
+	$(Q)$(call CP,$(LIMINE_DIR)/BOOTX64.EFI,build/iso/EFI/BOOT/BOOTX64.EFI)
 	$(Q)$(call CP,limine.conf,build/iso/limine.conf)
-	$(Q)$(call CP,limine-bios-cd.bin,build/iso/boot/limine-bios-cd.bin)
-	$(Q)$(call CP,limine-bios.sys,build/iso/boot/limine-bios.sys)
-	$(Q)$(call CP,limine-uefi-cd.bin,build/iso/boot/limine-uefi-cd.bin)
+	$(Q)$(call CP,$(LIMINE_DIR)/limine-bios-cd.bin,build/iso/boot/limine-bios-cd.bin)
+	$(Q)$(call CP,$(LIMINE_DIR)/limine-bios.sys,build/iso/boot/limine-bios.sys)
+	$(Q)$(call CP,$(LIMINE_DIR)/limine-uefi-cd.bin,build/iso/boot/limine-uefi-cd.bin)
 	@echo FS0: > build/iso/startup.nsh
 	@echo \EFI\BOOT\BOOTX64.EFI >> build/iso/startup.nsh
 	$(Q)xorriso -as mkisofs \
