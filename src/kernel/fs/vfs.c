@@ -125,12 +125,12 @@ vfs_node_t *vfs_create(vfs_node_t *dir, const char *name, uint32_t flags) {
     return dir->ops->create(dir, name, type ? type : FS_FILE);
 }
 
+// In src/kernel/fs/vfs.c
 int64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     if (!node || !node->ops) return -1;
 
-    // Use Page Cache for regular disk-backed files (EXT2 / FAT32)
-    // Sockets, pipes, devfs and char devices bypass the cache
-    if ((node->flags & FS_FILE) && !(node->flags & FS_SOCKET) && node->inode != 0) {
+    // Only cache files explicitly marked as cacheable by disk drivers
+    if ((node->flags & FS_CACHEABLE) && node->inode != 0) {
         return page_cache_read(node, offset, size, buffer);
     }
 
@@ -141,8 +141,7 @@ int64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buff
 int64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     if (!node || !node->ops) return -1;
 
-    // Write through cache for regular files
-    if ((node->flags & FS_FILE) && !(node->flags & FS_SOCKET) && node->inode != 0) {
+    if ((node->flags & FS_CACHEABLE) && node->inode != 0) {
         return page_cache_write(node, offset, size, buffer);
     }
 

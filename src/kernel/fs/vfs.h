@@ -10,6 +10,7 @@
 #define FS_MOUNTPOINT  (1U << 18)
 #define FS_SOCKET      (1U << 19)
 #define FS_SYMLINK     (1U << 20)
+#define FS_CACHEABLE   (1U << 21)
 #define FBIOGET_VSCREENINFO 0x4600
 #define FBIOPUT_VSCREENINFO 0x4601
 #define FBIOGET_FSCREENINFO 0x4602

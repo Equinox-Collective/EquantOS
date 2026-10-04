@@ -496,7 +496,8 @@ static vfs_node_t *fat32_readdir(vfs_node_t *node, uint32_t index) {
                     vnode->inode = ((uint32_t)entries[i].first_cluster_high << 16) | entries[i].first_cluster_low;
                     vnode->ptr = (vfs_node_t *)(uintptr_t)vnode->inode;
                     vnode->parent = node;
-                    vnode->flags = (entries[i].attribute & FAT32_ATTR_DIRECTORY) ? FS_DIRECTORY : FS_FILE;
+                    // In fat32_finddir and fat32_readdir:
+vnode->flags = (entries[i].attribute & FAT32_ATTR_DIRECTORY) ? FS_DIRECTORY : (FS_FILE | FS_CACHEABLE);
                     vnode->ops = &fat32_fops;
 
                     kfree(cluster_buf);
@@ -572,7 +573,8 @@ static vfs_node_t *fat32_finddir(vfs_node_t *node, const char *name) {
                 vnode->inode = ((uint32_t)entries[i].first_cluster_high << 16) | entries[i].first_cluster_low;
                 vnode->ptr = (vfs_node_t *)(uintptr_t)vnode->inode;
                 vnode->parent = node;
-                vnode->flags = (entries[i].attribute & FAT32_ATTR_DIRECTORY) ? FS_DIRECTORY : FS_FILE;
+                // In fat32_finddir and fat32_readdir:
+vnode->flags = (entries[i].attribute & FAT32_ATTR_DIRECTORY) ? FS_DIRECTORY : (FS_FILE | FS_CACHEABLE);
                 vnode->ops = &fat32_fops;
 
                 kfree(cluster_buf);
