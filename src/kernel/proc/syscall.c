@@ -2718,10 +2718,12 @@ void syscall_handler(void *regs_ptr) {
 
     regs->rax = (uint64_t)ret;
 
+#if STRACE_DEBUG_ENABLED
     if (!quiet) {
         strace_log("[STRACE %u] < %s = %lld (0x%llx)\n",
                    pid, name, (long long)ret, (unsigned long long)ret);
     }
+#endif
 }
 
 void init_syscalls(void) {

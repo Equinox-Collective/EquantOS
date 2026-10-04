@@ -149,13 +149,13 @@ page_table_t *vmm_clone_address_space(uint64_t parent_cr3_phys) {
 
         for (int j = 0; j < 512; j++) {
             if (!(pdpt[j] & PTE_PRESENT)) continue;
-            if (pdpt[j] & PTE_PAGE_SIZE) continue; // Skip huge pages
+            if (pdpt[j] & PTE_HUGE) continue; // Skip huge pages
 
             page_table_t *pd = (page_table_t *)VIRT(pdpt[j] & PTE_ADDR_MASK);
 
             for (int k = 0; k < 512; k++) {
                 if (!(pd[k] & PTE_PRESENT)) continue;
-                if (pd[k] & PTE_PAGE_SIZE) continue; // Skip huge pages
+                if (pd[k] & PTE_HUGE) continue; // Skip huge pages
 
                 page_table_t *pt = (page_table_t *)VIRT(pd[k] & PTE_ADDR_MASK);
 
@@ -324,10 +324,10 @@ void vmm_destroy_address_space(uint64_t cr3_phys) {
         if (pml4[i] & PTE_PRESENT) {
             page_table_t *pdpt = (page_table_t *)VIRT(pml4[i] & PTE_ADDR_MASK);
             for (int j = 0; j < 512; j++) {
-                if ((pdpt[j] & PTE_PRESENT) && !(pdpt[j] & PTE_PAGE_SIZE)) {
+                if ((pdpt[j] & PTE_PRESENT) && !(pdpt[j] & PTE_HUGE)) {
                     page_table_t *pd = (page_table_t *)VIRT(pdpt[j] & PTE_ADDR_MASK);
                     for (int k = 0; k < 512; k++) {
-                        if ((pd[k] & PTE_PRESENT) && !(pd[k] & PTE_PAGE_SIZE)) {
+                        if ((pd[k] & PTE_PRESENT) && !(pd[k] & PTE_HUGE)) {
                             page_table_t *pt = (page_table_t *)VIRT(pd[k] & PTE_ADDR_MASK);
                             for (int l = 0; l < 512; l++) {
                                 if (pt[l] & PTE_PRESENT) {
