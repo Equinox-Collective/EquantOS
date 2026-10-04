@@ -21,18 +21,18 @@ static inline void invlpg(uint64_t virt) {
 }
 
 void pat_init(void) {
-    // Configure IA32_PAT MSR (0x277)
-    // PA0: WB  (0x06) - Default RAM
-    // PA1: WT  (0x04)
+    // Configure IA32_PAT (0x277):
+    // PA0: WB  (0x06) - Regular System RAM
+    // PA1: WC  (0x01) - Write-Combining (VRAM Framebuffer via PTE_PWT)
     // PA2: UC- (0x07)
-    // PA3: WC  (0x01) - Write-Combining (PCD=1, PWT=1)
+    // PA3: UC  (0x00) - Hardware PCI MMIO (PTE_PCD | PTE_PWT)
     // PA4: WB  (0x06)
     // PA5: WT  (0x04)
     // PA6: UC- (0x07)
     // PA7: UC  (0x00)
     uint64_t pat = read_msr(0x277);
-    pat &= ~(0xFFULL << 24);
-    pat |= (0x01ULL << 24); // Write-Combining on PA3
+    pat &= ~(0xFFULL << 8);
+    pat |= (0x01ULL << 8); // Write-Combining strictly on PA1
     write_msr(0x277, pat);
 }
 

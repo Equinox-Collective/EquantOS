@@ -1,4 +1,4 @@
-// src/kernel/core/mem/vmm.h
+// src/kernel/core/mem/vmm.h - Strict PAT Layout Matching BSD/Linux Kernel
 #ifndef VMM_H
 #define VMM_H
 
@@ -14,19 +14,21 @@ extern uint64_t hhdm_offset;
 #define PAGE_SIZE     4096ULL
 #define PAGE_SIZE_2MB 0x200000ULL
 
-// Page Table Entry (PTE) Flags
 #define PTE_PRESENT   (1ULL << 0)
 #define PTE_WRITABLE  (1ULL << 1)
 #define PTE_USER      (1ULL << 2)
 #define PTE_PWT       (1ULL << 3)
 #define PTE_PCD       (1ULL << 4)
-#define PTE_HUGE      (1ULL << 7) // Page Size flag for PDE/PDPE (2MB/1GB)
+#define PTE_HUGE      (1ULL << 7)
 #define PTE_COW       (1ULL << 9)
-#define PTE_PAT_4KB   (1ULL << 7)  // PAT bit for 4KB PTE
-#define PTE_PAT_2MB   (1ULL << 12) // PAT bit for 2MB PDE
+#define PTE_PAT_2MB   (1ULL << 12)
 
-// Write-Combining combination using PAT index 3 (PA3 configured as WC in pat_init)
-#define PTE_WC        (PTE_PCD | PTE_PWT)
+// PA1 is programmed to 0x01 (WC) in pat_init().
+// PCD=0, PWT=1, PAT=0 selects PA1 without corrupting PA3 (UC MMIO).
+#define PTE_WC        (PTE_PWT)
+
+// Strict Uncacheable for PCIe MMIO registers (PA3: PCD=1, PWT=1, PAT=0)
+#define PTE_MMIO_UC   (PTE_PCD | PTE_PWT)
 
 typedef uint64_t page_table_t;
 
