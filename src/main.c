@@ -16,6 +16,7 @@
 #include "kernel/drivers/display/psf2.h"
 #include "string.h"
 #include "kernel/proc/initproc.h"
+#include "kernel/core/gen/apic.h"
 
 __attribute__((used, section(".requests")))
 volatile uint64_t base_revision[3] = LIMINE_BASE_REVISION(3);
@@ -61,6 +62,7 @@ void _start(void) {
     pmm_init();
     vmm_init();
     init_heap(0, 0);
+    apic_init();
 
     asm volatile ("sti");
 

@@ -524,7 +524,8 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
         }
         if (req == TIOCSPGRP && arg) {
             int new_pgid = *(int *)arg;
-            current_task->process->pgid = (uint64_t)(new_pgid > 0 ? new_pgid : current_task->process->pid);
+            uint64_t target_pgid = (new_pgid > 0) ? (uint64_t)new_pgid : current_task->process->pid;
+            current_task->process->pgid = target_pgid;
             return 0;
         }
         if (req == FIONREAD && arg) {
@@ -2718,7 +2719,7 @@ void syscall_handler(void *regs_ptr) {
 
     regs->rax = (uint64_t)ret;
 
-#if STRACE_DEBUG_ENABLED
+    #if STRACE_DEBUG_ENABLED
     if (!quiet) {
         strace_log("[STRACE %u] < %s = %lld (0x%llx)\n",
                    pid, name, (long long)ret, (unsigned long long)ret);

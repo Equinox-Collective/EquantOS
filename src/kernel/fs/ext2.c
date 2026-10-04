@@ -471,11 +471,7 @@ static vfs_node_t *ext2_readdir(vfs_node_t *node, uint32_t index) {
                         vnode->inode = entry->inode;
                         vnode->ptr = (vfs_node_t *)(uintptr_t)entry->inode;
 
-                        if (entry->file_type == EXT2_FT_DIR) {
-                            vnode->flags = FS_DIRECTORY;
-                        } else {
-                            vnode->flags = FS_FILE;
-                        }
+                        vnode->flags = (entry->file_type == EXT2_FT_DIR) ? FS_DIRECTORY : (FS_FILE | FS_CACHEABLE);
 
                         ext2_inode_t child_ino;
                         ext2_read_inode(entry->inode, &child_ino);
@@ -528,11 +524,7 @@ static vfs_node_t *ext2_finddir(vfs_node_t *node, const char *name) {
                     vnode->inode = entry->inode;
                     vnode->ptr = (vfs_node_t *)(uintptr_t)entry->inode;
 
-                    if (entry->file_type == EXT2_FT_DIR) {
-                        vnode->flags = FS_DIRECTORY;
-                    } else {
-                        vnode->flags = FS_FILE;
-                    }
+                    vnode->flags = (entry->file_type == EXT2_FT_DIR) ? FS_DIRECTORY : (FS_FILE | FS_CACHEABLE);
 
                     ext2_inode_t child_ino;
                     ext2_read_inode(entry->inode, &child_ino);

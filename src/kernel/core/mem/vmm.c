@@ -10,6 +10,8 @@
 #include "../../proc/task.h"
 // x86_64 Hardware Physical Address Mask (Bits 12..51)
 // Strictly strips flags (0..11), OS bits (52..62) and NX bit (63)
+extern void term_print(const char *str);
+
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
 #define PTE_FLAGS_MASK (~PTE_ADDR_MASK)
 
@@ -21,18 +23,18 @@ static inline void invlpg(uint64_t virt) {
 }
 
 void pat_init(void) {
-    // Configure IA32_PAT MSR (0x277)
-    // PA0: WB  (0x06) - Default RAM
-    // PA1: WT  (0x04)
+    // Configure IA32_PAT (0x277):
+    // PA0: WB  (0x06) - Regular System RAM
+    // PA1: WC  (0x01) - Write-Combining (VRAM Framebuffer via PTE_PWT)
     // PA2: UC- (0x07)
-    // PA3: WC  (0x01) - Write-Combining (PCD=1, PWT=1)
+    // PA3: UC  (0x00) - Hardware PCI MMIO (PTE_PCD | PTE_PWT)
     // PA4: WB  (0x06)
     // PA5: WT  (0x04)
     // PA6: UC- (0x07)
     // PA7: UC  (0x00)
     uint64_t pat = read_msr(0x277);
-    pat &= ~(0xFFULL << 24);
-    pat |= (0x01ULL << 24); // Write-Combining on PA3
+    pat &= ~(0xFFULL << 8);
+    pat |= (0x01ULL << 8); // Write-Combining strictly on PA1
     write_msr(0x277, pat);
 }
 
@@ -149,13 +151,13 @@ page_table_t *vmm_clone_address_space(uint64_t parent_cr3_phys) {
 
         for (int j = 0; j < 512; j++) {
             if (!(pdpt[j] & PTE_PRESENT)) continue;
-            if (pdpt[j] & PTE_HUGE) continue; // Skip huge pages
+            if (pdpt[j] & PTE_PAGE_SIZE) continue; // Skip huge pages
 
             page_table_t *pd = (page_table_t *)VIRT(pdpt[j] & PTE_ADDR_MASK);
 
             for (int k = 0; k < 512; k++) {
                 if (!(pd[k] & PTE_PRESENT)) continue;
-                if (pd[k] & PTE_HUGE) continue; // Skip huge pages
+                if (pd[k] & PTE_PAGE_SIZE) continue; // Skip huge pages
 
                 page_table_t *pt = (page_table_t *)VIRT(pd[k] & PTE_ADDR_MASK);
 
@@ -324,10 +326,10 @@ void vmm_destroy_address_space(uint64_t cr3_phys) {
         if (pml4[i] & PTE_PRESENT) {
             page_table_t *pdpt = (page_table_t *)VIRT(pml4[i] & PTE_ADDR_MASK);
             for (int j = 0; j < 512; j++) {
-                if ((pdpt[j] & PTE_PRESENT) && !(pdpt[j] & PTE_HUGE)) {
+                if ((pdpt[j] & PTE_PRESENT) && !(pdpt[j] & PTE_PAGE_SIZE)) {
                     page_table_t *pd = (page_table_t *)VIRT(pdpt[j] & PTE_ADDR_MASK);
                     for (int k = 0; k < 512; k++) {
-                        if ((pd[k] & PTE_PRESENT) && !(pd[k] & PTE_HUGE)) {
+                        if ((pd[k] & PTE_PRESENT) && !(pd[k] & PTE_PAGE_SIZE)) {
                             page_table_t *pt = (page_table_t *)VIRT(pd[k] & PTE_ADDR_MASK);
                             for (int l = 0; l < 512; l++) {
                                 if (pt[l] & PTE_PRESENT) {
