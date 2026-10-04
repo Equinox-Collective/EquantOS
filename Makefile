@@ -152,7 +152,8 @@ ALL_USERSPACE := build/iso/hello.elf \
 				 build/iso/icewm.elf \
 				 build/iso/preferences \
 				 build/iso/fonts.conf \
-                 build/iso/font.ttf
+                 build/iso/font.ttf \
+				 build/iso/menu
 
 # ==============================================================================
 # Master Targets
@@ -265,6 +266,10 @@ build/iso/icewm.elf: res/icewm.elf
 	$(Q)$(call CP,res/icewm.elf,$@)
 
 build/iso/preferences: res/preferences
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+
+build/iso/menu: res/menu
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 

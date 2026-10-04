@@ -38,10 +38,23 @@ int unix_socket_bind(unix_socket_t *sock, const struct sockaddr_un *addr) {
     if (!sock || !addr) return -EINVAL;
     if (sock->state != UNIX_STATE_CREATED) return -EINVAL;
 
-    // Check if path already exists
+    // Auto-unlink stale socket node if left from previous crashed instance
     vfs_node_t *existing = vfs_open(addr->sun_path, 0);
     if (existing) {
-        return -EADDRINUSE;
+        if (existing->parent && existing->parent->children) {
+            vfs_node_t *curr = existing->parent->children;
+            vfs_node_t *prev = NULL;
+            while (curr) {
+                if (curr == existing) {
+                    if (prev) prev->next = curr->next;
+                    else existing->parent->children = curr->next;
+                    kfree(existing);
+                    break;
+                }
+                prev = curr;
+                curr = curr->next;
+            }
+        }
     }
 
     // Resolve parent directory path (e.g. "/tmp/.X11-unix")

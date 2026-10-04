@@ -1,0 +1,23 @@
+# EquantOS System Menu Definition
+
+prog "XEyes Demo" - /bin/xeyes.elf
+
+menu "System Tools" - {
+    prog "Equant Package Manager" - /bin/epacmg.elf
+    prog "Memory Stress Benchmark" - /bin/equantmemtest.elf
+    prog "Musl Libc Test Suite" - /bin/musltest.elf
+    prog "Hardware Diagnostics" - /bin/kdiag.elf sysinfo
+    prog "PCI Topology Scan" - /bin/kdiag.elf pciscan
+}
+
+menu "Installer & Disk" - {
+    prog "Install EquantOS to Hard Disk" - /bin/kdiag.elf installer
+    prog "Partition Table Inspector" - /bin/kdiag.elf diskinfo
+}
+
+separator
+
+menu "Power" - {
+    prog "Restart System" - /bin/kdiag.elf reboot
+    prog "Shut Down" - /bin/kdiag.elf shutdown
+}
