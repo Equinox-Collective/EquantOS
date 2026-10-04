@@ -5,6 +5,7 @@
 #include "../core/initcall.h"
 #include "ramfs.h"
 #include "../drivers/serial/serial.h"
+#include "pagecache.h"
 
 vfs_node_t *vfs_root = NULL;
 
@@ -125,12 +126,27 @@ vfs_node_t *vfs_create(vfs_node_t *dir, const char *name, uint32_t flags) {
 }
 
 int64_t vfs_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    if (!node || !node->ops || !node->ops->read) return -1;
+    if (!node || !node->ops) return -1;
+
+    // Use Page Cache for regular disk-backed files (EXT2 / FAT32)
+    // Sockets, pipes, devfs and char devices bypass the cache
+    if ((node->flags & FS_FILE) && !(node->flags & FS_SOCKET) && node->inode != 0) {
+        return page_cache_read(node, offset, size, buffer);
+    }
+
+    if (!node->ops->read) return -1;
     return node->ops->read(node, offset, size, buffer);
 }
 
 int64_t vfs_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    if (!node || !node->ops || !node->ops->write) return -1;
+    if (!node || !node->ops) return -1;
+
+    // Write through cache for regular files
+    if ((node->flags & FS_FILE) && !(node->flags & FS_SOCKET) && node->inode != 0) {
+        return page_cache_write(node, offset, size, buffer);
+    }
+
+    if (!node->ops->write) return -1;
     return node->ops->write(node, offset, size, buffer);
 }
 
@@ -163,6 +179,7 @@ vfs_node_t *vfs_finddir(vfs_node_t *node, const char *name) {
 
 static int __init vfs_subsys_initcall(void) {
     vfs_init();
+    page_cache_init();
     vfs_node_t *ramfs_root = ramfs_create_root();
     vfs_mount("/", ramfs_root);
     serial_puts(COM1, "[KERNEL] VFS and RAMFS Root '/' Subsystem Initialized.\n");
