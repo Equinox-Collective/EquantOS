@@ -4,6 +4,7 @@
 #include "io.h"
 #include "../mem/vmm.h"
 #include "../../drivers/serial/serial.h"
+#include <stddef.h>
 
 static volatile uint8_t *lapic_base = NULL;
 static uint32_t lapic_ticks_per_ms = 0;
