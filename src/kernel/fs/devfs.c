@@ -178,23 +178,31 @@ static int64_t dev_fb_mmap(vfs_node_t *node, uint64_t addr, size_t length, int p
     if (!kernel_fb) return -ENODEV;
     if (!current_task || !current_task->process) return -EINVAL;
 
-    // Physical base address of the video framebuffer
     uint64_t fb_phys = (uint64_t)kernel_fb->address - hhdm_offset;
     uint64_t total_size = (uint64_t)kernel_fb->pitch * kernel_fb->height;
 
-    // If application requests full buffer or more, map the whole screen
     if (length == 0 || length > total_size) {
         length = total_size;
     }
 
-    size_t page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
+    uint64_t cur_offset = 0;
 
-    // Map physical video memory directly into user address space
-    for (size_t i = 0; i < page_count; i++) {
-        uint64_t p_addr = fb_phys + (uint64_t)offset + (i * PAGE_SIZE);
-        vmm_map(pml4, addr + (i * PAGE_SIZE), p_addr,
-                PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_PCD | PTE_PWT);
+    // Fast-path: map 2MB huge pages with Write-Combining if properly aligned
+    while (cur_offset + PAGE_SIZE_2MB <= length && 
+           ((addr + cur_offset) & (PAGE_SIZE_2MB - 1)) == 0 &&
+           ((fb_phys + (uint64_t)offset + cur_offset) & (PAGE_SIZE_2MB - 1)) == 0) {
+        
+        vmm_map_2mb(pml4, addr + cur_offset, fb_phys + (uint64_t)offset + cur_offset,
+                    PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_WC);
+        cur_offset += PAGE_SIZE_2MB;
+    }
+
+    // Residual 4KB pages mapping with Write-Combining
+    while (cur_offset < length) {
+        vmm_map(pml4, addr + cur_offset, fb_phys + (uint64_t)offset + cur_offset,
+                PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_WC);
+        cur_offset += PAGE_SIZE;
     }
 
     return (int64_t)addr;

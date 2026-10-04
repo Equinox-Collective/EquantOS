@@ -5,10 +5,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define FS_FILE        0x01
-#define FS_DIRECTORY   0x02
-#define FS_MOUNTPOINT  0x08
-#define FS_SOCKET      0x10
+#define FS_FILE        (1U << 16)
+#define FS_DIRECTORY   (1U << 17)
+#define FS_MOUNTPOINT  (1U << 18)
+#define FS_SOCKET      (1U << 19)
+#define FS_SYMLINK     (1U << 20)
 #define FBIOGET_VSCREENINFO 0x4600
 #define FBIOPUT_VSCREENINFO 0x4601
 #define FBIOGET_FSCREENINFO 0x4602
@@ -106,10 +107,11 @@ typedef struct vfs_node {
     char name[128];
     uint32_t flags;
     uint32_t permissions;
+    uint32_t refcount; // Reference counter (POSIX fhold / fdrop style)
     uint64_t length;
     uint64_t inode;
     vfs_file_operations_t *ops;
-    struct vfs_node *ptr; // Used for mountpoints or private driver data
+    struct vfs_node *ptr;
     
     // Tree hierarchy links
     struct vfs_node *parent;

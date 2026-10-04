@@ -1,13 +1,19 @@
 // src/kernel/proc/syscall.c - Native x86_64 Linux System Call Dispatcher
 #include "syscall.h"
 
+#define STRACE_DEBUG_ENABLED 0
+
 static void strace_log(const char *fmt, ...) {
+#if STRACE_DEBUG_ENABLED
     char buf[256];
     va_list args;
     va_start(args, fmt);
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    serial_puts(COM1, buf); // Пишет только в окно хоста MINGW64!
+    serial_puts(COM1, buf);
+#else
+    (void)fmt;
+#endif
 }
 
 __attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
@@ -69,6 +75,7 @@ static int alloc_fd(vfs_node_t *node, uint32_t flags) {
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
         if (current_task->process->files[i] == NULL) {
             current_task->process->files[i] = node;
+            if (node->refcount == 0) node->refcount = 1;
             current_task->process->file_offsets[i] = 0;
             current_task->process->file_flags[i] = flags;
             return i;
@@ -266,9 +273,32 @@ static int64_t sys_writev_handler(int fd, const struct iovec *iov, int iovcnt) {
     return total;
 }
 
+
+static int64_t sys_close_handler(int fd) {
+    if (!current_task || !current_task->process) return -EBADF;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
+
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node) return -EBADF;
+
+    current_task->process->files[fd] = NULL;
+    current_task->process->file_offsets[fd] = 0;
+    current_task->process->file_flags[fd] = 0;
+
+    // FreeBSD style: drop reference. Free memory strictly when last descriptor closes!
+    if (node->refcount > 1) {
+        node->refcount--;
+        return 0;
+    }
+
+    node->refcount = 0;
+    vfs_close(node);
+    return 0;
+}
+
 static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, int mode) {
     (void)dirfd;
-    if (!pathname) return -EINVAL;
+    if (!pathname) return -EFAULT;
 
     char resolved[256];
     resolve_user_path(pathname, resolved, sizeof(resolved));
@@ -301,11 +331,15 @@ static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, in
 
         vfs_node_t *parent_dir = vfs_open(parent_path[0] == '\0' ? "/" : parent_path, 0);
         if (parent_dir) {
-            node = vfs_create(parent_dir, filename_buf, mode ? mode : 0644);
+            node = vfs_create(parent_dir, filename_buf, FS_FILE);
+            if (node) {
+                node->permissions = (uint32_t)(mode & 0777);
+            }
         }
     }
 
     if (!node) return -ENOENT;
+
     if ((flags & O_DIRECTORY) && !(node->flags & FS_DIRECTORY)) {
         return -ENOTDIR;
     }
@@ -324,6 +358,7 @@ static int64_t sys_dup_handler(int oldfd) {
     for (int i = 3; i < MAX_OPEN_FILES; i++) {
         if (current_task->process->files[i] == NULL) {
             current_task->process->files[i] = current_task->process->files[oldfd];
+            current_task->process->files[i]->refcount++;
             current_task->process->file_offsets[i] = current_task->process->file_offsets[oldfd];
             current_task->process->file_flags[i] = current_task->process->file_flags[oldfd];
             return i;
@@ -339,9 +374,11 @@ static int64_t sys_dup2_handler(int oldfd, int newfd) {
     if (oldfd == newfd) return newfd;
 
     if (current_task->process->files[newfd]) {
-        vfs_close(current_task->process->files[newfd]);
+        sys_close_handler(newfd);
     }
+
     current_task->process->files[newfd] = current_task->process->files[oldfd];
+    current_task->process->files[newfd]->refcount++;
     current_task->process->file_offsets[newfd] = current_task->process->file_offsets[oldfd];
     current_task->process->file_flags[newfd] = current_task->process->file_flags[oldfd];
     return newfd;
@@ -662,8 +699,22 @@ static int64_t sys_chdir_handler(const char *path) {
 static int64_t sys_mkdirat_handler(int dirfd, const char *pathname, int mode) {
     (void)dirfd;
     if (!pathname) return -EFAULT;
+
     char resolved[256];
     resolve_user_path(pathname, resolved, sizeof(resolved));
+
+    // Remove any trailing slashes
+    size_t rlen = strlen(resolved);
+    while (rlen > 1 && resolved[rlen - 1] == '/') {
+        resolved[--rlen] = '\0';
+    }
+
+    // If target directory already exists, return 0 (POSIX requirement for mkdir -p)
+    vfs_node_t *existing = vfs_open(resolved, 0);
+    if (existing) {
+        if (existing->flags & FS_DIRECTORY) return 0;
+        return -EEXIST;
+    }
 
     char parent_path[256];
     char name_buf[128];
@@ -671,7 +722,6 @@ static int64_t sys_mkdirat_handler(int dirfd, const char *pathname, int mode) {
     const char *last_slash = strrchr(resolved, '/');
     if (last_slash) {
         if (last_slash == resolved) {
-            // Root-level directory (e.g. "/var" -> parent: "/", name: "var")
             strcpy(parent_path, "/");
             strncpy(name_buf, last_slash + 1, sizeof(name_buf) - 1);
         } else {
@@ -690,7 +740,7 @@ static int64_t sys_mkdirat_handler(int dirfd, const char *pathname, int mode) {
     if (!parent) return -ENOENT;
 
     vfs_node_t *created = vfs_create(parent, name_buf, FS_DIRECTORY | (mode ? mode : 0755));
-    return created ? 0 : -EEXIST;
+    return created ? 0 : -EIO;
 }
 
 static int64_t sys_unlinkat_handler(int dirfd, const char *pathname, int flags) {
@@ -960,25 +1010,6 @@ static vfs_file_operations_t inet_socket_vfs_ops = {
     .mmap    = NULL
 };
 
-
-static int64_t sys_close_handler(int fd) {
-    if (!current_task || !current_task->process) return -EBADF;
-    if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
-
-    vfs_node_t *node = current_task->process->files[fd];
-    if (!node) return -EBADF;
-
-    vfs_close(node);
-    if (node->ops && (node->ops->read == inet_socket_read_op || 
-                      node->ops->write == inet_socket_write_op)) {
-        kfree(node);
-    }
-    current_task->process->files[fd] = NULL;
-    current_task->process->file_offsets[fd] = 0;
-    current_task->process->file_flags[fd] = 0;
-    return 0;
-}
-
 static int64_t sys_munmap_handler(uint64_t addr, size_t length) {
     if (length == 0 || (addr & (PAGE_SIZE - 1)) != 0) return -EINVAL;
     if (!current_task || !current_task->process) return -EINVAL;
@@ -1005,14 +1036,27 @@ static int64_t sys_mprotect_handler(uint64_t addr, size_t len, int prot) {
 static int64_t sys_mremap_handler(uint64_t old_address, size_t old_size, size_t new_size, int flags) {
     (void)flags;
     if (new_size == 0) return -EINVAL;
+    if ((old_address & (PAGE_SIZE - 1)) != 0) return -EINVAL;
+
+    // Shrinking mapping
+    if (new_size <= old_size) {
+        size_t excess = old_size - new_size;
+        if (excess >= PAGE_SIZE) {
+            sys_munmap_handler(old_address + new_size, excess);
+        }
+        return (int64_t)old_address;
+    }
+
+    // Expanding mapping with relocation
     int64_t new_addr = sys_mmap_handler(0, new_size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (new_addr < 0) return new_addr;
 
     if (old_address && old_size) {
-        size_t copy_len = (old_size < new_size) ? old_size : new_size;
+        size_t copy_len = old_size;
         memcpy((void *)new_addr, (void *)old_address, copy_len);
         sys_munmap_handler(old_address, old_size);
     }
+
     return new_addr;
 }
 
@@ -1157,6 +1201,9 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
 
         for (int i = 0; i < MAX_OPEN_FILES; i++) {
             child_proc->files[i] = current_task->process->files[i];
+            if (child_proc->files[i]) {
+                child_proc->files[i]->refcount++;
+            }
             child_proc->file_offsets[i] = current_task->process->file_offsets[i];
             child_proc->file_flags[i] = current_task->process->file_flags[i];
         }
@@ -1538,16 +1585,15 @@ static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int tim
     uint64_t start_tick = tick;
     uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : ((uint64_t)timeout / 10);
 
-    // Sleep path: Yield until events occur or timeout expires
+    // Sleep path: sleep until next tick or timeout instead of busy-looping
     while (ready == 0) {
         if (timeout >= 0 && (tick - start_tick) >= max_ticks) {
             break;
         }
 
-        __asm__ volatile("sti; pause");
+        sched_make_sleep(current_task, tick + 1);
         sched_yield();
 
-        // Re-scan both TTY and Sockets on each iteration
         ready = poll_scan_fds(fds, nfds);
     }
 
@@ -1688,7 +1734,7 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
             return ready;
         }
 
-        // Timeout checks
+        // Return immediately if zero timeout
         if (timeout && timeout->tv_sec == 0 && timeout->tv_nsec == 0) {
             return 0;
         }
@@ -1697,7 +1743,8 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
             return 0;
         }
 
-        __asm__ volatile("sti; pause");
+        // Put task to sleep until next timer tick instead of burning CPU cycles
+        sched_make_sleep(current_task, tick + 1);
         sched_yield();
     }
 }
@@ -2025,13 +2072,18 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         char alt[256];
         snprintf(alt, sizeof(alt), "/bin/%s", filename);
         file = vfs_open(alt, 0);
+        if (file) {
+            strncpy(resolved, alt, sizeof(resolved) - 1);
+        }
         if (!file) {
             snprintf(alt, sizeof(alt), "/bin/%s.elf", filename);
             file = vfs_open(alt, 0);
+            if (file) strncpy(resolved, alt, sizeof(resolved) - 1);
         }
         if (!file) {
             snprintf(alt, sizeof(alt), "%s.elf", filename);
             file = vfs_open(alt, 0);
+            if (file) strncpy(resolved, alt, sizeof(resolved) - 1);
         }
     }
 
@@ -2047,7 +2099,7 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         return -EIO;
     }
 
-    // 1. Check for Shebang script execution (#!/bin/sh, #!/bin/bash)
+    // 1. Check for Shebang script execution (#!/bin/bash, #!/bin/sh)
     if (file->length >= 2 && file_buf[0] == '#' && file_buf[1] == '!') {
         char interp_line[128];
         size_t idx = 2;
@@ -2060,7 +2112,6 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         interp_line[l_idx] = '\0';
         kfree(file_buf);
 
-        // Tokenize interpreter and optional arguments
         char *interp_argv[18];
         int new_argc = 0;
         char *token = interp_line;
@@ -2072,7 +2123,8 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
             if (*token) *token++ = '\0';
         }
 
-        interp_argv[new_argc++] = (char *)filename;
+        // Pass full resolved script path so interpreter finds it from any working directory
+        interp_argv[new_argc++] = resolved;
         if (argv) {
             for (int i = 1; argv[i] != NULL && new_argc < 16; i++) {
                 interp_argv[new_argc++] = argv[i];
@@ -2115,15 +2167,18 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
     __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
     vmm_destroy_address_space(old_cr3);
 
+    // Initialize FPU/SSE control state for new binary
+    task_init_fpu(current_task);
+    __asm__ volatile("fxrstor64 (%0)" :: "r"(task_fpu_area(current_task)) : "memory");
+
     regs->rip = new_entry;
-    regs->rcx = new_entry; // Required for SYSRETQ target
-    regs->rsp = new_rsp;   // Strictly 16-byte aligned user RSP
+    regs->rcx = new_entry;
+    regs->rsp = new_rsp;
     regs->cs = 0x23;
     regs->ss = 0x1B;
     regs->rflags = 0x202;
-    regs->r11 = 0x202;    // Required for SYSRETQ flags
+    regs->r11 = 0x202;
 
-    // System V AMD64 ABI defines %rdx = 0 on entry (rtld_fini)
     regs->rax = 0;
     regs->rbx = 0;
     regs->rdx = 0;
@@ -2203,6 +2258,14 @@ static const char *get_syscall_name(uint64_t no) {
         case 97: return "getrlimit";
         case 98: return "getrusage";
         case 99: return "sysinfo";
+        case 104: return "getgid";
+        case 105: return "setuid";
+        case 106: return "setgid";
+        case 107: return "geteuid";
+        case 108: return "getegid";
+        case 273: return "set_robust_list";
+        case 288: return "accept4";
+        case 334: return "rseq";
         case 158: return "arch_prctl";
         case 186: return "gettid";
         case 202: return "futex";
@@ -2230,22 +2293,24 @@ void syscall_handler(void *regs_ptr) {
     uint64_t syscall_no = regs->rax;
     int64_t ret = -ENOSYS;
 
+#if STRACE_DEBUG_ENABLED
     uint32_t pid = (current_task && current_task->process) ? (uint32_t)current_task->process->pid : 0;
     const char *name = get_syscall_name(syscall_no);
 
-    // 1. LOG ENTRY (видно ДО того, как сисколл зависнет внутри!)
-    bool quiet = (syscall_no == 16 && regs->rsi == 0x4B46) ||
-                 (syscall_no == SYS_CLOCK_GETTIME) ||
+    bool quiet = (syscall_no == SYS_POLL) ||
+                 (syscall_no == SYS_PPOLL) ||
                  (syscall_no == SYS_SELECT) ||
                  (syscall_no == SYS_PSELECT6) ||
-                 (syscall_no == SYS_POLL) ||
-                 (syscall_no == SYS_PPOLL) ||
-                 ((syscall_no == SYS_READ || syscall_no == SYS_WRITE) && regs->rdi <= 2);
+                 (syscall_no == SYS_CLOCK_GETTIME) ||
+                 (syscall_no == SYS_IOCTL) ||
+                 (syscall_no == SYS_READ) ||
+                 (syscall_no == SYS_WRITE);
 
     if (!quiet) {
         strace_log("[STRACE %u] > %s(%d) args=(0x%llx, 0x%llx, 0x%llx)\n",
                    pid, name, (int)syscall_no, regs->rdi, regs->rsi, regs->rdx);
     }
+#endif
 
     switch (syscall_no) {
         case SYS_READ:
@@ -2420,7 +2485,13 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_FORK:
         case SYS_VFORK:
-            ret = sys_clone_handler(0, 0, NULL, NULL, 0, regs);
+            ret = sys_clone_handler(SIGCHLD, 0, NULL, NULL, 0, regs);
+            break;
+        case SYS_SET_ROBUST_LIST:
+            ret = 0;
+            break;
+        case SYS_RSEQ:
+            ret = -ENOSYS;
             break;
         case SYS_EXECVE:
             ret = sys_execve_handler((const char *)regs->rdi, (char *const *)regs->rsi, (char *const *)regs->rdx, regs);

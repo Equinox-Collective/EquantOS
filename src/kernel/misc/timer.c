@@ -1,3 +1,4 @@
+// src/kernel/misc/timer.c
 #include "timer.h"
 #include "../core/gen/io.h"
 #include "../core/initcall.h"
@@ -9,13 +10,18 @@
 
 volatile uint32_t tick = 0;
 
-void timer_callback() {
+void timer_callback(void) {
     tick++;
     sched_timer_tick(tick);
+
+    // Poll USB HID on every single tick for smooth cursor movement
     xhci_timer_tick();
-    input_timer_tick();
-    rtl8139_poll();
-    tcp_tick_with_iface(tick * 10);
+
+    // Network polling can stay interleaved
+    if ((tick % 2) == 0) {
+        rtl8139_poll();
+        tcp_tick_with_iface(tick * 4);
+    }
 }
 
 void init_timer(uint32_t freq) {
@@ -27,15 +33,14 @@ void init_timer(uint32_t freq) {
 
 void sleep(uint32_t ms) {
     uint32_t start_tick = tick;
-    while (tick < start_tick + ms) {
-        __asm__ __volatile__("pause");
+    uint32_t target_ticks = (ms * 250) / 1000;
+    while (tick < start_tick + target_ticks) {
+        __asm__ volatile("pause");
     }
 }
 
-// // THIS SHOULD BELONG TO BOTTOM, DO NOT REWRITE IN ANY CASE // //
-
 static int __init timer_arch_initcall(void) {
-    init_timer(100); // Initialize PIT at 100 Hz (10ms quantum ticks)
+    init_timer(250); // 250 Hz provides balanced 4ms scheduling latency
     return 0;
 }
 arch_initcall(timer_arch_initcall);

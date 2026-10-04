@@ -15,7 +15,7 @@ else
 endif
 
 # Kernel Flags
-CFLAGS := -Wall -Wextra -O2 -g -pipe -ffreestanding -fno-stack-protector \
+CFLAGS := -Wall -Wextra -O3 -g -pipe -ffreestanding -fno-stack-protector \
           -fno-pie -fno-pic -mno-red-zone -mcmodel=kernel \
           -mno-sse -mno-mmx -mno-sse2 -MMD -MP
 
@@ -26,10 +26,6 @@ LDFLAGS  := -nostdlib -static -z max-page-size=0x1000 -T src/linker.ld
 USER_LDFLAGS  := -static -nostdlib -z max-page-size=0x1000 -z noexecstack -Ttext-segment 0x400000
 USER_CRT_PRE   := sdk/sysroot/lib/crt1.o sdk/sysroot/lib/crti.o
 USER_CRT_POST  := sdk/sysroot/lib/libc.a sdk/sysroot/lib/crtn.o
-
-# GUI (Equi) Specific Compiler Flags: Full SSE2 Enabled, High Optimization
-UI_CFLAGS     := -static -nostdinc -isystem sdk/sysroot/include -Iuserspace/equi \
-                 -O3 -msse2 -Wall -Wextra -fno-pie -fno-pic -MMD -MP
 
 # QEMU Hardware Emulation Flags
 QEMU      := qemu-system-x86_64
@@ -138,12 +134,6 @@ S_OBJECTS   := $(patsubst src/%.s, build/obj/%.o, $(S_SOURCES))
 ALL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(S_OBJECTS)
 DEP_FILES   := $(ALL_OBJECTS:.o=.d)
 
-# GUI Server (Equi) Multi-File Sources and Objects
-UI_DIR      := userspace/equi
-UI_SOURCES  := $(call rwildcard,$(UI_DIR),*.c)
-UI_OBJECTS  := $(patsubst $(UI_DIR)/%.c, build/obj/ui/%.o, $(UI_SOURCES))
-UI_DEPS     := $(UI_OBJECTS:.o=.d)
-
 # Userspace Target List (Integrated into ISO)
 ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/musltest.elf \
@@ -152,7 +142,6 @@ ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/font.psf \
                  build/iso/.bashrc \
                  build/iso/bash.elf \
-                 build/iso/equi.elf \
                  build/iso/kdiag.elf \
                  build/iso/Xfbdev.elf \
                  build/iso/xeyes.elf \
@@ -161,19 +150,18 @@ ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/system.twmrc \
 				 build/iso/epacmg.elf \
 				 build/iso/icewm.elf \
-				 build/iso/preferences
+				 build/iso/preferences \
+				 build/iso/menu \
+				 build/iso/fonts.conf \
+                 build/iso/DejaVuSans.ttf
 
 # ==============================================================================
 # Master Targets
 # ==============================================================================
 
-.PHONY: all ui run runbd debug disks clean clean-disks clean-all help
+.PHONY: all run runbd debug disks clean clean-disks clean-all help
 
 all: build/equantos.iso
-
-# Compile Master UI Binary Standalone
-ui: build/iso/equi.elf
-	$(call LOG_MSG,$(CLR_OK) Userspace GUI Compositor successfully built: build/iso/equi.elf)
 
 # Compile Kernel C Sources
 build/obj/%.o: src/%.c
@@ -198,20 +186,6 @@ build/kernel.elf: $(ALL_OBJECTS) src/linker.ld
 	@$(call MKDIR,build)
 	$(call LOG_STEP,$(CLR_LD),$@)
 	$(Q)$(LD) $(LDFLAGS) $(ALL_OBJECTS) -o $@
-
-# ==============================================================================
-# GUI Compositor (Equi) Compilation Rules
-# ==============================================================================
-
-build/obj/ui/%.o: $(UI_DIR)/%.c
-	@$(call MKDIR,$(dir $@))
-	$(call LOG_STEP,$(CLR_CC),$<)
-	$(Q)$(CC) $(UI_CFLAGS) -c $< -o $@
-
-build/iso/equi.elf: $(UI_OBJECTS)
-	@$(call MKDIR,build/iso)
-	$(call LOG_STEP,$(CLR_LD),$@)
-	$(Q)$(LD) $(USER_LDFLAGS) $(USER_CRT_PRE) $(UI_OBJECTS) $(USER_CRT_POST) -o $@
 
 # ==============================================================================
 # Generic Userspace Applications
@@ -294,7 +268,21 @@ build/iso/icewm.elf: res/icewm.elf
 build/iso/preferences: res/preferences
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
-	$(Q)$(call CP,res/preferences,$@)
+
+build/iso/menu: res/menu
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/menu,$@)
+
+build/iso/fonts.conf: res/fonts.conf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/fonts.conf,$@)
+
+build/iso/DejaVuSans.ttf: res/DejaVuSans.ttf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/DejaVuSans.ttf,$@)
 
 # Auto-Dependency Inclusion
 -include $(DEP_FILES)
@@ -390,6 +378,5 @@ clean-all: clean clean-disks
 help:
 	@echo EquantOS Build System:
 	@echo   make             - Builds full ISO image
-	@echo   make ui          - Compiles standalone GUI compositor (equi.elf)
 	@echo   make run         - Runs ISO in QEMU with NVMe and XHCI
 	@echo   make clean       - Cleans build directory

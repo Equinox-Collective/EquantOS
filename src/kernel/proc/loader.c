@@ -76,21 +76,38 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
             uint64_t vaddr_end = (p_vaddr + p_memsz + 0xFFF) & ~0xFFFULL;
             if (vaddr_end > max_vaddr_end) max_vaddr_end = vaddr_end;
 
-            uint64_t total_size = vaddr_end - vaddr_aligned;
-            uint32_t page_count = total_size / PAGE_SIZE;
-
-            void *phys_pages = pmm_alloc_continuous(page_count);
-            if (!phys_pages) return false;
-
-            for (uint32_t j = 0; j < page_count; j++) {
-                uint64_t virt_page = vaddr_aligned + (j * PAGE_SIZE);
-                uint64_t phys_page = (uint64_t)phys_pages + (j * PAGE_SIZE);
-                vmm_map(new_pml4, virt_page, phys_page, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+            // Allocate individual 4KB pages to avoid physical memory fragmentation
+            for (uint64_t vpage = vaddr_aligned; vpage < vaddr_end; vpage += PAGE_SIZE) {
+                uint64_t existing_phys = vmm_get_phys(new_pml4, vpage);
+                if (!existing_phys) {
+                    void *new_phys = pmm_alloc();
+                    if (!new_phys) {
+                        vmm_destroy_address_space(PHYS(new_pml4));
+                        return false;
+                    }
+                    memset((void *)VIRT((uint64_t)new_phys), 0, PAGE_SIZE);
+                    vmm_map(new_pml4, vpage, (uint64_t)new_phys, PTE_PRESENT | PTE_WRITABLE | PTE_USER);
+                }
             }
 
-            memset((void *)VIRT((uint64_t)phys_pages + (p_vaddr - vaddr_aligned)), 0, p_memsz);
-            memcpy((void *)VIRT((uint64_t)phys_pages + (p_vaddr - vaddr_aligned)), 
-                   (uint8_t *)elf_data + p_offset, p_filesz);
+            uint64_t bytes_copied = 0;
+            while (bytes_copied < p_filesz) {
+                uint64_t curr_vaddr = p_vaddr + bytes_copied;
+                uint64_t page_off   = curr_vaddr & 0xFFFULL;
+                uint64_t chunk      = PAGE_SIZE - page_off;
+                if (chunk > (p_filesz - bytes_copied)) {
+                    chunk = p_filesz - bytes_copied;
+                }
+
+                uint64_t phys = vmm_get_phys(new_pml4, curr_vaddr);
+                uint64_t phys_page = phys & ~0xFFFULL;
+
+                memcpy((void *)VIRT(phys_page + page_off),
+                       (uint8_t *)elf_data + p_offset + bytes_copied,
+                       chunk);
+
+                bytes_copied += chunk;
+            }
         }
     }
 
@@ -174,25 +191,49 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     }
     uint64_t entry_point = ehdr->e_entry + load_base;
 
-    uint64_t aux[32]; 
+    // Auxiliary Vector definitions
+    #define AT_NULL          0
+    #define AT_PHDR          3
+    #define AT_PHENT         4
+    #define AT_PHNUM         5
+    #define AT_PAGESZ        6
+    #define AT_BASE          7
+    #define AT_FLAGS         8
+    #define AT_ENTRY         9
+    #define AT_UID          11
+    #define AT_EUID         12
+    #define AT_GID          13
+    #define AT_EGID         14
+    #define AT_CLKTCK       17
+    #define AT_SECURE       23
+    #define AT_RANDOM       25
+    #define AT_EXECFN       31
+
+    uint64_t aux[36]; 
     int an = 0;
-    aux[an++] = 3;  aux[an++] = phdr_vaddr;
-    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;
-    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;
-    aux[an++] = 6;  aux[an++] = PAGE_SIZE;
-    aux[an++] = 7;  aux[an++] = (ehdr->e_type == 3) ? load_base : 0;
-    aux[an++] = 8;  aux[an++] = 0;
-    aux[an++] = 9;  aux[an++] = entry_point;
-    aux[an++] = 11; aux[an++] = 0;
-    aux[an++] = 12; aux[an++] = 0;
-    aux[an++] = 13; aux[an++] = 0;
-    aux[an++] = 14; aux[an++] = 0;
-    aux[an++] = 23; aux[an++] = 0;
-    aux[an++] = 25; aux[an++] = at_random;
-    aux[an++] = 0;  aux[an++] = 0;
+    aux[an++] = AT_PHDR;    aux[an++] = phdr_vaddr;
+    aux[an++] = AT_PHENT;   aux[an++] = ehdr->e_phentsize;
+    aux[an++] = AT_PHNUM;   aux[an++] = ehdr->e_phnum;
+    aux[an++] = AT_PAGESZ;  aux[an++] = PAGE_SIZE;
+    aux[an++] = AT_BASE;    aux[an++] = (ehdr->e_type == 3) ? load_base : 0;
+    aux[an++] = AT_FLAGS;   aux[an++] = 0;
+    aux[an++] = AT_ENTRY;   aux[an++] = entry_point;
+    aux[an++] = AT_UID;     aux[an++] = 0;
+    aux[an++] = AT_EUID;    aux[an++] = 0;
+    aux[an++] = AT_GID;     aux[an++] = 0;
+    aux[an++] = AT_EGID;    aux[an++] = 0;
+    aux[an++] = AT_CLKTCK;  aux[an++] = 100;
+    aux[an++] = AT_SECURE;  aux[an++] = 0;
+    aux[an++] = AT_RANDOM;  aux[an++] = at_random;
+    aux[an++] = AT_EXECFN;  aux[an++] = argv_u[0];
+    aux[an++] = AT_NULL;    aux[an++] = 0;
 
     int total_words = 1 + (argc + 1) + (envc + 1) + an;
-    if (total_words & 1) sp -= 8;
+
+    // Guarantee (RSP % 16 == 0) at _start
+    if (total_words & 1) {
+        sp -= 8;
+    }
 
     uint64_t vector_table[128];
     int idx = 0;
@@ -418,25 +459,47 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
 
     uint64_t entry_point = ehdr->e_entry + load_base;
 
-    uint64_t aux[32]; 
+    // Auxiliary Vector definitions
+    #define AT_NULL          0
+    #define AT_PHDR          3
+    #define AT_PHENT         4
+    #define AT_PHNUM         5
+    #define AT_PAGESZ        6
+    #define AT_BASE          7
+    #define AT_FLAGS         8
+    #define AT_ENTRY         9
+    #define AT_UID          11
+    #define AT_EUID         12
+    #define AT_GID          13
+    #define AT_EGID         14
+    #define AT_CLKTCK       17
+    #define AT_SECURE       23
+    #define AT_RANDOM       25
+    #define AT_EXECFN       31
+
+    uint64_t aux[36]; 
     int an = 0;
-    aux[an++] = 3;  aux[an++] = phdr_vaddr;
-    aux[an++] = 4;  aux[an++] = ehdr->e_phentsize;
-    aux[an++] = 5;  aux[an++] = ehdr->e_phnum;
-    aux[an++] = 6;  aux[an++] = PAGE_SIZE;
-    aux[an++] = 7;  aux[an++] = (ehdr->e_type == 3) ? load_base : 0;
-    aux[an++] = 8;  aux[an++] = 0;
-    aux[an++] = 9;  aux[an++] = entry_point;
-    aux[an++] = 11; aux[an++] = 0;
-    aux[an++] = 12; aux[an++] = 0;
-    aux[an++] = 13; aux[an++] = 0;
-    aux[an++] = 14; aux[an++] = 0;
-    aux[an++] = 23; aux[an++] = 0;
-    aux[an++] = 25; aux[an++] = at_random;
-    aux[an++] = 0;  aux[an++] = 0;
+    aux[an++] = AT_PHDR;    aux[an++] = phdr_vaddr;
+    aux[an++] = AT_PHENT;   aux[an++] = ehdr->e_phentsize;
+    aux[an++] = AT_PHNUM;   aux[an++] = ehdr->e_phnum;
+    aux[an++] = AT_PAGESZ;  aux[an++] = PAGE_SIZE;
+    aux[an++] = AT_BASE;    aux[an++] = (ehdr->e_type == 3) ? load_base : 0;
+    aux[an++] = AT_FLAGS;   aux[an++] = 0;
+    aux[an++] = AT_ENTRY;   aux[an++] = entry_point;
+    aux[an++] = AT_UID;     aux[an++] = 0;
+    aux[an++] = AT_EUID;    aux[an++] = 0;
+    aux[an++] = AT_GID;     aux[an++] = 0;
+    aux[an++] = AT_EGID;    aux[an++] = 0;
+    aux[an++] = AT_CLKTCK;  aux[an++] = 100;
+    aux[an++] = AT_SECURE;  aux[an++] = 0;
+    aux[an++] = AT_RANDOM;  aux[an++] = at_random;
+    aux[an++] = AT_EXECFN;  aux[an++] = argv_u[0];
+    aux[an++] = AT_NULL;    aux[an++] = 0;
 
     int total_words = 1 + (argc + 1) + (envc + 1) + an;
-    if (total_words % 2 != 0) {
+
+    // Guarantee (RSP % 16 == 0) at _start
+    if (total_words & 1) {
         sp -= 8;
     }
 

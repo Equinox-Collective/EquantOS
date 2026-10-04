@@ -230,10 +230,12 @@
 #define SYS_FACCESSAT          269
 #define SYS_PSELECT6           270
 #define SYS_PPOLL              271
+#define SYS_SET_ROBUST_LIST    273
 #define SYS_ACCEPT4            288
 #define SYS_DUP3               292
 #define SYS_PIPE2              293
 #define SYS_PRLIMIT64          302
+#define SYS_RSEQ               334
 #define SYS_EQUANT_KDIAG       400
 #define SYS_EQUANT_DNS         401
 

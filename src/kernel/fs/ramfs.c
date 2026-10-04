@@ -93,10 +93,17 @@ vfs_node_t *ramfs_create_root(void) {
 }
 
 vfs_node_t *ramfs_create_directory(vfs_node_t *parent, const char *name) {
+    if (!name || name[0] == '\0') return NULL;
+
+    if (parent) {
+        vfs_node_t *existing = ramfs_finddir(parent, name);
+        if (existing) return existing;
+    }
+
     vfs_node_t *dir = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     if (!dir) return NULL;
 
-    strcpy(dir->name, name);
+    strncpy(dir->name, name, sizeof(dir->name) - 1);
     dir->flags = FS_DIRECTORY;
     dir->permissions = 0755;
     dir->ops = &ramfs_fops;
@@ -118,7 +125,7 @@ vfs_node_t *ramfs_create_file(vfs_node_t *parent, const char *name, void *data, 
     vfs_node_t *file = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     if (!file) return NULL;
 
-    strcpy(file->name, name);
+    strncpy(file->name, name, sizeof(file->name) - 1);
     file->flags = FS_FILE;
     file->permissions = 0644;
     file->length = size;
