@@ -151,9 +151,8 @@ ALL_USERSPACE := build/iso/hello.elf \
 				 build/iso/epacmg.elf \
 				 build/iso/icewm.elf \
 				 build/iso/preferences \
-				 build/iso/menu \
 				 build/iso/fonts.conf \
-                 build/iso/DejaVuSans.ttf
+                 build/iso/font.ttf
 
 # ==============================================================================
 # Master Targets
@@ -269,20 +268,15 @@ build/iso/preferences: res/preferences
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 
-build/iso/menu: res/menu
-	@$(call MKDIR,build/iso)
-	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
-	$(Q)$(call CP,res/menu,$@)
-
 build/iso/fonts.conf: res/fonts.conf
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/fonts.conf,$@)
 
-build/iso/DejaVuSans.ttf: res/DejaVuSans.ttf
+build/iso/font.ttf: res/font.ttf
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
-	$(Q)$(call CP,res/DejaVuSans.ttf,$@)
+	$(Q)$(call CP,res/font.ttf,$@)
 
 # Auto-Dependency Inclusion
 -include $(DEP_FILES)

@@ -5,6 +5,7 @@
 #include "stdio.h"
 #include "../misc/timer.h"
 #include "../drivers/net/rtl8139.h"
+#include "../drivers/serial/serial.h"
 
 static uint32_t dhcp_xid = 0x55AA1234;
 static bool dhcp_completed = false;

@@ -10,6 +10,8 @@
 #include "../../proc/task.h"
 // x86_64 Hardware Physical Address Mask (Bits 12..51)
 // Strictly strips flags (0..11), OS bits (52..62) and NX bit (63)
+extern void term_print(const char *str);
+
 #define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL
 #define PTE_FLAGS_MASK (~PTE_ADDR_MASK)
 

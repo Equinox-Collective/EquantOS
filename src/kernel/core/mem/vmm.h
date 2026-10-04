@@ -20,6 +20,7 @@ extern uint64_t hhdm_offset;
 #define PTE_PWT       (1ULL << 3)
 #define PTE_PCD       (1ULL << 4)
 #define PTE_HUGE      (1ULL << 7)
+#define PTE_PAGE_SIZE PTE_HUGE // Backward compatibility alias for vmm.c
 #define PTE_COW       (1ULL << 9)
 #define PTE_PAT_2MB   (1ULL << 12)
 
