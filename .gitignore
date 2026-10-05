@@ -1,6 +1,5 @@
 *.o
 *.d
-*.elf
 *.hdd
 *.exe
 *.bat
