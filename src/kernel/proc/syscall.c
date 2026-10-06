@@ -155,9 +155,9 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
                 return -EAGAIN;
             }
         } else {
-            // БЛОКИРУЮЩИЙ РЕЖИМ: усыпляем процесс, пока юзер не нажмет клавишу!
+            // Sleep 8ms instead of burning 100% CPU in a tight yield loop
             while (!tty_has_input()) {
-                __asm__ volatile("sti; pause");
+                sched_make_sleep(current_task, tick + 2);
                 sched_yield();
             }
         }
@@ -1592,8 +1592,8 @@ static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int tim
     }
 
     uint64_t start_tick = tick;
-    uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : ((uint64_t)timeout / 10);
-
+    uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : ((uint64_t)timeout * 250 / 1000);
+    
     // Sleep path: sleep until next tick or timeout instead of busy-looping
     while (ready == 0) {
         if (timeout >= 0 && (tick - start_tick) >= max_ticks) {
@@ -1677,7 +1677,7 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
     if (wfds) memcpy(orig_wfds, wfds, bytes);
 
     uint64_t start_tick = tick;
-    uint64_t max_ticks = (timeout == NULL) ? (uint64_t)-1 : (timeout->tv_sec * 100 + timeout->tv_nsec / 10000000ULL);
+    uint64_t max_ticks = (timeout == NULL) ? (uint64_t)-1 : (timeout->tv_sec * 250 + timeout->tv_nsec / 4000000ULL);
 
     for (;;) {
         int ready = 0;

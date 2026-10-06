@@ -270,10 +270,12 @@ build/iso/icewm.elf: res/icewm.elf
 build/iso/preferences: res/preferences
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/preferences,$@)
 
 build/iso/menu: res/menu
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/menu,$@)
 
 build/iso/fonts.conf: res/fonts.conf
 	@$(call MKDIR,build/iso)
