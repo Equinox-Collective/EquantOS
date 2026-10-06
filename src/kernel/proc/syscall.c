@@ -544,6 +544,14 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
         if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
             return 0;
         }
+        if (req == KDSETMODE) {
+            tty_set_kd_mode((int)(uintptr_t)arg);
+            return 0;
+        }
+        if (req == KDGETMODE && arg) {
+            *(int *)arg = tty_get_kd_mode();
+            return 0;
+        }
         return 0;
     }
 

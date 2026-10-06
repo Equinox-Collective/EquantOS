@@ -7,6 +7,8 @@
 #include "term.h"
 #include <stdbool.h>
 
+extern bool devfs_is_gui_active(void);
+
 static uint32_t *term_fb_address = NULL;
 static uint64_t term_width = 0;
 static uint64_t term_height = 0;
@@ -221,6 +223,7 @@ static void term_clear_entire_line(void) {
 
 void term_putchar_raw(char c) {
     if (!term_fb_address) return;
+    if (devfs_is_gui_active()) return;
 
     if (in_escape) {
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '@' || c == '~') {

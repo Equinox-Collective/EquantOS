@@ -6,6 +6,8 @@
 #include <stdbool.h>
 #include "../input.h"
 
+#define KD_TEXT     0x00
+#define KD_GRAPHICS 0x01
 #define MAX_TTYS 6
 #define TTY_BUF_SIZE 256
 #define TTY_LOG_SIZE 4096
@@ -46,5 +48,7 @@ void tty_clear(void);
 void tty_poll_input(void);
 char input_code_to_ascii(uint16_t code, bool shift);
 uint16_t tty_getchar_raw(void);
+void tty_set_kd_mode(int mode);
+int tty_get_kd_mode(void);
 
 #endif

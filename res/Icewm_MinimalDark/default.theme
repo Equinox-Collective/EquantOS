@@ -1,0 +1,151 @@
+ThemeName="MinimalBlack_style "
+ThemeDescription="Minimalistic, flat theme for IceWM"
+	ThemeAuthor="IamJony | www.github/IamJony"
+License="GPL"
+Look=flat
+
+TitleBarHeight=26
+TitleBarCentered=1
+TitleBarJustify=54
+RolloverButtonsSupported=1		# 0/1
+ShowMenuButtonIcon=1			# 0/1 Show application icon on menuButton
+TaskBarEnableSystemTray=1
+TitleButtonsLeft="s"
+
+#TitleButtonsRight="xmi"		# Rollup button hidden
+#TitleButtonsSupported="xmis"		# Rollup button hidden
+
+TitleButtonsRight="xmir"		# Rollup button displayed
+TitleButtonsSupported="sxmir"		# Rollup button displayed
+
+BorderSizeX=1
+BorderSizeY=1
+#CornerSizeX=22
+#CornerSizeY=22
+DlgBorderSizeX=1
+DlgBorderSizeY=1
+
+MenuIconSize=22					# Menu
+SmallIconSize=18 				# Taskbar & Titlebar. Taskbar height = height of linux.xpm. Titlebar height = TitleBarHeight in *.theme
+LargeIconSize=32				# Quickswitch window
+HugeIconSize=48					# ?  Cannot identify what it applies to
+
+Gradients="taskbuttonactive.xpm taskbuttonminimized.xpm"
+
+ColorNormalBorder="#1F1F1F"
+ColorActiveBorder="#1F1F1F"
+
+ColorNormalTitleBar="#1F1F1F"
+ColorActiveTitleBar="#1F1F1F"
+ColorNormalTitleBarText="#787E8A"
+ColorActiveTitleBarText="#787E8A"
+
+ColorNormalMenu="#0A0A0A"
+ColorActiveMenuItem="#0A0A0A"
+ColorNormalMenuItemText="#8287A4"
+ColorActiveMenuItemText="#7A9FEF"
+ColorDisabledMenuItemText="#7a7a7a"
+
+ColorMoveSizeStatus="#1B1F26"
+ColorMoveSizeStatusText="#dfdbd2"
+
+PagerShowBorders=0				# Menu
+ColorDefaultTaskBar="#0A0A0A"
+ColorNormalTaskBarApp="#0A0A0A"
+ColorNormalTaskBarAppText="#787E8A"
+ColorActiveTaskBarApp="#0A0A0A"
+ColorActiveTaskBarAppText="#7091DA"
+ColorMinimizedTaskBarApp="#0A0A0A"
+ColorMinimizedTaskBarAppText="#DB5A67"
+#ColorNormalWorkspaceButton=" "
+#ColorNormalWorkspaceButtonText=" "
+ColorActiveWorkspaceButton="1E2030"
+ColorActiveWorkspaceButtonText="white"
+
+ColorNormalButton="#0A0A0A"
+ColorNormalButtonText="#808080"
+
+ColorListBox="#0A0A0A"
+ColorListBoxText="#808080"
+ColorListBoxSelection="#7BABEA"
+ColorListBoxSelectionText="white"
+
+#ColorScrollBar=" "
+#ColorScrollBarSlider=" "
+#ColorScrollBarButton=" "
+#ColorScrollBarButtonArrow=" "
+#ColorScrollBarInactiveArrow=" "
+
+# gray / blue
+ColorCPUStatusUser="#7FA7FB"
+ColorCPUStatusSystem="#7FA7FB"
+ColorCPUStatusNice="#7FA7FB"
+ColorCPUStatusIdle="#1B1F26"
+ColorMEMStatusFree="#1B1F26"
+ColorMEMStatusBuffers="#7FA7FB"
+ColorMEMStatusCached="#7FA7FB"
+ColorNetSend="#7FA7FB"
+ColorNetReceive="#7FA7FB"
+ColorNetIdle="#1B1F26"
+
+TaskBarClockLeds=0				# 0/1
+ColorClock="#0A0A0A"
+ColorClockText="#787E8A"
+
+ColorToolTip="#0A0A0A"
+ColorToolTipText="#7FA7FB"
+ColorLabel="#0A0A0A"
+ColorLabelText="#7FA7FB"
+ColorDialog="#0A0A0A"
+
+ColorQuickSwitch="#0A0A0A"
+ColorQuickSwitchActive="#1E2030"
+ColorQuickSwitchText="#7FA7FB"
+ColorQuickSwitchSelectionText="#7FA7FB"
+
+# Lighter
+#ColorInput="#dfdbd2"
+#ColorInputText="#0A0A0A"
+#ColorInputSelection="#7BABEA"
+#ColorInputSelectionText="white"
+
+# Darker
+#ColorInput="#baa89a"
+ColorInput="#1B1D2B"
+#ColorInput="#ffff80"
+ColorInputText="#7FA7FB"
+ColorInputSelection="#1A1B29"
+ColorInputSelectionText="#7FA7FB"
+
+# --------------------
+# Fonts, plase install novamono for powerline font
+# --------------------
+#TitleFontNameXft="ubuntu:size=11,sans-serif:size=11"
+TitleFontNameXft="NovaMono for Powerline:size=11,sans:size=11:bold"
+MenuFontNameXft="NovaMono for Powerline:size=11,sans:size=11"
+StatusFontNameXft="NovaMono for Powerline:size=11,sans:size=11"
+QuickSwitchFontNameXft="NovaMono for Powerline:size=11,sans:size=11"
+NormalButtonFontNameXft="NovaMono for Powerline:size=11,sans:size=11"
+ActiveButtonFontNameXft="NovaMono for Powerline:size=11,sans:size=11"
+NormalTaskBarFontNameXft="NovaMono for Powerline:size=11,sans:size=11"
+ActiveTaskBarFontNameXft="NovaMono for Powerline:size=11,sans:size=11"
+ToolButtonFontNameXft="NovaMono for Powerline:size=11,sans:size=11"
+NormalWorkspaceFontNameXft="NovaMono for Powerline:size=8,sans:size=8"
+ActiveWorkspaceFontNameXft="NovaMono for Powerline:size=8,sans:size=8:bold"
+MinimizedWindowFontNameXft="NovaMono for Powerline:size=8,sans:size=8"
+ListBoxFontNameXft="NovaMono for Powerline:size=11,sans:size=11"
+ToolTipFontNameXft="NovaMono for Powerline:size=11,sans:size=11"
+ClockFontNameXft="NovaMono for Powerline:size=10:bold"
+ApmFontNameXft="NovaMono for Powerline:size=10,sans:size=10:bold"
+InputFontNameXft="NovaMono for Powerline:size=10,sans:size=10"
+LabelFontNameXft="NovaMono for Powerline:size=10,sans:size=10"
+
+# --------------------
+# Desktop Background
+# --------------------
+DesktopBackgroundColor=""		# Prevent IceWM showing a background color
+DesktopBackgroundImage=""		# Prevent IceWM showing a background image
+DesktopBackgroundCenter=0		# 0/1
+DesktopBackgroundScaled=1		# 0/1
+DesktopBackgroundColor=""
+DesktopBackgroundImage="background.jpg"

@@ -170,7 +170,7 @@ static void ramfs_create_busybox_links(vfs_node_t *bin_dir, vfs_node_t *bbox_nod
         "ls", "cat", "cp", "mv", "rm", "mkdir", "rmdir", "touch",
         "clear", "echo", "grep", "head", "tail", "wc", "uname",
         "date", "df", "free", "ps", "kill", "sleep", "chmod", "chown",
-        "sh", NULL
+        NULL // "sh" removed so it points exclusively to GNU Bash
     };
 
     for (int i = 0; applets[i] != NULL; i++) {
@@ -240,6 +240,16 @@ static int __init ramfs_populate_modules_initcall(void) {
                     bsh->parent = bin_dir;
                     bsh->next = bin_dir->children;
                     bin_dir->children = bsh;
+
+                    // Also provide standard /bin/sh pointing to Bash
+                    vfs_node_t *sh_link = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                    if (sh_link) {
+                        memcpy(sh_link, entry, sizeof(vfs_node_t));
+                        strcpy(sh_link->name, "sh");
+                        sh_link->parent = bin_dir;
+                        sh_link->next = bin_dir->children;
+                        bin_dir->children = sh_link;
+                    }
                 }
             }
 

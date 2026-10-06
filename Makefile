@@ -80,6 +80,7 @@ ifeq ($(USE_POSIX),1)
     RMDIR = rm -rf "$1"
     RM    = rm -f "$1"
     CP    = cp "$1" "$2"
+    CP_R  = cp -rf "$1" "$2"
     DEV_NULL := > /dev/null 2>&1
     
     # ANSI Color Palette
@@ -100,6 +101,7 @@ else
     RMDIR   = if exist "$(call WINPATH,$1)" rmdir /s /q "$(call WINPATH,$1)"
     RM      = if exist "$(call WINPATH,$1)" del /q /f "$(call WINPATH,$1)"
     CP      = copy /Y "$(call WINPATH,$1)" "$(call WINPATH,$2)" >nul
+    CP_R    = xcopy /E /I /Q /Y "$(call WINPATH,$1)" "$(call WINPATH,$2)" >nul
     DEV_NULL := > NUL 2>&1
 
     CLR_RESET   :=
@@ -152,7 +154,8 @@ ALL_USERSPACE := build/iso/hello.elf \
 				 build/iso/icewm.elf \
 				 build/iso/preferences \
 				 build/iso/fonts.conf \
-                 build/iso/font.ttf
+                 build/iso/font.ttf \
+				 build/iso/menu
 
 # ==============================================================================
 # Master Targets
@@ -268,6 +271,10 @@ build/iso/preferences: res/preferences
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 
+build/iso/menu: res/menu
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+
 build/iso/fonts.conf: res/fonts.conf
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
@@ -319,6 +326,8 @@ build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf $(LIMINE_FILES
 	$(Q)$(call CP,$(LIMINE_DIR)/limine-bios-cd.bin,build/iso/boot/limine-bios-cd.bin)
 	$(Q)$(call CP,$(LIMINE_DIR)/limine-bios.sys,build/iso/boot/limine-bios.sys)
 	$(Q)$(call CP,$(LIMINE_DIR)/limine-uefi-cd.bin,build/iso/boot/limine-uefi-cd.bin)
+	@$(call MKDIR,build/iso/Icewm_MinimalDark)
+	$(Q)$(call CP_R,res/Icewm_MinimalDark,build/iso/Icewm_MinimalDark)
 	@echo FS0: > build/iso/startup.nsh
 	@echo \EFI\BOOT\BOOTX64.EFI >> build/iso/startup.nsh
 	$(Q)xorriso -as mkisofs \

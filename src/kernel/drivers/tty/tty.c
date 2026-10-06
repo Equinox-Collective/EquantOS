@@ -1,5 +1,6 @@
 // src/kernel/drivers/tty/tty.c - Mid-Line Editor & Full Arrow Navigation
 #include "tty.h"
+#include "../../../limine.h"
 #include "../../core/globalkeybinds.h"
 #include "../serial/serial.h"
 #include "../../../equterm/term.h"
@@ -36,15 +37,37 @@ static void tty_replay_log(tty_t *tty) {
     }
 }
 
+static int current_kd_mode = KD_TEXT;
+extern struct limine_framebuffer *kernel_fb;
+
+void tty_set_kd_mode(int mode) {
+    current_kd_mode = mode;
+
+    if (mode == KD_GRAPHICS) {
+        // Wipe console screen buffer completely on GUI entrance
+        term_clear_screen();
+        if (kernel_fb && kernel_fb->address) {
+            uint32_t *fb = (uint32_t *)kernel_fb->address;
+            size_t total_dwords = (kernel_fb->pitch / 4) * kernel_fb->height;
+            memset(fb, 0, total_dwords * sizeof(uint32_t));
+        }
+    }
+}
+
+int tty_get_kd_mode(void) {
+    return current_kd_mode;
+}
+extern bool devfs_is_gui_active(void);
+
 void tty_putchar(char c) {
     tty_t *tty = &ttys[current_tty_id];
 
     tty_log_append_char(tty, c);
     serial_putchar(COM1, c);
 
-    if (tty->active) {
+    // Do not draw console characters over active GUI framebuffer
+    if (tty->active && !devfs_is_gui_active()) {
         term_putchar_raw(c);
-        // Track screen position right after prompt
         tty->prompt_x = term_get_cursor_x();
         tty->prompt_y = term_get_cursor_y();
     }

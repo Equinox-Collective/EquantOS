@@ -7,17 +7,21 @@
 #include "../proc/sched.h"
 #include "../drivers/net/rtl8139.h"
 #include "../net/tcp.h"
+#include "../drivers/tty/tty.h"
 
 volatile uint32_t tick = 0;
+
+extern void devfs_fb_flush(void);
+extern int tty_get_kd_mode(void);
 
 void timer_callback(void) {
     tick++;
     sched_timer_tick(tick);
 
-    // Poll USB HID on every single tick for smooth cursor movement
+    // Poll USB HID on every tick for 250 Hz mouse responsiveness
     xhci_timer_tick();
 
-    // Network polling can stay interleaved
+    // Network polling
     if ((tick % 2) == 0) {
         rtl8139_poll();
         tcp_tick_with_iface(tick * 4);
