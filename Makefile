@@ -140,6 +140,7 @@ DEP_FILES   := $(ALL_OBJECTS:.o=.d)
 ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/musltest.elf \
                  build/iso/equantmemtest.elf \
+				 build/iso/threadtest.elf \
                  build/iso/busybox.elf \
                  build/iso/font.psf \
                  build/iso/.bashrc \

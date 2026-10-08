@@ -1073,44 +1073,101 @@ static int64_t sys_mremap_handler(uint64_t old_address, size_t old_size, size_t 
 // 4. Process Lifecycle, Multitasking & Architecture Setup
 // ============================================================================
 
-static int64_t sys_exit_handler(int code) {
-    if (current_task && current_task->process) {
-        current_task->process->exit_code = code;
-        current_task->process->exited = true;
+static int64_t sys_futex_handler(uint32_t *uaddr, int op, uint32_t val, 
+                                 const struct linux_timespec *timeout, 
+                                 uint32_t *uaddr2, uint32_t val3) {
+    (void)uaddr2; (void)val3;
+    if (!uaddr) return -EFAULT;
 
-        if (current_task->process->clear_child_tid) {
-            uint32_t *tid_ptr = (uint32_t *)current_task->process->clear_child_tid;
+    // Strip Linux flags: FUTEX_PRIVATE_FLAG (128) and FUTEX_CLOCK_REALTIME (256)
+    int cmd = op & ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+
+    // 1. FUTEX_WAIT / FUTEX_WAIT_BITSET
+    if (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET) {
+        // Atomic compare: if memory already changed, return immediately
+        if (*uaddr != val) {
+            return -EAGAIN;
+        }
+
+        current_task->futex_addr = (uint64_t)uaddr;
+
+        if (timeout) {
+            uint64_t wait_ticks = (timeout->tv_sec * 250) + (timeout->tv_nsec / 4000000ULL);
+            if (wait_ticks == 0) wait_ticks = 1;
+
+            sched_make_sleep(current_task, tick + wait_ticks);
+            sched_yield();
+
+            // If still pointing to futex address, sleep expired before wake
+            if (current_task->futex_addr != 0) {
+                current_task->futex_addr = 0;
+                return -ETIMEDOUT;
+            }
+        } else {
+            sched_block(current_task);
+            sched_yield();
+        }
+
+        current_task->futex_addr = 0;
+        return 0;
+    }
+
+    // 2. FUTEX_WAKE / FUTEX_WAKE_BITSET
+    if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET) {
+        int woken = 0;
+        extern task_t *task_list;
+        if (task_list) {
+            task_t *curr = task_list;
+            do {
+                if (curr->futex_addr == (uint64_t)uaddr) {
+                    curr->futex_addr = 0;
+                    if (curr->state == TASK_STATE_BLOCKED || curr->state == TASK_STATE_SLEEPING) {
+                        sched_unblock(curr);
+                    }
+                    woken++;
+                    if ((uint32_t)woken >= val) break;
+                }
+                curr = curr->next;
+            } while (curr && curr != task_list);
+        }
+        return woken;
+    }
+
+    return -ENOSYS;
+}
+
+static int64_t sys_exit_handler(int code) {
+    if (current_task) {
+        // POSIX Thread Termination Notification (CLONE_CHILD_CLEARTID)
+        if (current_task->clear_child_tid) {
+            uint32_t *tid_ptr = (uint32_t *)current_task->clear_child_tid;
             *tid_ptr = 0;
+            // Wake all threads blocked in pthread_join on this TID
+            sys_futex_handler(tid_ptr, FUTEX_WAKE, 1, NULL, NULL, 0);
+            current_task->clear_child_tid = 0;
+        }
+
+        if (current_task->process) {
+            current_task->process->exit_code = code;
+            current_task->process->exited = true;
+
+            // Wake up parent process if waiting in wait4
             extern task_t *task_list;
             if (task_list) {
                 task_t *curr = task_list;
                 do {
-                    if (curr->futex_addr == current_task->process->clear_child_tid) {
-                        curr->futex_addr = 0;
-                        sched_unblock(curr);
+                    if (curr->process && curr->process->pid == current_task->process->parent_pid) {
+                        if (curr->state == TASK_STATE_BLOCKED) {
+                            sched_unblock(curr);
+                        }
                     }
                     curr = curr->next;
                 } while (curr && curr != task_list);
             }
         }
 
-        // Wake up any parent process blocked in wait4
-        extern task_t *task_list;
-        if (task_list) {
-            task_t *curr = task_list;
-            do {
-                if (curr->process && curr->process->pid == current_task->process->parent_pid) {
-                    if (curr->state == TASK_STATE_BLOCKED) {
-                        sched_unblock(curr);
-                    }
-                }
-                curr = curr->next;
-            } while (curr && curr != task_list);
-        }
-
         current_task->state = TASK_STATE_ZOMBIE;
         current_task->running = false;
-        // sched_switch will automatically dequeue this task safely!
     }
 
     sched_yield();
@@ -1283,7 +1340,9 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
 
     if ((flags & CLONE_PARENT_SETTID) && parent_tid) *parent_tid = (int)child_task->id;
     if ((flags & CLONE_CHILD_SETTID) && child_tid) *child_tid = (int)child_task->id;
-    if (flags & CLONE_CHILD_CLEARTID) child_proc->clear_child_tid = (uint64_t)child_tid;
+    if (flags & CLONE_CHILD_CLEARTID) {
+        child_task->clear_child_tid = (uint64_t)child_tid;
+    }
 
     extern task_t *task_list;
     if (task_list) {
@@ -1452,40 +1511,6 @@ static int64_t sys_rt_sigprocmask_handler(int how, const uint64_t *set, uint64_t
     return 0;
 }
 
-static int64_t sys_futex_handler(uint32_t *uaddr, int op, uint32_t val, const struct linux_timespec *timeout, uint32_t *uaddr2, uint32_t val3) {
-    (void)timeout; (void)uaddr2; (void)val3;
-    if (!uaddr) return -EFAULT;
-    int cmd = op & 0x7F;
-
-    if (cmd == FUTEX_WAIT) {
-        if (*uaddr != val) {
-            return -EAGAIN;
-        }
-        current_task->futex_addr = (uint64_t)uaddr;
-        sched_block(current_task);
-        sched_yield();
-        current_task->futex_addr = 0;
-        return 0;
-    } else if (cmd == FUTEX_WAKE) {
-        int woken = 0;
-        extern task_t *task_list;
-        if (task_list) {
-            task_t *curr = task_list;
-            do {
-                if (curr->futex_addr == (uint64_t)uaddr) {
-                    curr->futex_addr = 0;
-                    sched_unblock(curr);
-                    woken++;
-                    if ((uint32_t)woken >= val) break;
-                }
-                curr = curr->next;
-            } while (curr && curr != task_list);
-        }
-        return woken;
-    }
-    return -ENOSYS;
-}
-
 // ============================================================================
 // 6. Time, Polling, and System Statistics
 // ============================================================================
@@ -1520,9 +1545,6 @@ static int64_t sys_nanosleep_handler(const struct linux_timespec *req, struct li
     }
     return 0;
 }
-
-#define POLLWRNORM 0x0100
-#define POLLRDNORM 0x0040
 
 static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
     int ready = 0;
@@ -2674,8 +2696,8 @@ void syscall_handler(void *regs_ptr) {
             ret = sys_getdents64_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
             break;
         case SYS_SET_TID_ADDRESS:
-            if (current_task && current_task->process) {
-                current_task->process->clear_child_tid = regs->rdi;
+            if (current_task) {
+                current_task->clear_child_tid = regs->rdi;
             }
             ret = current_task ? current_task->id : 1;
             break;

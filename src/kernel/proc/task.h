@@ -67,6 +67,7 @@ typedef struct process {
     uint64_t stime;
 } process_t;
 
+// In src/kernel/proc/task.h:
 typedef struct task {
     uint64_t rsp;               // offset 0 (ASM context switch)
     uint64_t kstack_at_bottom;  // offset 8
@@ -80,8 +81,9 @@ typedef struct task {
     uint64_t fs_base;
     uint64_t gs_base;
     
-    // Futex wait queue link
+    // Per-thread Futex and TID termination tracking (Required for pthread_join)
     uint64_t futex_addr;
+    uint64_t clear_child_tid;
     struct task *futex_next;
 
     // Dedicated Sleep queue link
