@@ -183,9 +183,8 @@ QEMU is the primary target. EquantOS has also booted on real x86_64 hardware.
 ## 🏗️ Architecture
 
 ```mermaid
-flowchart TB
+flowchart LR
     subgraph USER["Ring 3: userspace (static musl / Linux ABI)"]
-        direction LR
         BASH["GNU Bash + BusyBox"]
         X11["Xfbdev + IceWM / TWM"]
         TOOLS["epacmg · kdiag · installer"]
@@ -194,7 +193,6 @@ flowchart TB
     ABI{{"syscall / int 0x80: Linux x86_64 ABI, about 140 calls"}}
 
     subgraph KERNEL["Ring 0: EquantOS kernel"]
-        direction LR
         PROC["Processes<br/>ELF loader · scheduler · signals · futex"]
         MM["Memory<br/>buddy PMM · VMM · COW · slab"]
         FS["VFS<br/>page cache · ext2 · FAT32 · ISO9660 · devfs"]
@@ -203,7 +201,6 @@ flowchart TB
     end
 
     subgraph DRV["Drivers"]
-        direction LR
         D1["NVMe · ATA"]
         D2["xHCI · USB HID · PS/2"]
         D3["Framebuffer · TTY · serial"]
