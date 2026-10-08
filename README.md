@@ -214,14 +214,12 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A["Limine<br/>BIOS / UEFI"] --> B["_start<br/>serial · FPU · GDT · IDT"]
-    B --> C["PMM · VMM · heap"]
-    C --> D["Local APIC<br/>+ timer"]
-    D --> E["initcalls<br/>core → arch → subsys → fs → device"]
-    E --> F["Mount live CD at /cdrom<br/>populate /bin"]
+    A["Limine<br/>BIOS / UEFI"] --> B["_start<br/>GDT · IDT · FPU<br/>PMM · VMM · heap<br/>Local APIC timer"]
+    B --> E["initcalls<br/>core → arch → subsys<br/>→ fs → device"]
+    E --> F["Live CD at /cdrom<br/>populate /bin"]
     F --> G["/bin/bash -i"]
     G -.->|"bash /bin/start.sh"| H["Xfbdev + IceWM"]
-    F -.->|"no shell found"| R["Kernel rescue shell"]
+    F -.->|"no shell found"| R["Rescue shell"]
 ```
 
 ---
