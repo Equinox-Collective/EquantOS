@@ -174,27 +174,57 @@ static void term_advance_line(void) {
     term_draw_cursor(true);
 }
 
+// Foreground keeps the bright look EquantOS always used for 30-37; 90-97 map to the same set
+static const uint32_t ansi_fg_palette[8] = {
+    0x00555555, 0x00FF5555, 0x0055FF55, 0x00FFFF55, 0x005555FF, 0x00FF55FF, 0x0055FFFF, 0x00FFFFFF,
+};
+// Background: VGA palette for 40-47, bright variants for 100-107
+static const uint32_t ansi_bg_palette[8] = {
+    0x00000000, 0x00AA0000, 0x0000AA00, 0x00AA5500, 0x000000AA, 0x00AA00AA, 0x0000AAAA, 0x00AAAAAA,
+};
+static const uint32_t default_bg_color = 0x00000000;
+
+static void apply_sgr_param(int p) {
+    if (p == 0) {
+        term_fg_color = default_fg_color;
+        term_bg_color = default_bg_color;
+    } else if (p == 37 || p == 39) {
+        term_fg_color = default_fg_color;
+    } else if (p >= 30 && p <= 36) {
+        term_fg_color = ansi_fg_palette[p - 30];
+    } else if (p >= 90 && p <= 97) {
+        term_fg_color = ansi_fg_palette[p - 90];
+    } else if (p == 49) {
+        term_bg_color = default_bg_color;
+    } else if (p >= 40 && p <= 47) {
+        term_bg_color = ansi_bg_palette[p - 40];
+    } else if (p >= 100 && p <= 107) {
+        term_bg_color = ansi_fg_palette[p - 100];
+    }
+    // Other attributes (bold, blink, underline...) are not rendered
+}
+
+// SGR parameters: "[1;36", "[0", or "[" (empty means reset), separated by ';'
 static void parse_ansi_color(const char *code) {
     if (!code) return;
-    
-    // Skip leading '[' character if present in escape buffer (e.g. "[31" -> "31")
-    if (code[0] == '[') {
-        code++;
-    }
+    if (code[0] == '[') code++;
 
-    if (strcmp(code, "0") == 0 || strcmp(code, "37") == 0) {
-        term_fg_color = default_fg_color;
-    } else if (strcmp(code, "31") == 0) {
-        term_fg_color = 0x00FF5555; // Red
-    } else if (strcmp(code, "32") == 0) {
-        term_fg_color = 0x0055FF55; // Green
-    } else if (strcmp(code, "33") == 0) {
-        term_fg_color = 0x00FFFF55; // Yellow
-    } else if (strcmp(code, "34") == 0) {
-        term_fg_color = 0x005555FF; // Blue
-    } else if (strcmp(code, "36") == 0) {
-        term_fg_color = 0x0055FFFF; // Cyan
-    }
+    int skip = 0; // remaining arguments of an extended 38/48 color, which are not rendered
+    do {
+        int p = 0;
+        while (*code >= '0' && *code <= '9') {
+            p = p * 10 + (*code++ - '0');
+        }
+        if (skip == -1) {
+            skip = (p == 5) ? 1 : (p == 2) ? 3 : 0; // 38;5;N or 38;2;R;G;B
+        } else if (skip > 0) {
+            skip--;
+        } else if (p == 38 || p == 48) {
+            skip = -1;
+        } else {
+            apply_sgr_param(p);
+        }
+    } while (*code++ == ';');
 }
 
 static void term_clear_to_eol(void) {
