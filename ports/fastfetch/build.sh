@@ -19,7 +19,7 @@ BUILD_DIR="$ROOT/build/ports/fastfetch-build"
 
 for f in crt1.o crti.o crtn.o; do
     if [ ! -f "$ROOT/sdk/sysroot/lib/$f" ]; then
-        echo "error: sdk/sysroot/lib/$f is missing (see README, 'NOTE!' section)" >&2
+        echo "error: sdk/sysroot/lib/$f is missing (see README, 'Quick start' section)" >&2
         exit 1
     fi
 done
