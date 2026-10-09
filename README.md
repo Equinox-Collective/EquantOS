@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="DOCS/branding/logo-text-white.svg">
-    <img src="DOCS/branding/logo-text.svg" alt="EquantOS" width="560">
+    <source media="(prefers-color-scheme: dark)" srcset="DOCS/branding/logo-text-white.png">
+    <img src="DOCS/branding/logo-text.png" alt="EquantOS" width="560">
   </picture>
 </p>
 
@@ -386,5 +386,5 @@ GNU Bash, BusyBox, X.Org, IceWM and the fonts in `res/`.
 <br>
 
 <p align="center">
-  <img src="DOCS/branding/logo.svg" alt="EquantOS logo" width="96">
+  <img src="DOCS/branding/logo.png" alt="EquantOS logo" width="96">
 </p>
