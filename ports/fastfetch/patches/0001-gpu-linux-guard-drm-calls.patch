@@ -1,0 +1,52 @@
+diff --git a/src/detection/gpu/gpu_linux.c b/src/detection/gpu/gpu_linux.c
+index d812e08..b5029fc 100644
+--- a/src/detection/gpu/gpu_linux.c
++++ b/src/detection/gpu/gpu_linux.c
+@@ -76,11 +76,16 @@ static const char* drmDetectAmdSpecific(const FFGPUOptions* options, FFGPUResult
+     if (error) {
+         return error;
+     }
++#if FF_HAVE_DRM || __has_include(<drm/drm.h>)
+     if (ffStrbufEqualS(&gpu->driver, "radeon")) {
+         return ffDrmDetectRadeon(options, gpu, buffer->chars);
+     } else {
+         return ffDrmDetectAmdgpu(options, gpu, buffer->chars);
+     }
++#else
++    FF_UNUSED(options, gpu);
++    return "DRM support is not available";
++#endif
+ }
+ 
+ static void pciDetectAmdSpecific(const FFGPUOptions* options, FFGPUResult* gpu, FFstrbuf* pciDir, FFstrbuf* buffer) {
+@@ -217,12 +222,17 @@ static const char* drmDetectIntelSpecific(FFGPUResult* gpu, const char* drmKey,
+         return "Failed to open drm device";
+     }
+ 
++#if FF_HAVE_DRM || __has_include(<drm/drm.h>)
+     if (ffStrbufEqualS(&gpu->driver, "xe")) {
+         return ffDrmDetectXe(gpu, fd);
+     } else if (ffStrbufEqualS(&gpu->driver, "i915")) {
+         return ffDrmDetectI915(gpu, fd);
+     }
+     return "Unknown Intel GPU driver";
++#else
++    FF_UNUSED(gpu);
++    return "DRM support is not available";
++#endif
+ }
+ 
+ static const char* pciDetectTempGeneral(const FFGPUOptions* options, FFGPUResult* gpu, FFstrbuf* pciDir, FFstrbuf* buffer) {
+@@ -260,7 +270,12 @@ static const char* drmDetectNouveauSpecific(FFGPUResult* gpu, const char* drmKey
+         return "Failed to open drm device";
+     }
+ 
++#if FF_HAVE_DRM || __has_include(<drm/drm.h>)
+     return ffDrmDetectNouveau(gpu, fd);
++#else
++    FF_UNUSED(gpu);
++    return "DRM support is not available";
++#endif
+ }
+ 
+ static const char* pciDetectZxSpecific(const FFGPUOptions* options, FFGPUResult* gpu, FFstrbuf* pciDir, FFstrbuf* buffer) {
