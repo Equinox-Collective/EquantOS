@@ -1,0 +1,41 @@
+diff --git a/src/logo/ascii/e.inc b/src/logo/ascii/e.inc
+index 11e3672..42332e3 100644
+--- a/src/logo/ascii/e.inc
++++ b/src/logo/ascii/e.inc
+@@ -141,6 +141,18 @@ static const FFlogo E[] = {
+         .colorTitle = FF_COLOR_FG_DEFAULT,
+     },
+     #endif
++    #ifdef FASTFETCH_DATATEXT_LOGO_EQUANTOS
++    // EquantOS
++    {
++        .names = { "EquantOS" },
++        .lines = FASTFETCH_DATATEXT_LOGO_EQUANTOS,
++        .colors = {
++            FF_COLOR_FG_CYAN,
++        },
++        .colorKeys = FF_COLOR_FG_CYAN,
++        .colorTitle = FF_COLOR_FG_LIGHT_CYAN,
++    },
++    #endif
+     #ifdef FASTFETCH_DATATEXT_LOGO_ESHANIZEDOS
+     // EshanizedOS
+     {
+diff --git a/src/logo/ascii/e/equantos.txt b/src/logo/ascii/e/equantos.txt
+new file mode 100644
+index 0000000..d39b775
+--- /dev/null
++++ b/src/logo/ascii/e/equantos.txt
+@@ -0,0 +1,12 @@
++$1           _/_/_/_/_/_/_/_/_/
++          _/_/_/_/_/_/_/_/_/
++         _/_/
++        _/_/
++       _/_/
++      _/_/_/_/_/_/_/_/
++     _/_/_/_/_/_/_/_/
++    _/_/
++   _/_/
++  _/_/
++ _/_/_/_/_/_/_/_/_/
++_/_/_/_/_/_/_/_/_/
