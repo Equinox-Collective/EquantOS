@@ -137,6 +137,23 @@ static vfs_file_operations_t pipe_write_ops = {
     .mmap = NULL
 };
 
+bool pipe_poll_state(vfs_node_t *node, bool *readable, bool *writable, bool *hangup, bool *error) {
+    if (!node || !node->ptr) return false;
+    pipe_t *p = (pipe_t *)node->ptr;
+
+    *readable = *writable = *hangup = *error = false;
+    if (node->ops == &pipe_read_ops) {
+        *readable = p->count > 0;
+        *hangup = p->write_closed;
+    } else if (node->ops == &pipe_write_ops) {
+        *writable = p->count < PIPE_BUF_SIZE;
+        *error = p->read_closed;
+    } else {
+        return false;
+    }
+    return true;
+}
+
 int pipe_create(int pipefd[2]) {
     if (!pipefd || !current_task || !current_task->process) return -EINVAL;
 

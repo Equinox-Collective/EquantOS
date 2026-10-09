@@ -24,6 +24,9 @@ typedef struct pipe {
 } pipe_t;
 
 int pipe_create(int pipefd[2]);
+
+// poll() readiness of a pipe end; returns false if node is not a pipe
+bool pipe_poll_state(vfs_node_t *node, bool *readable, bool *writable, bool *hangup, bool *error);
 void pipe_close_read(pipe_t *p);
 void pipe_close_write(pipe_t *p);
 

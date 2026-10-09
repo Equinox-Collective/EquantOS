@@ -32,6 +32,8 @@
 #include "../drivers/net/rtl8139.h"
 #include <stdarg.h>
 #include "../misc/rtc.h"
+#include "../equant_version.h"
+#include "../fs/procfs.h"
 #include "../misc/random.h"
 
 // ============================================================================
