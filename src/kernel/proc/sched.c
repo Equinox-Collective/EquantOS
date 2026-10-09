@@ -130,6 +130,67 @@ void sched_make_sleep(task_t *task, uint64_t sleep_until) {
     curr->sleep_next = task;
 }
 
+void sched_wake(task_t *task) {
+    if (!task || task->state != TASK_STATE_SLEEPING) return;
+
+    task_t **link = &sleep_queue_head;
+    while (*link && *link != task) link = &(*link)->sleep_next;
+    if (*link) *link = task->sleep_next;
+    task->sleep_next = NULL;
+    task->sleep_until = 0;
+    sched_enqueue(task);
+}
+
+#define MAX_IO_WAITERS 64
+static task_t *io_waiters[MAX_IO_WAITERS];
+static int io_waiter_count = 0;
+
+void sched_forget(task_t *task) {
+    if (!task) return;
+    sched_dequeue(task);
+
+    task_t **link = &sleep_queue_head;
+    while (*link) {
+        if (*link == task) {
+            *link = task->sleep_next;
+            break;
+        }
+        link = &(*link)->sleep_next;
+    }
+    task->sleep_next = NULL;
+
+    for (int i = 0; i < io_waiter_count; i++) {
+        if (io_waiters[i] == task) {
+            io_waiters[i] = io_waiters[--io_waiter_count];
+            break;
+        }
+    }
+}
+
+void io_wait_prepare(void) {
+    if (!current_task) return;
+    for (int i = 0; i < io_waiter_count; i++) {
+        if (io_waiters[i] == current_task) return;
+    }
+    if (io_waiter_count < MAX_IO_WAITERS) io_waiters[io_waiter_count++] = current_task;
+}
+
+void io_wait_done(void) {
+    for (int i = 0; i < io_waiter_count; i++) {
+        if (io_waiters[i] == current_task) {
+            io_waiters[i] = io_waiters[--io_waiter_count];
+            return;
+        }
+    }
+}
+
+void io_wake_all(void) {
+    for (int i = 0; i < io_waiter_count; i++) {
+        sched_wake(io_waiters[i]);
+    }
+    io_waiter_count = 0;
+}
+
 void sched_timer_tick(uint32_t current_tick) {
     while (sleep_queue_head && current_tick >= sleep_queue_head->sleep_until) {
         task_t *task = sleep_queue_head;

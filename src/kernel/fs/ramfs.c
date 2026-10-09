@@ -207,6 +207,16 @@ static void ramfs_create_system_info(vfs_node_t *etc_dir, vfs_node_t *sys_dir) {
         ramfs_create_file(etc_dir, "os-release", (void *)os_release, sizeof(os_release) - 1);
     }
 
+    // Name resolution for musl's getaddrinfo(): QEMU user networking DNS forwarder
+    if (etc_dir && !vfs_finddir(etc_dir, "resolv.conf")) {
+        static const char resolv_conf[] = "nameserver 10.0.2.3\n";
+        ramfs_create_file(etc_dir, "resolv.conf", (void *)resolv_conf, sizeof(resolv_conf) - 1);
+    }
+    if (etc_dir && !vfs_finddir(etc_dir, "hosts")) {
+        static const char hosts[] = "127.0.0.1 localhost\n10.0.2.15 equantos\n";
+        ramfs_create_file(etc_dir, "hosts", (void *)hosts, sizeof(hosts) - 1);
+    }
+
     // Linux DRM sysfs layout for the boot framebuffer (/sys/class/drm/card0-Virtual-1)
     extern struct limine_framebuffer *kernel_fb;
     static const char *const drm_path[] = { "class", "drm", "card0-Virtual-1", NULL };
@@ -310,6 +320,24 @@ static int __init ramfs_populate_modules_initcall(void) {
                         bnode->next = bin_dir->children;
                         bin_dir->children = bnode;
                         if (strstr(entry->name, "busybox")) bbox_node = bnode;
+                    }
+                }
+                // "foo.elf" is also reachable as plain "foo": programs that exec
+                // themselves or their helpers by name (icewm -> icewmbg) find them in PATH
+                size_t nlen = strlen(entry->name);
+                if (bin_dir && nlen > 4 && strcmp(entry->name + nlen - 4, ".elf") == 0) {
+                    char stem[sizeof(entry->name)];
+                    memcpy(stem, entry->name, nlen - 4);
+                    stem[nlen - 4] = '\0';
+                    if (!vfs_finddir(bin_dir, stem)) {
+                        vfs_node_t *alias = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                        if (alias) {
+                            memcpy(alias, entry, sizeof(vfs_node_t));
+                            strcpy(alias->name, stem);
+                            alias->parent = bin_dir;
+                            alias->next = bin_dir->children;
+                            bin_dir->children = alias;
+                        }
                     }
                 }
                 if (sys_bin_dir && !vfs_finddir(sys_bin_dir, entry->name)) {

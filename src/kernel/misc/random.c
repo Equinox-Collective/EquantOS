@@ -8,6 +8,13 @@
 static bool has_rdrand = false;
 static uint64_t prng_state = 0x853c49e6748fea9bULL;
 
+// "=A" means EDX:EAX only in 32-bit mode; on x86-64 rdtsc silently clobbered RDX
+static inline uint64_t read_tsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
 static inline bool cpu_has_rdrand(void) {
     uint32_t eax, ebx, ecx, edx;
     __asm__ volatile("cpuid"
@@ -18,8 +25,7 @@ static inline bool cpu_has_rdrand(void) {
 
 void random_init(void) {
     has_rdrand = cpu_has_rdrand();
-    uint64_t tsc;
-    __asm__ volatile("rdtsc" : "=A"(tsc));
+    uint64_t tsc = read_tsc();
     prng_state ^= tsc ^ rtc_get_unix_timestamp();
 
     if (has_rdrand) {
@@ -40,8 +46,7 @@ uint64_t random_get_u64(void) {
     }
 
     // SplitMix64 / XorShift64 Fallback with jitter mixing
-    uint64_t tsc;
-    __asm__ volatile("rdtsc" : "=A"(tsc));
+    uint64_t tsc = read_tsc();
     prng_state += 0x9E3779B97F4A7C15ULL + tsc + tick;
     uint64_t z = prng_state;
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;

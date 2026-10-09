@@ -35,6 +35,7 @@
 #include "../equant_version.h"
 #include "../fs/procfs.h"
 #include "../misc/random.h"
+#include "../ipc/eventfd.h"
 
 // ============================================================================
 // 1. Linux Standard Error Codes (Negative Return Values)
@@ -233,6 +234,14 @@
 #define SYS_PSELECT6           270
 #define SYS_PPOLL              271
 #define SYS_SET_ROBUST_LIST    273
+#define SYS_EVENTFD          284
+#define SYS_EVENTFD2         290
+#define SYS_GETRANDOM        318
+#define SYS_STATFS           137
+#define SYS_FSTATFS          138
+#define SYS_FACCESSAT2       439
+#define SYS_GETPRIORITY      140
+#define SYS_SETPRIORITY      141
 #define SYS_ACCEPT4            288
 #define SYS_DUP3               292
 #define SYS_PIPE2              293
@@ -551,6 +560,8 @@ struct linux_sockaddr_in {
 };
 
 void init_syscalls(void);
+// Terminate the current process as exit(code) would (used for fatal faults)
+void process_exit_current(int code);
 void syscall_handler(void *regs_ptr);
 void linux_syscall_handler(void *regs_ptr);
 

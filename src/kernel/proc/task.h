@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define MAX_OPEN_FILES 32
+#define MAX_OPEN_FILES 128
 #define NUM_PRIORITIES 32
 #define NSIG           64
 

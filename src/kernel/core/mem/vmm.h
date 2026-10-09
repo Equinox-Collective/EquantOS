@@ -42,6 +42,8 @@ void vmm_unmap(page_table_t *pml4, uint64_t virt);
 page_table_t *vmm_create_address_space(void);
 page_table_t *vmm_clone_address_space(uint64_t parent_cr3_phys);
 uint64_t vmm_get_phys(page_table_t *pml4, uint64_t virt);
+// Change access rights of one mapped 4 KB page (mprotect); false if unmapped
+bool vmm_protect(page_table_t *pml4, uint64_t virt, bool user, bool writable);
 void vmm_destroy_address_space(uint64_t cr3_phys);
 void vmm_page_fault_handler(cpu_state_t *state);
 
