@@ -3095,12 +3095,14 @@ void syscall_handler(void *regs_ptr) {
             for (int attempt = 0; attempt < 3 && resolved == 0; attempt++) {
                 dns_query(iface, hostname, 0x0A000203);
 
+                // Sleep between checks: a bare sched_yield() keeps interrupts off,
+                // so the tick never advances and a late reply hangs the system
                 uint32_t start_t = tick;
-                while (tick - start_t < 100) { // 1 second per attempt
+                while (tick - start_t < TIMER_HZ) { // 1 second per attempt
                     rtl8139_poll();
                     resolved = dns_get_result(hostname);
                     if (resolved != 0) break;
-                    __asm__ volatile("pause");
+                    sched_make_sleep(current_task, tick + 1);
                     sched_yield();
                 }
             }
