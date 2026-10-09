@@ -1,67 +1,54 @@
-# Title bar fonts
-TitleFontName="fixed"
-TitleFontNameXft="JetBrainsMono Nerd Font,monospace:size=10:bold"
+# EquantOS IceWM defaults (copied to /etc/icewm and $ICEWM_PRIVCFG by start.sh).
+# A theme loaded later overrides colours, images and fonts set here, so these
+# fonts only fill in what a theme leaves out.
 
-# Menu fonts
-MenuFontName="fixed"
-MenuFontNameXft="JetBrainsMono Nerd Font,monospace:size=10"
-
-# Status and tooltips
-StatusFontName="fixed"
-StatusFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
-QuickSwitchFontName="fixed"
-QuickSwitchFontNameXft="JetBrainsMono Nerd Font,monospace:size=10:bold"
-
-# Dialog and taskbar buttons
-NormalButtonFontName="fixed"
-NormalButtonFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
-ActiveButtonFontName="fixed"
-ActiveButtonFontNameXft="JetBrainsMono Nerd Font,monospace:size=9:bold"
-ToolButtonFontName="fixed"
-ToolButtonFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
+# Fonts: the bundled JetBrains Mono Nerd Font ("JetBrainsMono NF" in fontconfig)
+TitleFontNameXft="JetBrainsMono NF,monospace:size=10:bold"
+MenuFontNameXft="JetBrainsMono NF,monospace:size=10"
+StatusFontNameXft="JetBrainsMono NF,monospace:size=9"
+QuickSwitchFontNameXft="JetBrainsMono NF,monospace:size=10:bold"
+NormalButtonFontNameXft="JetBrainsMono NF,monospace:size=9"
+ActiveButtonFontNameXft="JetBrainsMono NF,monospace:size=9:bold"
+ToolButtonFontNameXft="JetBrainsMono NF,monospace:size=9"
+NormalTaskBarFontNameXft="JetBrainsMono NF,monospace:size=9"
+ActiveTaskBarFontNameXft="JetBrainsMono NF,monospace:size=9:bold"
+NormalWorkspaceFontNameXft="JetBrainsMono NF,monospace:size=9"
+ActiveWorkspaceFontNameXft="JetBrainsMono NF,monospace:size=9:bold"
+MinimizedWindowFontNameXft="JetBrainsMono NF,monospace:size=9"
+ListBoxFontNameXft="JetBrainsMono NF,monospace:size=10"
+ToolTipFontNameXft="JetBrainsMono NF,monospace:size=9"
+ClockFontNameXft="JetBrainsMono NF,monospace:size=9:bold"
+ApmFontNameXft="JetBrainsMono NF,monospace:size=9"
+InputFontNameXft="JetBrainsMono NF,monospace:size=10"
+LabelFontNameXft="JetBrainsMono NF,monospace:size=10"
 
 # Taskbar and workspaces
 TaskBarShowStartMenu=1
-TaskBarShowWindowListMenu=0
+TaskBarShowWindowListMenu=1
 TaskBarShowWorkspaces=1
 TaskBarShowWindows=1
 TaskBarShowClock=1
+TaskBarShowShowDesktopButton=1
+TimeFormat="%H:%M"
+WorkspaceNames=" 1 ", " 2 ", " 3 ", " 4 "
 
-NormalTaskBarFontName="fixed"
-NormalTaskBarFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
-ActiveTaskBarFontName="fixed"
-ActiveTaskBarFontNameXft="JetBrainsMono Nerd Font,monospace:size=9:bold"
-NormalWorkspaceFontName="fixed"
-NormalWorkspaceFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
-ActiveWorkspaceFontName="fixed"
-ActiveWorkspaceFontNameXft="JetBrainsMono Nerd Font,monospace:size=9:bold"
+# Themes menu lists every theme under /usr/share/icewm/themes
+ShowThemesMenu=1
+ShowSettingsMenu=1
 
-# Window lists and clocks
-MinimizedWindowFontName="fixed"
-MinimizedWindowFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
-ClockFontName="fixed"
-ClockFontNameXft="JetBrainsMono Nerd Font,monospace:size=9:bold"
-ApmFontName="fixed"
-ApmFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
-
-# Input fields and labels
-InputFontName="fixed"
-InputFontNameXft="JetBrainsMono Nerd Font,monospace:size=10"
-LabelFontName="fixed"
-LabelFontNameXft="JetBrainsMono Nerd Font,monospace:size=10"
-
-# Disable hardware monitors requiring /proc
+# Status monitors: memory reads /proc/meminfo; CPU, network, APM and mail have
+# no kernel data source yet
+TaskBarShowMEMStatus=1
+TaskBarShowCPUStatus=0
+TaskBarShowNetStatus=0
 TaskBarShowAPMStatus=0
 TaskBarShowMailBoxStatus=0
-TaskBarShowCPUStatus=0
-TaskBarShowMEMStatus=0
-TaskBarShowNetStatus=0
-NetworkStatusShow=0
-CPUStatusShow=0
-MEMStatusShow=0
-MailBoxStatusShow=0
-APMStatusShow=0
 
-# Desktop Window Behavior
+# Window behaviour
+ClickToFocus=1
+RaiseOnFocus=1
+FocusOnAppRaise=1
 OpaqueMove=1
 OpaqueResize=1
+QuickSwitch=1
+QuickSwitchToAllWorkspaces=0

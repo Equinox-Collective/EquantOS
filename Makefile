@@ -80,7 +80,8 @@ ifeq ($(USE_POSIX),1)
     RMDIR = rm -rf "$1"
     RM    = rm -f "$1"
     CP    = cp "$1" "$2"
-    CP_R  = cp -rf "$1" "$2"
+    # Copy the contents of directory $1 into directory $2 (same as xcopy /E /I below)
+    CP_R  = cp -rf "$1/." "$2"
     DEV_NULL := > /dev/null 2>&1
     
     # ANSI Color Palette
@@ -153,7 +154,10 @@ ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/system.twmrc \
 				 build/iso/epacmg.elf \
 				 build/iso/icewm.elf \
+				 build/iso/icewmbg.elf \
+				 build/iso/icesh.elf \
 				 build/iso/preferences \
+				 build/iso/toolbar \
 				 build/iso/fonts.conf \
                  build/iso/font.ttf \
 				 build/iso/menu \
@@ -269,10 +273,25 @@ build/iso/icewm.elf: res/icewm.elf
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/icewm.elf,$@)
 
+build/iso/icewmbg.elf: res/icewmbg.elf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/icewmbg.elf,$@)
+
+build/iso/icesh.elf: res/icesh.elf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/icesh.elf,$@)
+
 build/iso/preferences: res/preferences
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/preferences,$@)
+
+build/iso/toolbar: res/toolbar
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/toolbar,$@)
 
 build/iso/menu: res/menu
 	@$(call MKDIR,build/iso)
@@ -332,8 +351,15 @@ build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd
 	$(Q)$(call CP,limine-bios-cd.bin,build/iso/boot/limine-bios-cd.bin)
 	$(Q)$(call CP,limine-bios.sys,build/iso/boot/limine-bios.sys)
 	$(Q)$(call CP,limine-uefi-cd.bin,build/iso/boot/limine-uefi-cd.bin)
+	@$(call RMDIR,build/iso/Icewm_MinimalDark)
 	@$(call MKDIR,build/iso/Icewm_MinimalDark)
 	$(Q)$(call CP_R,res/Icewm_MinimalDark,build/iso/Icewm_MinimalDark)
+	@$(call RMDIR,build/iso/icewm-themes)
+	@$(call MKDIR,build/iso/icewm-themes)
+	$(Q)$(call CP_R,res/icewm-themes,build/iso/icewm-themes)
+	@$(call RMDIR,build/iso/X11-locale)
+	@$(call MKDIR,build/iso/X11-locale)
+	$(Q)$(call CP_R,res/X11-locale,build/iso/X11-locale)
 	@echo FS0: > build/iso/startup.nsh
 	@echo \EFI\BOOT\BOOTX64.EFI >> build/iso/startup.nsh
 	$(Q)xorriso -as mkisofs \

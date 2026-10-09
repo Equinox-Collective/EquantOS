@@ -1,0 +1,2 @@
+prog "NetSurf" web-browser /usr/bin/netsurf-x
+prog "XEyes" - /bin/xeyes.elf

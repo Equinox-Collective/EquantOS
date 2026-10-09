@@ -16,7 +16,7 @@
 /.vscode/
 *.pcap
 
-/res/
+/res/*
 !/res/**
 
 /sdk/
