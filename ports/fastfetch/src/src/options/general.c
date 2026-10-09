@@ -1,0 +1,163 @@
+#include "fastfetch.h"
+#include "common/jsonconfig.h"
+#include "common/processing.h"
+#include "common/strutil.h"
+#include "common/lua.h"
+#include "options/general.h"
+
+#include <unistd.h>
+
+const char* ffOptionsParseGeneralJsonConfig(FFOptionsGeneral* options, yyjson_val* root, yyjson_val** pkey) {
+    yyjson_val* object = yyjson_obj_get(root, "general");
+    if (!object) {
+        return nullptr;
+    }
+    if (!yyjson_is_obj(object)) {
+        return "Property 'general' must be an object";
+    }
+
+    yyjson_val *key, *val;
+    size_t idx, max;
+    yyjson_obj_foreach (object, idx, max, key, val) {
+        *pkey = key;
+        if (unsafe_yyjson_equals_str(key, "thread")) {
+            options->multithreading = yyjson_get_bool(val);
+        } else if (unsafe_yyjson_equals_str(key, "processingTimeout")) {
+            options->processingTimeout = (int32_t) yyjson_get_int(val);
+        } else if (unsafe_yyjson_equals_str(key, "preRun")) {
+            return "general.preRun is removed due to security concerns.";
+        } else if (unsafe_yyjson_equals_str(key, "detectVersion")) {
+            options->detectVersion = yyjson_get_bool(val);
+        } else if (unsafe_yyjson_equals_str(key, "playerName")) {
+            ffStrbufSetJsonVal(&options->playerName, val);
+        } else if (unsafe_yyjson_equals_str(key, "preload")) {
+            if (!yyjson_is_obj(val)) {
+                return "Property 'general.preload' must be an object";
+            }
+
+            yyjson_val* script = yyjson_obj_get(val, "lua");
+            if (script) {
+                if (!yyjson_is_str(script)) {
+                    return "Property 'general.preload.lua' must be a string";
+                }
+
+#if FF_HAVE_LUA
+                const char* error = ffLuaLoadState();
+                if (error) {
+                    return error;
+                }
+
+                lua_State* L = luaData.L;
+                lua_settop(L, 0);
+                if (luaL_loadbuffer(L, unsafe_yyjson_get_str(script), unsafe_yyjson_get_len(script), "@general.preload.lua") != LUA_OK ||
+                    lua_pcall(L, 0, 0, 0) != LUA_OK) {
+                    // The position Lua puts in front of a message is kept here: this is printed once, so naming the
+                    // line of the preload script that raised it is useful. `lua_tolstring` only converts strings and
+                    // numbers, so an error value of any other type leaves nothing to report.
+                    return lua_tolstring(L, -1, nullptr) ?: "the script raised an error that is not a string";
+                }
+                lua_settop(L, 0);
+
+#else
+                return "Property 'general.preload.lua' requires a build with Lua support";
+#endif
+            }
+        }
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__sun) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__HAIKU__) || defined(__GNU__)
+        else if (unsafe_yyjson_equals_str(key, "dsForceDrm")) {
+            if (yyjson_is_str(val)) {
+                int value;
+                const char* error = ffJsonConfigParseEnum(val, &value, (FFKeyValuePair[]) {
+                                                                           { "sysfs-only", FF_DS_FORCE_DRM_TYPE_SYSFS_ONLY },
+                                                                           { "false", FF_DS_FORCE_DRM_TYPE_FALSE },
+                                                                           { "true", FF_DS_FORCE_DRM_TYPE_TRUE },
+                                                                           {},
+                                                                       });
+                if (error) {
+                    return "Invalid enum value of `dsForceDrm`";
+                } else {
+                    options->dsForceDrm = (FFDsForceDrmType) value;
+                }
+            } else {
+                options->dsForceDrm = yyjson_get_bool(val) ? FF_DS_FORCE_DRM_TYPE_TRUE : FF_DS_FORCE_DRM_TYPE_FALSE;
+            }
+        }
+#endif
+        else {
+            return "Unknown general property";
+        }
+    }
+
+    return nullptr;
+}
+
+bool ffOptionsParseGeneralCommandLine(FFOptionsGeneral* options, const char* key, const char* value) {
+    if (ffStrEqualsIgnCase(key, "--thread") || ffStrEqualsIgnCase(key, "--multithreading")) {
+        options->multithreading = ffOptionParseBoolean(value);
+    } else if (ffStrEqualsIgnCase(key, "--processing-timeout")) {
+        options->processingTimeout = ffOptionParseInt32(key, value);
+    } else if (ffStrEqualsIgnCase(key, "--detect-version")) {
+        options->detectVersion = ffOptionParseBoolean(value);
+    } else if (ffStrEqualsIgnCase(key, "--player-name")) {
+        ffOptionParseString(key, value, &options->playerName);
+    }
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__sun) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__HAIKU__) || defined(__GNU__)
+    else if (ffStrEqualsIgnCase(key, "--ds-force-drm")) {
+        if (ffOptionParseBoolean(value)) {
+            options->dsForceDrm = FF_DS_FORCE_DRM_TYPE_TRUE;
+        } else if (ffStrEqualsIgnCase(value, "sysfs-only")) {
+            options->dsForceDrm = FF_DS_FORCE_DRM_TYPE_SYSFS_ONLY;
+        } else {
+            options->dsForceDrm = FF_DS_FORCE_DRM_TYPE_FALSE;
+        }
+    }
+#endif
+    else {
+        return false;
+    }
+
+    return true;
+}
+
+void ffOptionsInitGeneral(FFOptionsGeneral* options) {
+    options->processingTimeout = 5000;
+    options->multithreading = true;
+    options->detectVersion = true;
+    ffStrbufInit(&options->playerName);
+
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__sun) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__HAIKU__) || defined(__GNU__)
+    options->dsForceDrm = FF_DS_FORCE_DRM_TYPE_FALSE;
+#endif
+}
+
+void ffOptionsDestroyGeneral(FFOptionsGeneral* options) {
+    ffStrbufDestroy(&options->playerName);
+}
+
+void ffOptionsGenerateGeneralJsonConfig(FFdata* data, FFOptionsGeneral* options) {
+    yyjson_mut_doc* doc = data->resultDoc;
+    yyjson_mut_val* obj = yyjson_mut_obj_add_obj(doc, doc->root, "general");
+
+    yyjson_mut_obj_add_bool(doc, obj, "thread", options->multithreading);
+
+    yyjson_mut_obj_add_int(doc, obj, "processingTimeout", options->processingTimeout);
+
+    yyjson_mut_obj_add_bool(doc, obj, "detectVersion", options->detectVersion);
+
+    yyjson_mut_obj_add_strbuf(doc, obj, "playerName", &options->playerName);
+
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__sun) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__HAIKU__) || defined(__GNU__)
+
+    switch (options->dsForceDrm) {
+        case FF_DS_FORCE_DRM_TYPE_FALSE:
+            yyjson_mut_obj_add_bool(doc, obj, "dsForceDrm", false);
+            break;
+        case FF_DS_FORCE_DRM_TYPE_SYSFS_ONLY:
+            yyjson_mut_obj_add_str(doc, obj, "dsForceDrm", "sysfs-only");
+            break;
+        case FF_DS_FORCE_DRM_TYPE_TRUE:
+            yyjson_mut_obj_add_bool(doc, obj, "dsForceDrm", true);
+            break;
+    }
+#endif
+}

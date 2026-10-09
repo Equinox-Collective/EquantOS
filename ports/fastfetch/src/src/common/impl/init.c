@@ -1,0 +1,304 @@
+#include "fastfetch.h"
+#include "common/init.h"
+#include "common/parsing.h"
+#include "common/thread.h"
+#include "common/textModifier.h"
+#include "common/strutil.h"
+#include "detection/displayserver/displayserver.h"
+#include "logo/logo.h"
+
+#include <stdlib.h>
+#include <unistd.h>
+#include <locale.h>
+#ifdef _WIN32
+    #include <windows.h>
+    #include "common/windows/unicode.h"
+#else
+    #include <signal.h>
+#endif
+#if __linux__
+    #include <linux/version.h>
+#endif
+
+FFinstance instance; // Global singleton
+
+static void initState(FFstate* state) {
+    state->logoWidth = 0;
+    state->logoHeight = 0;
+    state->keysHeight = 0;
+    state->titleFqdn = false;
+
+    ffPlatformInit(&state->platform);
+    state->dynamicInterval = 0;
+}
+
+static void defaultConfig(void) {
+    ffOptionsInitLogo(&instance.config.logo);
+    ffOptionsInitGeneral(&instance.config.general);
+    ffOptionsInitDisplay(&instance.config.display);
+}
+
+#ifdef _WIN32
+static UINT oldCp = CP_UTF8;
+void resetConsoleCP(void) {
+    if (oldCp != CP_UTF8) {
+        SetConsoleOutputCP(oldCp);
+    }
+}
+#endif
+
+void ffInitInstance(void) {
+#ifdef _WIN32
+    // https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/setlocale-wsetlocale?source=recommendat>
+    setlocale(LC_ALL, ".UTF8");
+
+    HANDLE hStdout = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (GetConsoleMode(hStdout, &mode)) {
+        SetConsoleMode(hStdout, mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        oldCp = GetConsoleOutputCP();
+        if (oldCp != CP_UTF8) {
+            SetConsoleOutputCP(CP_UTF8);
+            atexit(resetConsoleCP);
+        }
+    }
+#else
+    // Never use `setlocale(LC_ALL, "")`
+    setlocale(LC_TIME, "");
+#endif
+
+    defaultConfig();
+    initState(&instance.state);
+
+#ifdef _WIN32
+    instance.state.platform.initCP = oldCp;
+#endif
+}
+
+static volatile bool ffDisableLinewrap = false;
+static volatile bool ffHideCursor = false;
+
+static void resetConsole(void) {
+    if (ffDisableLinewrap) {
+        fputs("\033[?7h", stdout);
+    }
+
+    if (ffHideCursor) {
+        fputs("\033[?25h", stdout);
+    }
+
+    if (instance.state.dynamicInterval > 0) {
+        fputs("\033[?1049l", stdout); // Disable alternate buffer
+    }
+
+#if defined(_WIN32)
+    fflush(stdout);
+#endif
+}
+
+#ifdef _WIN32
+BOOL WINAPI consoleHandler([[maybe_unused]] DWORD signal) {
+    resetConsole();
+    exit(0);
+}
+#else
+static void exitSignalHandler([[maybe_unused]] int signal) {
+    resetConsole();
+    exit(0);
+}
+#endif
+
+void ffStart(void) {
+    ffDisableLinewrap = instance.config.display.disableLinewrap && !instance.config.display.pipe;
+    ffHideCursor = instance.config.display.hideCursor && !instance.config.display.pipe;
+
+#ifdef _WIN32
+    SetErrorMode(SEM_FAILCRITICALERRORS);
+    if (instance.config.display.noBuffer) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+    } else {
+        setvbuf(stdout, nullptr, _IOFBF, 4096);
+    }
+    SetConsoleCtrlHandler(consoleHandler, TRUE);
+#else
+    if (instance.config.display.noBuffer) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+    }
+    struct sigaction action;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+    action.sa_handler = exitSignalHandler;
+    sigaction(SIGINT, &action, nullptr);
+    sigaction(SIGTERM, &action, nullptr);
+    sigaction(SIGQUIT, &action, nullptr);
+    sigset_t newmask;
+    sigemptyset(&newmask);
+    sigaddset(&newmask, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &newmask, nullptr);
+#endif
+
+    // reset everything to default before we start printing
+    if (!instance.config.display.pipe) {
+        fputs(FASTFETCH_TEXT_MODIFIER_RESET, stdout);
+    }
+
+    if (ffHideCursor) {
+        fputs("\033[?25l", stdout);
+    }
+
+    if (ffDisableLinewrap) {
+        fputs("\033[?7l", stdout);
+    }
+
+    if (instance.state.dynamicInterval > 0) {
+        fputs("\033[?1049h\033[H", stdout); // Enable alternate buffer
+        fflush(stdout);
+    }
+}
+
+void ffFinish(void) {
+    resetConsole();
+}
+
+static void destroyConfig(void) {
+    ffOptionsDestroyLogo(&instance.config.logo);
+    ffOptionsDestroyGeneral(&instance.config.general);
+    ffOptionsDestroyDisplay(&instance.config.display);
+}
+
+static void destroyState(void) {
+    ffPlatformDestroy(&instance.state.platform);
+}
+
+void ffDestroyInstance(void) {
+    destroyConfig();
+    destroyState();
+}
+
+#if FF_HAVE_LUA
+    #include <lua.h>
+#endif
+#if FF_HAVE_QUICKJS
+    #include <quickjs.h>
+#endif
+
+// Must be in a file compiled with the libfastfetch target, because the FF_HAVE* macros are not defined for the executable targets
+void ffListFeatures(void) {
+    fputs(
+#if __linux__
+        "linux-headers " FF_STR(LINUX_VERSION_MAJOR) "." FF_STR(LINUX_VERSION_PATCHLEVEL) "." FF_STR(LINUX_VERSION_SUBLEVEL) "\n"
+#endif
+#if FF_HAVE_THREADS
+        "threads\n"
+#endif
+#if FF_HAVE_VULKAN
+        "vulkan\n"
+#endif
+#if FF_HAVE_WAYLAND
+        "wayland\n"
+#endif
+#if FF_HAVE_XCB_RANDR
+        "xcb-randr\n"
+#endif
+#if FF_HAVE_XRANDR
+        "xrandr\n"
+#endif
+#if FF_HAVE_DRM
+        "drm\n"
+#endif
+#if FF_HAVE_GIO
+        "gio\n"
+#endif
+#if FF_HAVE_DCONF
+        "dconf\n"
+#endif
+#if FF_HAVE_EET
+        "eet\n"
+#endif
+#if FF_HAVE_DBUS
+        "dbus\n"
+#endif
+#if FF_HAVE_IMAGEMAGICK7
+        "imagemagick7\n"
+#endif
+#if FF_HAVE_IMAGEMAGICK6
+        "imagemagick6\n"
+#endif
+#if FF_HAVE_CHAFA
+        "chafa\n"
+#endif
+#if FF_HAVE_ZLIB
+        "zlib\n"
+#endif
+#if FF_HAVE_SQLITE3
+        "sqlite3\n"
+#endif
+#if FF_HAVE_RPM
+        "rpm\n"
+#endif
+#if FF_HAVE_EGL
+        "egl\n"
+#endif
+#if FF_HAVE_GLX
+        "glx\n"
+#endif
+#if FF_HAVE_OPENCL
+        "opencl\n"
+#endif
+#if FF_HAVE_FREETYPE
+        "freetype\n"
+#endif
+#if FF_HAVE_PULSE
+        "libpulse\n"
+#endif
+#if FF_HAVE_DDCUTIL
+        "libddcutil\n"
+#endif
+#if FF_HAVE_ELF || __sun || (__FreeBSD__ && !__DragonFly__) || __OpenBSD__ || __NetBSD__
+        "libelf\n"
+#endif
+#if FF_HAVE_LIBZFS
+        "libzfs\n"
+#endif
+#if FF_HAVE_VADRM
+        "va-drm\n"
+#endif
+#if FF_HAVE_VAX11
+        "va-x11\n"
+#endif
+#if FF_HAVE_VDPAU
+        "vdpau\n"
+#endif
+#if FF_USE_SYSTEM_YYJSON
+        "System yyjson\n"
+#endif
+#if FF_HAVE_LINUX_VIDEODEV2
+        "linux/videodev2\n"
+#endif
+#if FF_HAVE_EMBEDDED_PCIIDS
+        "Embedded pciids\n"
+#endif
+#if FF_ENABLE_WCWIDTH
+        "Embedded wcwidth\n"
+#endif
+#if FF_HAVE_SIXEL
+        "Embedded sixel\n"
+#endif
+#if FF_HAVE_WINRT
+        "WinRT headers\n"
+#endif
+#if FF_WIN81_COMPAT
+        "Windows 8.1 Compatibility\n"
+#endif
+#if FF_APPLE_MEMSIZE_USABLE
+        "Apple memsize_usable\n"
+#endif
+#if FF_HAVE_LUA
+        LUA_VERSION "\n"
+#endif
+#if FF_HAVE_QUICKJS
+        "QuickJS " FF_STR(QJS_VERSION_MAJOR) "." FF_STR(QJS_VERSION_MINOR) "." FF_STR(QJS_VERSION_PATCH) QJS_VERSION_SUFFIX "\n"
+#endif
+        "",
+        stdout);
+}

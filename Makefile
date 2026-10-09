@@ -80,6 +80,7 @@ ifeq ($(USE_POSIX),1)
     RMDIR = rm -rf "$1"
     RM    = rm -f "$1"
     CP    = cp "$1" "$2"
+    CP_R  = cp -rf "$1" "$2"
     DEV_NULL := > /dev/null 2>&1
     
     # ANSI Color Palette
@@ -100,6 +101,7 @@ else
     RMDIR   = if exist "$(call WINPATH,$1)" rmdir /s /q "$(call WINPATH,$1)"
     RM      = if exist "$(call WINPATH,$1)" del /q /f "$(call WINPATH,$1)"
     CP      = copy /Y "$(call WINPATH,$1)" "$(call WINPATH,$2)" >nul
+    CP_R    = xcopy /E /I /Q /Y "$(call WINPATH,$1)" "$(call WINPATH,$2)" >nul
     DEV_NULL := > NUL 2>&1
 
     CLR_RESET   :=
@@ -138,6 +140,7 @@ DEP_FILES   := $(ALL_OBJECTS:.o=.d)
 ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/musltest.elf \
                  build/iso/equantmemtest.elf \
+				 build/iso/threadtest.elf \
                  build/iso/busybox.elf \
                  build/iso/font.psf \
                  build/iso/.bashrc \
@@ -151,9 +154,10 @@ ALL_USERSPACE := build/iso/hello.elf \
 				 build/iso/epacmg.elf \
 				 build/iso/icewm.elf \
 				 build/iso/preferences \
-				 build/iso/menu \
 				 build/iso/fonts.conf \
-                 build/iso/DejaVuSans.ttf
+                 build/iso/font.ttf \
+				 build/iso/menu \
+				 build/iso/fastfetch
 
 # ==============================================================================
 # Master Targets
@@ -268,6 +272,7 @@ build/iso/icewm.elf: res/icewm.elf
 build/iso/preferences: res/preferences
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/preferences,$@)
 
 build/iso/menu: res/menu
 	@$(call MKDIR,build/iso)
@@ -279,10 +284,15 @@ build/iso/fonts.conf: res/fonts.conf
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/fonts.conf,$@)
 
-build/iso/DejaVuSans.ttf: res/DejaVuSans.ttf
+build/iso/font.ttf: res/font.ttf
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
-	$(Q)$(call CP,res/DejaVuSans.ttf,$@)
+	$(Q)$(call CP,res/font.ttf,$@)
+
+build/iso/fastfetch: res/fastfetch.elf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/fastfetch.elf,$@)
 
 # Auto-Dependency Inclusion
 -include $(DEP_FILES)
@@ -322,6 +332,8 @@ build/equantos.iso: build/kernel.elf $(ALL_USERSPACE) limine.conf limine-bios-cd
 	$(Q)$(call CP,limine-bios-cd.bin,build/iso/boot/limine-bios-cd.bin)
 	$(Q)$(call CP,limine-bios.sys,build/iso/boot/limine-bios.sys)
 	$(Q)$(call CP,limine-uefi-cd.bin,build/iso/boot/limine-uefi-cd.bin)
+	@$(call MKDIR,build/iso/Icewm_MinimalDark)
+	$(Q)$(call CP_R,res/Icewm_MinimalDark,build/iso/Icewm_MinimalDark)
 	@echo FS0: > build/iso/startup.nsh
 	@echo \EFI\BOOT\BOOTX64.EFI >> build/iso/startup.nsh
 	$(Q)xorriso -as mkisofs \

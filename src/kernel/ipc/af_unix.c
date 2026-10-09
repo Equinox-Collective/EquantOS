@@ -28,6 +28,16 @@ unix_socket_t *unix_socket_create(int type) {
     unix_socket_t *sock = (unix_socket_t *)kzalloc(sizeof(unix_socket_t));
     if (!sock) return NULL;
 
+    // Allocate 64 contiguous physical pages (256KB) for high-bandwidth IPC
+    void *phys_buf = pmm_alloc_continuous(64);
+    if (!phys_buf) {
+        kfree(sock);
+        return NULL;
+    }
+
+    sock->buffer = (uint8_t *)VIRT(phys_buf);
+    memset(sock->buffer, 0, UNIX_SOCK_BUF_SIZE);
+
     sock->state = UNIX_STATE_CREATED;
     sock->type = type;
     sock->ref_count = 1;
@@ -38,10 +48,23 @@ int unix_socket_bind(unix_socket_t *sock, const struct sockaddr_un *addr) {
     if (!sock || !addr) return -EINVAL;
     if (sock->state != UNIX_STATE_CREATED) return -EINVAL;
 
-    // Check if path already exists
+    // Auto-unlink stale socket node if left from previous crashed instance
     vfs_node_t *existing = vfs_open(addr->sun_path, 0);
     if (existing) {
-        return -EADDRINUSE;
+        if (existing->parent && existing->parent->children) {
+            vfs_node_t *curr = existing->parent->children;
+            vfs_node_t *prev = NULL;
+            while (curr) {
+                if (curr == existing) {
+                    if (prev) prev->next = curr->next;
+                    else existing->parent->children = curr->next;
+                    kfree(existing);
+                    break;
+                }
+                prev = curr;
+                curr = curr->next;
+            }
+        }
     }
 
     // Resolve parent directory path (e.g. "/tmp/.X11-unix")
@@ -255,6 +278,10 @@ void unix_socket_close(unix_socket_t *sock) {
 
     sock->ref_count--;
     if (sock->ref_count <= 0) {
+        if (sock->buffer) {
+            pmm_free_pages((void *)PHYS(sock->buffer), 6); // 2^6 = 64 pages
+            sock->buffer = NULL;
+        }
         kfree(sock);
     }
 }

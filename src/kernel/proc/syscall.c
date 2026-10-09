@@ -147,7 +147,8 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
         return unix_socket_read((unix_socket_t *)node->ptr, buf, count, nonblock);
     }
 
-    bool is_tty_input = (fd == 0) || (strncmp(node->name, "tty", 3) == 0);
+    // Only a real terminal waits for keyboard input; a redirected stdin (pipe, file) reads directly
+    bool is_tty_input = strncmp(node->name, "tty", 3) == 0;
 
     if (is_tty_input) {
         if (nonblock) {
@@ -155,9 +156,9 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
                 return -EAGAIN;
             }
         } else {
-            // БЛОКИРУЮЩИЙ РЕЖИМ: усыпляем процесс, пока юзер не нажмет клавишу!
+            // Sleep 8ms instead of burning 100% CPU in a tight yield loop
             while (!tty_has_input()) {
-                __asm__ volatile("sti; pause");
+                sched_make_sleep(current_task, tick + 2);
                 sched_yield();
             }
         }
@@ -360,7 +361,8 @@ static int64_t sys_dup_handler(int oldfd) {
             current_task->process->files[i] = current_task->process->files[oldfd];
             current_task->process->files[i]->refcount++;
             current_task->process->file_offsets[i] = current_task->process->file_offsets[oldfd];
-            current_task->process->file_flags[i] = current_task->process->file_flags[oldfd];
+            // POSIX: the duplicate never inherits FD_CLOEXEC
+            current_task->process->file_flags[i] = current_task->process->file_flags[oldfd] & ~O_CLOEXEC;
             return i;
         }
     }
@@ -380,7 +382,7 @@ static int64_t sys_dup2_handler(int oldfd, int newfd) {
     current_task->process->files[newfd] = current_task->process->files[oldfd];
     current_task->process->files[newfd]->refcount++;
     current_task->process->file_offsets[newfd] = current_task->process->file_offsets[oldfd];
-    current_task->process->file_flags[newfd] = current_task->process->file_flags[oldfd];
+    current_task->process->file_flags[newfd] = current_task->process->file_flags[oldfd] & ~O_CLOEXEC;
     return newfd;
 }
 
@@ -413,9 +415,10 @@ static int64_t sys_fcntl_handler(int fd, int cmd, uint64_t arg) {
             for (int i = (int)arg; i < MAX_OPEN_FILES; i++) {
                 if (current_task->process->files[i] == NULL) {
                     current_task->process->files[i] = current_task->process->files[fd];
+                    current_task->process->files[i]->refcount++;
                     current_task->process->file_offsets[i] = current_task->process->file_offsets[fd];
-                    current_task->process->file_flags[i] = (cmd == F_DUPFD_CLOEXEC) ? 
-                        (current_task->process->file_flags[fd] | O_CLOEXEC) : current_task->process->file_flags[fd];
+                    current_task->process->file_flags[i] = (cmd == F_DUPFD_CLOEXEC) ?
+                        (current_task->process->file_flags[fd] | O_CLOEXEC) : (current_task->process->file_flags[fd] & ~O_CLOEXEC);
                     return i;
                 }
             }
@@ -524,7 +527,8 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
         }
         if (req == TIOCSPGRP && arg) {
             int new_pgid = *(int *)arg;
-            current_task->process->pgid = (uint64_t)(new_pgid > 0 ? new_pgid : current_task->process->pid);
+            uint64_t target_pgid = (new_pgid > 0) ? (uint64_t)new_pgid : current_task->process->pid;
+            current_task->process->pgid = target_pgid;
             return 0;
         }
         if (req == FIONREAD && arg) {
@@ -541,6 +545,14 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
             return 0;
         }
         if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
+            return 0;
+        }
+        if (req == KDSETMODE) {
+            tty_set_kd_mode((int)(uintptr_t)arg);
+            return 0;
+        }
+        if (req == KDGETMODE && arg) {
+            *(int *)arg = tty_get_kd_mode();
             return 0;
         }
         return 0;
@@ -648,6 +660,12 @@ static int64_t sys_fstat_handler(int fd, struct linux_stat *statbuf) {
         statbuf->st_mode = S_IFCHR | 0666;
         statbuf->st_rdev = 0x0501;
         statbuf->st_blksize = 4096;
+        // Same identity as stat() on the node, so ttyname() can match /proc/self/fd/N
+        vfs_node_t *std_node = (current_task && current_task->process) ? current_task->process->files[fd] : NULL;
+        if (std_node) {
+            statbuf->st_dev = 1;
+            statbuf->st_ino = std_node->inode ? std_node->inode : 1;
+        }
         return 0;
     }
 
@@ -1064,44 +1082,123 @@ static int64_t sys_mremap_handler(uint64_t old_address, size_t old_size, size_t 
 // 4. Process Lifecycle, Multitasking & Architecture Setup
 // ============================================================================
 
-static int64_t sys_exit_handler(int code) {
-    if (current_task && current_task->process) {
-        current_task->process->exit_code = code;
-        current_task->process->exited = true;
+static int64_t sys_futex_handler(uint32_t *uaddr, int op, uint32_t val, 
+                                 const struct linux_timespec *timeout, 
+                                 uint32_t *uaddr2, uint32_t val3) {
+    (void)uaddr2; (void)val3;
+    if (!uaddr) return -EFAULT;
 
-        if (current_task->process->clear_child_tid) {
-            uint32_t *tid_ptr = (uint32_t *)current_task->process->clear_child_tid;
+    // Strip Linux flags: FUTEX_PRIVATE_FLAG (128) and FUTEX_CLOCK_REALTIME (256)
+    int cmd = op & ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+
+    // 1. FUTEX_WAIT / FUTEX_WAIT_BITSET
+    if (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET) {
+        // Atomic compare: if memory already changed, return immediately
+        if (*uaddr != val) {
+            return -EAGAIN;
+        }
+
+        current_task->futex_addr = (uint64_t)uaddr;
+
+        if (timeout) {
+            uint64_t wait_ticks = (timeout->tv_sec * 250) + (timeout->tv_nsec / 4000000ULL);
+            if (wait_ticks == 0) wait_ticks = 1;
+
+            sched_make_sleep(current_task, tick + wait_ticks);
+            sched_yield();
+
+            // If still pointing to futex address, sleep expired before wake
+            if (current_task->futex_addr != 0) {
+                current_task->futex_addr = 0;
+                return -ETIMEDOUT;
+            }
+        } else {
+            sched_block(current_task);
+            sched_yield();
+        }
+
+        current_task->futex_addr = 0;
+        return 0;
+    }
+
+    // 2. FUTEX_WAKE / FUTEX_WAKE_BITSET
+    if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET) {
+        int woken = 0;
+        extern task_t *task_list;
+        if (task_list) {
+            task_t *curr = task_list;
+            do {
+                if (curr->futex_addr == (uint64_t)uaddr) {
+                    curr->futex_addr = 0;
+                    if (curr->state == TASK_STATE_BLOCKED || curr->state == TASK_STATE_SLEEPING) {
+                        sched_unblock(curr);
+                    }
+                    woken++;
+                    if ((uint32_t)woken >= val) break;
+                }
+                curr = curr->next;
+            } while (curr && curr != task_list);
+        }
+        return woken;
+    }
+
+    return -ENOSYS;
+}
+
+static bool process_has_other_live_tasks(process_t *proc) {
+    extern task_t *task_list;
+    if (!task_list) return false;
+    task_t *curr = task_list;
+    do {
+        if (curr != current_task && curr->process == proc && curr->state != TASK_STATE_ZOMBIE) {
+            return true;
+        }
+        curr = curr->next;
+    } while (curr && curr != task_list);
+    return false;
+}
+
+static int64_t sys_exit_handler(int code) {
+    if (current_task) {
+        // POSIX Thread Termination Notification (CLONE_CHILD_CLEARTID)
+        if (current_task->clear_child_tid) {
+            uint32_t *tid_ptr = (uint32_t *)current_task->clear_child_tid;
             *tid_ptr = 0;
+            // Wake all threads blocked in pthread_join on this TID
+            sys_futex_handler(tid_ptr, FUTEX_WAKE, 1, NULL, NULL, 0);
+            current_task->clear_child_tid = 0;
+        }
+
+        if (current_task->process) {
+            current_task->process->exit_code = code;
+            current_task->process->exited = true;
+
+            // Last task of the process: release its descriptors so pipe readers see EOF
+            if (!process_has_other_live_tasks(current_task->process)) {
+                for (int fd = 0; fd < MAX_OPEN_FILES; fd++) {
+                    if (current_task->process->files[fd]) {
+                        sys_close_handler(fd);
+                    }
+                }
+            }
+
+            // Wake up parent process if waiting in wait4
             extern task_t *task_list;
             if (task_list) {
                 task_t *curr = task_list;
                 do {
-                    if (curr->futex_addr == current_task->process->clear_child_tid) {
-                        curr->futex_addr = 0;
-                        sched_unblock(curr);
+                    if (curr->process && curr->process->pid == current_task->process->parent_pid) {
+                        if (curr->state == TASK_STATE_BLOCKED) {
+                            sched_unblock(curr);
+                        }
                     }
                     curr = curr->next;
                 } while (curr && curr != task_list);
             }
         }
 
-        // Wake up any parent process blocked in wait4
-        extern task_t *task_list;
-        if (task_list) {
-            task_t *curr = task_list;
-            do {
-                if (curr->process && curr->process->pid == current_task->process->parent_pid) {
-                    if (curr->state == TASK_STATE_BLOCKED) {
-                        sched_unblock(curr);
-                    }
-                }
-                curr = curr->next;
-            } while (curr && curr != task_list);
-        }
-
         current_task->state = TASK_STATE_ZOMBIE;
         current_task->running = false;
-        // sched_switch will automatically dequeue this task safely!
     }
 
     sched_yield();
@@ -1195,9 +1292,13 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
         child_proc->parent_pid = current_task->process->pid;
         child_proc->pgid = current_task->process->pgid;
         child_proc->cr3 = (flags & CLONE_VM) ? current_task->process->cr3 : PHYS(child_pml4);
+        child_proc->vm_shared = (flags & CLONE_VM) != 0;
         child_proc->brk = current_task->process->brk;
         child_proc->umask = current_task->process->umask;
         memcpy(child_proc->cwd, current_task->process->cwd, sizeof(child_proc->cwd));
+        memcpy(child_proc->exe_path, current_task->process->exe_path, sizeof(child_proc->exe_path));
+        memcpy(child_proc->cmdline, current_task->process->cmdline, sizeof(child_proc->cmdline));
+        child_proc->cmdline_len = current_task->process->cmdline_len;
 
         for (int i = 0; i < MAX_OPEN_FILES; i++) {
             child_proc->files[i] = current_task->process->files[i];
@@ -1274,7 +1375,9 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
 
     if ((flags & CLONE_PARENT_SETTID) && parent_tid) *parent_tid = (int)child_task->id;
     if ((flags & CLONE_CHILD_SETTID) && child_tid) *child_tid = (int)child_task->id;
-    if (flags & CLONE_CHILD_CLEARTID) child_proc->clear_child_tid = (uint64_t)child_tid;
+    if (flags & CLONE_CHILD_CLEARTID) {
+        child_task->clear_child_tid = (uint64_t)child_tid;
+    }
 
     extern task_t *task_list;
     if (task_list) {
@@ -1303,7 +1406,7 @@ static int64_t sys_readlink_handler(const char *path, char *buf, size_t bufsiz) 
         return (int64_t)len;
     }
 
-    return -EINVAL;
+    return procfs_readlink(path, buf, bufsiz);
 }
 
 static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
@@ -1347,7 +1450,7 @@ static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
             }
 
             if (child->process) {
-                if (child->process->cr3 != 0 && child->process->cr3 != kernel_cr3) {
+                if (child->process->cr3 != 0 && child->process->cr3 != kernel_cr3 && !child->process->vm_shared) {
                     vmm_destroy_address_space(child->process->cr3);
                 }
                 kfree(child->process);
@@ -1443,47 +1546,19 @@ static int64_t sys_rt_sigprocmask_handler(int how, const uint64_t *set, uint64_t
     return 0;
 }
 
-static int64_t sys_futex_handler(uint32_t *uaddr, int op, uint32_t val, const struct linux_timespec *timeout, uint32_t *uaddr2, uint32_t val3) {
-    (void)timeout; (void)uaddr2; (void)val3;
-    if (!uaddr) return -EFAULT;
-    int cmd = op & 0x7F;
-
-    if (cmd == FUTEX_WAIT) {
-        if (*uaddr != val) {
-            return -EAGAIN;
-        }
-        current_task->futex_addr = (uint64_t)uaddr;
-        sched_block(current_task);
-        sched_yield();
-        current_task->futex_addr = 0;
-        return 0;
-    } else if (cmd == FUTEX_WAKE) {
-        int woken = 0;
-        extern task_t *task_list;
-        if (task_list) {
-            task_t *curr = task_list;
-            do {
-                if (curr->futex_addr == (uint64_t)uaddr) {
-                    curr->futex_addr = 0;
-                    sched_unblock(curr);
-                    woken++;
-                    if ((uint32_t)woken >= val) break;
-                }
-                curr = curr->next;
-            } while (curr && curr != task_list);
-        }
-        return woken;
-    }
-    return -ENOSYS;
-}
-
 // ============================================================================
 // 6. Time, Polling, and System Statistics
 // ============================================================================
 
 static int64_t sys_clock_gettime_handler(int clock_id, struct linux_timespec *tp) {
-    (void)clock_id;
     if (!tp) return -EFAULT;
+    // CLOCK_MONOTONIC, CLOCK_MONOTONIC_RAW, CLOCK_MONOTONIC_COARSE, CLOCK_BOOTTIME count from boot
+    if (clock_id == 1 || clock_id == 4 || clock_id == 6 || clock_id == 7) {
+        uint64_t now = tick;
+        tp->tv_sec = now / TIMER_HZ;
+        tp->tv_nsec = (now % TIMER_HZ) * (1000000000ULL / TIMER_HZ);
+        return 0;
+    }
     tp->tv_sec = rtc_get_unix_timestamp();
     tp->tv_nsec = (tick % 100) * 10000000ULL;
     return 0;
@@ -1512,9 +1587,6 @@ static int64_t sys_nanosleep_handler(const struct linux_timespec *req, struct li
     return 0;
 }
 
-#define POLLWRNORM 0x0100
-#define POLLRDNORM 0x0040
-
 static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
     int ready = 0;
 
@@ -1542,6 +1614,7 @@ static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
         if (current_task && current_task->process) {
             vfs_node_t *node = current_task->process->files[fd];
             if (!node) continue;
+            bool pipe_readable, pipe_writable, pipe_hangup, pipe_error;
 
             // UNIX Domain Sockets
             if (node->ops == &unix_socket_vfs_ops && node->ptr) {
@@ -1559,6 +1632,19 @@ static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
                     fds[i].revents |= POLLHUP;
                     ready++;
                 }
+            }
+            // Pipes (e.g. reading a posix_spawn child's stdout)
+            else if (pipe_poll_state(node, &pipe_readable, &pipe_writable, &pipe_hangup, &pipe_error)) {
+                bool counted = fds[i].revents != 0; // stdout/stderr may already be marked writable above
+                if ((fds[i].events & (POLLIN | POLLRDNORM)) && pipe_readable) {
+                    fds[i].revents |= (fds[i].events & (POLLIN | POLLRDNORM));
+                }
+                if ((fds[i].events & (POLLOUT | POLLWRNORM)) && pipe_writable) {
+                    fds[i].revents |= (fds[i].events & (POLLOUT | POLLWRNORM));
+                }
+                if (pipe_hangup) fds[i].revents |= POLLHUP;
+                if (pipe_error) fds[i].revents |= POLLERR;
+                if (!counted && fds[i].revents) ready++;
             }
             // Mouse device /dev/mouse or /dev/input/mice
             else if ((node->ops == &g_mousedev_fops || node->ops == &g_evdev_mouse_fops)) {
@@ -1583,8 +1669,8 @@ static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int tim
     }
 
     uint64_t start_tick = tick;
-    uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : ((uint64_t)timeout / 10);
-
+    uint64_t max_ticks = (timeout < 0) ? (uint64_t)-1 : ((uint64_t)timeout * 250 / 1000);
+    
     // Sleep path: sleep until next tick or timeout instead of busy-looping
     while (ready == 0) {
         if (timeout >= 0 && (tick - start_tick) >= max_ticks) {
@@ -1668,7 +1754,7 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
     if (wfds) memcpy(orig_wfds, wfds, bytes);
 
     uint64_t start_tick = tick;
-    uint64_t max_ticks = (timeout == NULL) ? (uint64_t)-1 : (timeout->tv_sec * 100 + timeout->tv_nsec / 10000000ULL);
+    uint64_t max_ticks = (timeout == NULL) ? (uint64_t)-1 : (timeout->tv_sec * 250 + timeout->tv_nsec / 4000000ULL);
 
     for (;;) {
         int ready = 0;
@@ -1754,7 +1840,7 @@ static int64_t sys_sysinfo_handler(struct linux_sysinfo *info) {
     struct linux_sysinfo kinfo;
     memset(&kinfo, 0, sizeof(struct linux_sysinfo));
 
-    kinfo.uptime = (int64_t)(tick / 100); // Real uptime in seconds!
+    kinfo.uptime = (int64_t)(tick / TIMER_HZ);
     kinfo.totalram = pmm_get_total_memory();
     uint64_t used = pmm_get_used_memory();
     kinfo.freeram = (kinfo.totalram > used) ? (kinfo.totalram - used) : 0;
@@ -1768,10 +1854,10 @@ static int64_t sys_sysinfo_handler(struct linux_sysinfo *info) {
 static int64_t sys_uname_handler(struct linux_utsname *buf) {
     if (!buf) return -EFAULT;
     memset(buf, 0, sizeof(struct linux_utsname));
-    strcpy(buf->sysname, "EquantOS"); // <-- Наше истинное имя!
-    strcpy(buf->nodename, "equant");
-    strcpy(buf->release, "1.0.0-equantos");
-    strcpy(buf->version, "EquantOS Unix Microkernel x86_64");
+    strcpy(buf->sysname, EQUANT_OS_NAME); // <-- Наше истинное имя!
+    strcpy(buf->nodename, EQUANT_HOSTNAME);
+    strcpy(buf->release, EQUANT_KERNEL_RELEASE);
+    strcpy(buf->version, EQUANT_KERNEL_VERSION);
     strcpy(buf->machine, "x86_64");
     strcpy(buf->domainname, "localdomain");
     return 0;
@@ -2165,7 +2251,20 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
     current_task->process->cr3 = new_cr3;
 
     __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
-    vmm_destroy_address_space(old_cr3);
+    // A vfork/posix_spawn child runs on its parent's address space: never free it here
+    if (current_task->process->vm_shared) {
+        current_task->process->vm_shared = false;
+    } else {
+        vmm_destroy_address_space(old_cr3);
+    }
+
+    for (int fd = 0; fd < MAX_OPEN_FILES; fd++) {
+        if (current_task->process->files[fd] && (current_task->process->file_flags[fd] & O_CLOEXEC)) {
+            sys_close_handler(fd);
+        }
+    }
+
+    process_set_exec_info(current_task->process, resolved, argc, exec_argv);
 
     // Initialize FPU/SSE control state for new binary
     task_init_fpu(current_task);
@@ -2396,8 +2495,10 @@ void syscall_handler(void *regs_ptr) {
             ret = 0;
             break;
         case SYS_READLINK:
-        case SYS_READLINKAT:
             ret = sys_readlink_handler((const char *)regs->rdi, (char *)regs->rsi, (size_t)regs->rdx);
+            break;
+        case SYS_READLINKAT:
+            ret = sys_readlink_handler((const char *)regs->rsi, (char *)regs->rdx, (size_t)regs->r10);
             break;
         case SYS_PPOLL:
             ret = sys_ppoll_handler((struct linux_pollfd *)regs->rdi, regs->rsi, 
@@ -2665,8 +2766,8 @@ void syscall_handler(void *regs_ptr) {
             ret = sys_getdents64_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
             break;
         case SYS_SET_TID_ADDRESS:
-            if (current_task && current_task->process) {
-                current_task->process->clear_child_tid = regs->rdi;
+            if (current_task) {
+                current_task->clear_child_tid = regs->rdi;
             }
             ret = current_task ? current_task->id : 1;
             break;
@@ -2718,10 +2819,12 @@ void syscall_handler(void *regs_ptr) {
 
     regs->rax = (uint64_t)ret;
 
+    #if STRACE_DEBUG_ENABLED
     if (!quiet) {
         strace_log("[STRACE %u] < %s = %lld (0x%llx)\n",
                    pid, name, (long long)ret, (unsigned long long)ret);
     }
+#endif
 }
 
 void init_syscalls(void) {

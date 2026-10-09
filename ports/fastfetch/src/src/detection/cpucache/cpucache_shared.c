@@ -1,0 +1,85 @@
+#include "cpucache.h"
+#include "common/endian.h"
+#include "common/smbios.h"
+#include "common/strutil.h"
+
+typedef struct [[gnu::packed]] FFSmbiosCacheInfo {
+    FFSmbiosHeader Header;
+
+    uint8_t SocketDesignation;   // string
+    uint16_t CacheConfiguration; // varies
+    uint16_t MaximumCacheSize;   // varies
+    uint16_t InstalledSize;      // varies
+    uint16_t SupportedSramType;  // bit field
+    uint16_t CurrentSramType;    // bit field
+
+    // 2.1+
+    uint8_t CacheSpeed;          // varies
+    uint8_t ErrorCorrectionType; // enum
+    uint8_t SystemCacheType;     // enum
+    uint8_t Associativity;       // enum
+
+    // 3.1+
+    uint32_t MaximumCacheSize2;   // bit field
+    uint32_t InstalledCacheSize2; // bit field
+} FFSmbiosCacheInfo;
+
+static_assert(offsetof(FFSmbiosCacheInfo, InstalledCacheSize2) == 0x17,
+    "FFSmbiosCacheInfo: Wrong struct alignment");
+
+const char* ffDetectCPUCache(FFCPUCacheResult* result) {
+    const FFSmbiosHeaderTable* smbiosTable = ffGetSmbiosHeaderTable();
+    if (!smbiosTable) {
+        return "Failed to get SMBIOS data";
+    }
+
+    const FFSmbiosCacheInfo* data = (const FFSmbiosCacheInfo*) (*smbiosTable)[FF_SMBIOS_TYPE_CACHE_INFO];
+    if (!data) {
+        return "Cache information is not found in SMBIOS data";
+    }
+
+    const FFSmbiosCacheInfo* endOfTable = (const FFSmbiosCacheInfo*) (*smbiosTable)[FF_SMBIOS_TYPE_END_OF_TABLE];
+    for (; data != endOfTable; data = (const FFSmbiosCacheInfo*) ffSmbiosNextEntry(&data->Header)) {
+        if (data->Header.Type != FF_SMBIOS_TYPE_CACHE_INFO) {
+            continue;
+        }
+
+        uint16_t cacheConfiguration = FF_READ_LE(data->CacheConfiguration);
+        uint16_t installedSize = FF_READ_LE(data->InstalledSize);
+        bool enabled = !!(cacheConfiguration & (1 << 7));
+        if (!enabled) {
+            continue;
+        }
+
+        uint32_t size = installedSize;
+        if (size == 0) {
+            continue;
+        }
+
+        if (installedSize != 0xFFFF) {
+            size *= (size >> 15 ? 64 : 1) * 1024u;
+        } else if (data->Header.Length > offsetof(FFSmbiosCacheInfo, InstalledCacheSize2)) {
+            size = FF_READ_LE(data->InstalledCacheSize2);
+            size *= (size >> 31 ? 64 : 1) * 1024u;
+        }
+
+        uint32_t level = (cacheConfiguration & 0b111u) + 1;
+
+        FFCPUCacheType type;
+        switch (data->SystemCacheType) {
+            case 3:
+                type = FF_CPU_CACHE_TYPE_INSTRUCTION;
+                break;
+            case 4:
+                type = FF_CPU_CACHE_TYPE_DATA;
+                break;
+            default:
+                type = FF_CPU_CACHE_TYPE_UNIFIED;
+                break;
+        }
+
+        ffCPUCacheAddItem(result, level, size, 0, type);
+    }
+
+    return nullptr;
+}

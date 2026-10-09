@@ -1,0 +1,36 @@
+#include "mouse.h"
+#include "common/apple/cf_helpers.h"
+#include "common/mallocHelper.h"
+
+#include <IOKit/IOKitLib.h>
+#include <IOKit/hid/IOHIDLib.h>
+
+static void enumSet(IOHIDDeviceRef value, FFlist* results) {
+    FFMouseDevice* device = FF_LIST_ADD(FFMouseDevice, *results);
+    ffStrbufInit(&device->serial);
+    ffStrbufInit(&device->name);
+
+    CFStringRef product = IOHIDDeviceGetProperty(value, CFSTR(kIOHIDProductKey));
+    ffCfStrGetString(product, &device->name);
+
+    CFStringRef serialNumber = IOHIDDeviceGetProperty(value, CFSTR(kIOHIDSerialNumberKey));
+    ffCfStrGetString(serialNumber, &device->serial);
+}
+
+const char* ffDetectMouse(FFlist* devices /* List of FFMouseDevice */) {
+    FF_CFTYPE_AUTO_RELEASE IOHIDManagerRef manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+    if (IOHIDManagerOpen(manager, kIOHIDOptionsTypeNone) != kIOReturnSuccess) {
+        return "IOHIDManagerOpen() failed";
+    }
+
+    FF_CFTYPE_AUTO_RELEASE CFDictionaryRef matching1 = CFDictionaryCreate(kCFAllocatorDefault, (const void**) (CFStringRef[]) { CFSTR(kIOHIDDeviceUsagePageKey), CFSTR(kIOHIDDeviceUsageKey) }, (const void**) (CFNumberRef[]) { ffCfCreateInt(kHIDPage_GenericDesktop), ffCfCreateInt(kHIDUsage_GD_Mouse) }, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    IOHIDManagerSetDeviceMatching(manager, matching1);
+
+    FF_CFTYPE_AUTO_RELEASE CFSetRef set = IOHIDManagerCopyDevices(manager);
+    if (set) {
+        CFSetApplyFunction(set, (CFSetApplierFunction) &enumSet, devices);
+    }
+    IOHIDManagerClose(manager, kIOHIDOptionsTypeNone);
+
+    return nullptr;
+}

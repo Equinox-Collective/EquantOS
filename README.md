@@ -56,11 +56,11 @@ license      : GPL-2.0
 <table>
   <tr>
     <td width="50%"><img src="DOCS/screenshots/desktop.png" alt="IceWM desktop with xeyes on EquantOS"></td>
-    <td width="50%"><img src="DOCS/screenshots/terminal.png" alt="Bash and BusyBox on the EquantOS console"></td>
+    <td width="50%"><img src="DOCS/screenshots/terminal.png" alt="fastfetch in Bash on the EquantOS console"></td>
   </tr>
   <tr>
     <td align="center">Xfbdev + IceWM + xeyes at 1600x900</td>
-    <td align="center">Bash 5.2 + BusyBox on the framebuffer console</td>
+    <td align="center">fastfetch in Bash 5.2 on the framebuffer console</td>
   </tr>
 </table>
 
@@ -73,13 +73,14 @@ Both screenshots were taken in QEMU from a build of `main`.
 | Boot and CPU | Limine base revision 3, HHDM, framebuffer, GDT, IDT, exception handler with a panic screen, FPU/SSE |
 | Interrupts and timer | Local APIC, 250 Hz LAPIC timer calibrated against the PIT, legacy 8259 PIC masked |
 | Memory | Buddy physical allocator, 4-level paging, 2 MiB huge pages, PAT (write-combining framebuffer, uncached MMIO), per-process address spaces, copy-on-write, slab heap |
-| Processes | ELF64 loader, preemptive scheduler, Ring 3 tasks, `fork`, `vfork`, `clone`, `execve`, `wait4`, `futex`, signals |
+| Processes | ELF64 loader, preemptive scheduler, Ring 3 tasks, `fork`, `vfork`, `clone`, `execve`, `posix_spawn`, `wait4`, `futex`, signals, POSIX threads (in progress) |
 | IPC | Pipes, AF_UNIX sockets, SysV shared memory |
 | Filesystems | VFS, RAMFS root, devfs, page cache with LRU eviction (8 MiB pool), ext2 read/write, FAT32, ISO9660, GPT, MBR |
+| procfs | Linux-compatible `/proc`: `cpuinfo`, `meminfo`, `uptime`, `version`, `loadavg`, `swaps`, `/proc/<pid>/{stat,cmdline,comm,status}` with `exe`, `cwd` and `fd` links. Also `/etc/os-release` |
 | Storage | NVMe with DMA, ATA PIO |
 | Input and display | xHCI with USB HID keyboard and mouse, PS/2 keyboard, framebuffer TTY with PSF2 fonts, evdev nodes, `/dev/fb0` with a shadow buffer |
 | Network | RTL8139, ARP, IPv4, ICMP, UDP, TCP with retransmission, DHCP, DNS, BSD sockets |
-| Userspace | Bash 5.2, BusyBox, Xfbdev, IceWM, TWM, xeyes, `epacmg` package manager over HTTPS (BearSSL), `kdiag`, installer, users with `su`, `passwd` and `useradd` |
+| Userspace | Bash 5.2, BusyBox, fastfetch, Xfbdev, IceWM, TWM, xeyes, `epacmg` package manager over HTTPS (BearSSL), `kdiag`, installer, users with `su`, `passwd` and `useradd` |
 | Rescue shell | About 60 kernel commands for disks, memory, PCI, USB and CPU. Starts when no userland shell is found |
 
 ## Architecture
@@ -97,7 +98,7 @@ flowchart LR
     subgraph KERNEL["Ring 0: EquantOS kernel"]
         PROC["Processes<br/>ELF loader, scheduler, signals, futex"]
         MM["Memory<br/>buddy PMM, VMM, COW, slab"]
-        FS["VFS<br/>page cache, ext2, FAT32, ISO9660, devfs"]
+        FS["VFS<br/>page cache, ext2, FAT32, ISO9660<br/>devfs, procfs"]
         NET["Network<br/>TCP/IP, DHCP, DNS, sockets"]
         IPC["IPC<br/>pipes, AF_UNIX, SysV SHM"]
     end
@@ -145,10 +146,6 @@ The Makefile works from a POSIX shell (Linux, macOS, MSYS2, Git Bash) and from W
 git clone https://github.com/Equinox-Collective/EquantOS.git
 cd EquantOS
 ```
-
-> [!IMPORTANT]
-> On Windows, clone with `git clone -c core.autocrlf=false ...`. With `autocrlf=true` Git checks out
-> `res/.bashrc` with CRLF line endings and Bash inside EquantOS fails to parse it at boot.
 
 ### 3. Add the files a fresh clone is missing
 
@@ -251,6 +248,7 @@ The kernel mounts the live CD at `/cdrom`, links its files into `/bin` and `/sys
 `res/.bashrc` adds aliases for BusyBox applets and kernel diagnostics:
 
 ```bash
+fastfetch         # system summary with the EquantOS logo
 uname -a          # EquantOS equant 1.0.0-equantos ... x86_64
 ls /drives        # mounted NVMe partitions
 pciscan           # runs kdiag pciscan
@@ -319,6 +317,26 @@ Packages are `.epkg` tarballs downloaded over HTTPS. The default list is in
 
 </details>
 
+## Ports
+
+Third-party programs live in `ports/<name>/`. Each port keeps the vendored sources with EquantOS
+changes in `src/` next to a build recipe. The resulting static binary is committed to `res/` and
+packed into the ISO.
+
+### fastfetch
+
+`res/fastfetch.elf` (fastfetch 2.69.0) is installed as `/bin/fastfetch`. Rebuilding it needs `cmake`,
+`make`, Python 3 and the `crt*.o` files from [Quick start](#3-add-the-files-a-fresh-clone-is-missing):
+
+```bash
+sh ports/fastfetch/build.sh
+```
+
+`ports/fastfetch/src` is upstream fastfetch 2.69.0 with two changes. DRM calls in
+`src/detection/gpu/gpu_linux.c` are guarded for systems without `<drm/drm.h>`. A built-in EquantOS
+logo is added in `src/logo/ascii/e/equantos.txt` with its entry in `e.inc`. The binary is linked
+statically against `sdk/sysroot` with `ports/fastfetch/equantos-toolchain.cmake`.
+
 ## Repository layout
 
 ```
@@ -329,17 +347,18 @@ EquantOS/
 │   ├── equterm/               framebuffer terminal and rescue shell
 │   ├── kernel/core/           GDT/IDT, LAPIC, PIC, PMM, VMM, heap, initcalls, panic
 │   ├── kernel/proc/           ELF loader, tasks, scheduler, syscalls, pipes, init
-│   ├── kernel/fs/             VFS, page cache, RAMFS, devfs, ext2, FAT32, ISO9660, GPT/MBR
+│   ├── kernel/fs/             VFS, page cache, RAMFS, devfs, procfs, ext2, FAT32, ISO9660, GPT/MBR
 │   ├── kernel/drivers/        PCI, NVMe, ATA, xHCI/USB HID, PS/2, TTY, serial, RTL8139
 │   ├── kernel/net/            ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, sockets
 │   ├── kernel/ipc/            AF_UNIX sockets, SysV shared memory
 │   ├── kernel/misc/           installer, users, RTC, timer, power, RNG
 │   └── libs/                  string/stdio helpers for the kernel
-├── userspace/                 epacmg, kdiag, hello, musltest, equantmemtest
+├── userspace/                 epacmg, kdiag, hello, musltest, equantmemtest, threadtest
+├── ports/                     third-party ports (fastfetch) with build recipes
 ├── sdk/
 │   ├── musl/                  musl 1.2.6 source
 │   └── sysroot/               headers and static libraries (libc, libm, BearSSL and others)
-├── res/                       prebuilt Bash, BusyBox, X11 binaries, configs, fonts, IceWM theme
+├── res/                       prebuilt Bash, BusyBox, fastfetch, X11 binaries, configs, fonts, IceWM theme
 ├── limine/                    Limine binaries
 ├── DOCS/                      TODO list, screenshots, logos
 ├── create_disks.py            QEMU test disk generator
@@ -367,9 +386,9 @@ Planned:
 
 - A fresh clone needs the Limine copy and the `crt*.o` build from [Quick start](#3-add-the-files-a-fresh-clone-is-missing).
 - The IceWM MinimalDark theme is in `res/` but does not load yet, so IceWM uses its default look.
-- `/proc` is not implemented, so BusyBox tools that read it (for example `free`) fail.
 - `ls /dev` says the directory does not exist, while opening device nodes works.
-- Some pipelines hang the shell, for example `ls /bin | wc -l`.
+- POSIX threads are in progress. `threadtest.elf` currently ends with a segmentation fault and leaves the
+  shell unresponsive.
 - The IDE/FAT32 image is not scanned at boot and the FAT32 driver rejects its 64 MiB geometry.
 - ext2 has no delete, rename or clean unmount yet.
 - Single CPU only, no SMP.

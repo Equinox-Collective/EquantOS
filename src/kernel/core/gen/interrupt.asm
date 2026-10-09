@@ -9,6 +9,7 @@
 [extern syscall_handler]
 [extern current_task]
 [extern syscall_user_rsp]
+[extern apic_eoi]
 
 %macro SAVE_REGS 0
     push rax
@@ -134,16 +135,17 @@ irq0_handler_asm:
     push qword 32     
     SAVE_REGS         
 
-    ; 1. Немедленно квитируем прерывание в PIC
-    mov al, 0x20
-    out 0x20, al
+    ; 1. Acknowledge interrupt to Local APIC
+    sub rsp, 8
+    call apic_eoi
+    add rsp, 8
 
-    ; 2. Обновляем тики и таймеры ядра
+    ; 2. Update timer ticks and drivers
     sub rsp, 8
     call timer_callback  
     add rsp, 8
 
-    ; 3. Переключаем задачу
+    ; 3. Task switch
     mov rdi, rsp      
     call schedule     
     mov rsp, rax      

@@ -1,0 +1,110 @@
+#pragma once
+
+#include "fastfetch.h"
+#include "modules/gpu/option.h"
+
+#define FF_GPU_TEMP_UNSET (-DBL_MAX)
+#define FF_GPU_CORE_COUNT_UNSET -1
+#define FF_GPU_VMEM_SIZE_UNSET ((uint64_t) -1)
+#define FF_GPU_FREQUENCY_UNSET 0
+#define FF_GPU_PCIE_SPEED_UNSET 0
+#define FF_GPU_CORE_USAGE_UNSET (-DBL_MAX)
+#define FF_GPU_INDEX_UNSET ((uint32_t) -1)
+
+extern const char* FF_GPU_VENDOR_NAME_APPLE;
+extern const char* FF_GPU_VENDOR_NAME_AMD;
+extern const char* FF_GPU_VENDOR_NAME_INTEL;
+extern const char* FF_GPU_VENDOR_NAME_NVIDIA;
+extern const char* FF_GPU_VENDOR_NAME_MTHREADS;
+extern const char* FF_GPU_VENDOR_NAME_QUALCOMM;
+extern const char* FF_GPU_VENDOR_NAME_MTK;
+extern const char* FF_GPU_VENDOR_NAME_VMWARE;
+extern const char* FF_GPU_VENDOR_NAME_PARALLELS;
+extern const char* FF_GPU_VENDOR_NAME_MICROSOFT;
+extern const char* FF_GPU_VENDOR_NAME_REDHAT;
+extern const char* FF_GPU_VENDOR_NAME_ORACLE;
+extern const char* FF_GPU_VENDOR_NAME_BROADCOM;
+extern const char* FF_GPU_VENDOR_NAME_LOONGSON;
+extern const char* FF_GPU_VENDOR_NAME_JINGJIA_MICRO;
+extern const char* FF_GPU_VENDOR_NAME_HUAWEI;
+extern const char* FF_GPU_VENDOR_NAME_ZHAOXIN;
+extern const char* FF_GPU_VENDOR_NAME_QEMU;
+
+typedef struct FFGPUMemory {
+    uint64_t total;
+    uint64_t used;
+} FFGPUMemory;
+
+typedef struct FFGPUPcieSpeed {
+    uint16_t gen;
+    uint16_t lanes;
+} FFGPUPcieSpeed;
+
+typedef struct FFGPUResult {
+    uint32_t index;
+    FFGPUType type;
+    FFstrbuf vendor;
+    FFstrbuf name;
+    FFstrbuf driver;
+    FFstrbuf platformApi;
+    FFstrbuf memoryType;
+    double temperature;
+    double coreUsage;
+    int32_t coreCount;
+    uint32_t frequency; // Maximum time clock frequency in MHz
+    union {
+        struct {
+            FFGPUPcieSpeed psMax;
+            FFGPUPcieSpeed psCurr;
+        };
+        uint64_t pcieSpeed;
+    };
+    FFGPUMemory dedicated;
+    FFGPUMemory shared;
+    uint64_t deviceId;
+} FFGPUResult;
+
+static_assert(sizeof(((FFGPUResult*) nullptr)->pcieSpeed) == 8, "pcieSpeed is not 8 bytes");
+static_assert(sizeof(((FFGPUResult*) nullptr)->psMax) == 4, "psMax has padding");
+
+const char* ffDetectGPU(const FFGPUOptions* options, FFlist* result);
+const char* ffDetectGPUImpl(const FFGPUOptions* options, FFlist* gpus);
+
+const char* ffGPUGetVendorString(unsigned vendorId);
+
+typedef struct FFGpuDriverPciBusId {
+    uint32_t domain;
+    uint32_t bus;
+    uint32_t device;
+    uint32_t func;
+} FFGpuDriverPciBusId;
+
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__sun) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__HAIKU__) || defined(__GNU__)
+void ffGPUFillVendorAndName(uint8_t subclass, uint16_t vendor, uint16_t device, FFGPUResult* gpu);
+void ffGPUQueryAmdGpuName(uint16_t deviceId, uint8_t revisionId, FFGPUResult* gpu);
+
+    #if FF_HAVE_DRM || __has_include(<drm/drm.h>)
+const char* ffDrmDetectRadeon(const FFGPUOptions* options, FFGPUResult* gpu, const char* renderPath);
+const char* ffDrmDetectAmdgpu(const FFGPUOptions* options, FFGPUResult* gpu, const char* renderPath);
+const char* ffDrmDetectI915(FFGPUResult* gpu, int fd);
+const char* ffDrmDetectXe(FFGPUResult* gpu, int fd);
+const char* ffDrmDetectAsahi(FFGPUResult* gpu, int fd);
+const char* ffDrmDetectNouveau(FFGPUResult* gpu, int fd);
+        #if __FreeBSD__ || __OpenBSD__ // DRM is not available on NetBSD
+const char* ffGPUDetectByDrmBSD(const FFGPUOptions* options, FFlist* gpus);
+        #endif
+    #endif // FF_HAVE_DRM || __has_include(<drm/drm.h>)
+
+const char* ffGPUDetectDriverSpecific(const FFGPUOptions* options, FFGPUResult* gpu, FFGpuDriverPciBusId pciBusId);
+#endif // defined(XXX)
+
+static inline uint64_t ffGPUPciAddr2Id(uint64_t domain, uint64_t bus, uint64_t device, uint64_t function) {
+    return (domain << 16) | (bus << 8) | (device << 3) | function;
+}
+
+static inline uint64_t ffGPUGeneral2Id(uint64_t originalId) {
+    // Note: originalId may already have the MSB set
+    return (1ULL << 63) | originalId;
+}
+
+bool ffGPUDetectTypeByVendorAndName(FFGPUResult* gpu);

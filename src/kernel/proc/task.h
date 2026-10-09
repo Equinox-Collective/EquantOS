@@ -36,6 +36,7 @@ typedef struct process {
     uint64_t parent_pid;
     uint64_t pgid;
     uint64_t cr3;
+    bool vm_shared;             // cr3 is borrowed from the parent (CLONE_VM without CLONE_THREAD: vfork/posix_spawn)
     uint64_t brk;
     char cwd[256];
 
@@ -65,8 +66,14 @@ typedef struct process {
     // CPU Accounting (Ticks)
     uint64_t utime;
     uint64_t stime;
+
+    // Executable identity exported through /proc/<pid>/{exe,cmdline,comm,stat}
+    char exe_path[128];
+    char cmdline[256];          // argv joined with NUL separators, like Linux
+    uint32_t cmdline_len;
 } process_t;
 
+// In src/kernel/proc/task.h:
 typedef struct task {
     uint64_t rsp;               // offset 0 (ASM context switch)
     uint64_t kstack_at_bottom;  // offset 8
@@ -80,8 +87,9 @@ typedef struct task {
     uint64_t fs_base;
     uint64_t gs_base;
     
-    // Futex wait queue link
+    // Per-thread Futex and TID termination tracking (Required for pthread_join)
     uint64_t futex_addr;
+    uint64_t clear_child_tid;
     struct task *futex_next;
 
     // Dedicated Sleep queue link
@@ -107,5 +115,7 @@ void task_init(void);
 void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2);
 void task_init_fpu(task_t *task);
 void yield(void);
+void process_set_exec_info(process_t *proc, const char *path, int argc, char **argv);
+process_t *process_find(uint64_t pid);
 
 #endif // TASK_H

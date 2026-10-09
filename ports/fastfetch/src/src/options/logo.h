@@ -1,0 +1,79 @@
+#pragma once
+
+#include "common/ffdata.h"
+
+#define FASTFETCH_LOGO_MAX_NAMES 9
+#define FASTFETCH_LOGO_MAX_COLORS 9 // two digits would make parsing much more complicated (index 1 - 9)
+
+typedef enum FFLogoType: uint8_t {
+    FF_LOGO_TYPE_AUTO,               // if something is given, first try builtin, then file. Otherwise detect logo
+    FF_LOGO_TYPE_BUILTIN,            // builtin ascii art
+    FF_LOGO_TYPE_SMALL,              // builtin ascii art, small version
+    FF_LOGO_TYPE_FILE,               // text file, printed with color code replacement
+    FF_LOGO_TYPE_FILE_RAW,           // text file, printed as is
+    FF_LOGO_TYPE_DATA,               // text data, printed with color code replacement
+    FF_LOGO_TYPE_DATA_RAW,           // text data, printed as is
+    FF_LOGO_TYPE_COMMAND_RAW,        // command to generate text data, printed as is
+    FF_LOGO_TYPE_IMAGE_SIXEL,        // image file, printed as sixel codes
+    FF_LOGO_TYPE_IMAGE_KITTY,        // image file, printed as kitty graphics protocol
+    FF_LOGO_TYPE_IMAGE_KITTY_DIRECT, // image file, tell the terminal emulator to read image data from the specified file (Supported by kitty and wezterm)
+    FF_LOGO_TYPE_IMAGE_KITTY_ICAT,   // image file, use `kitten icat` to display the image. Requires binary `kitten` to be installed"
+    FF_LOGO_TYPE_IMAGE_ITERM,        // image file, printed as iterm graphics protocol
+    FF_LOGO_TYPE_IMAGE_CHAFA,        // image file, printed as ascii art using libchafa
+    FF_LOGO_TYPE_IMAGE_RAW,          // image file, printed as raw binary string
+    FF_LOGO_TYPE_NONE,               // `--logo none`, but still applies colors to the system information output (unless `--pipe` is set)
+} FFLogoType;
+
+typedef enum FFLogoPosition: uint8_t {
+    FF_LOGO_POSITION_LEFT,
+    FF_LOGO_POSITION_TOP,
+    FF_LOGO_POSITION_RIGHT,
+    FF_LOGO_POSITION_AUTO,
+} FFLogoPosition;
+
+typedef enum FFLogoCacheStrategy: uint8_t {
+    FF_LOGO_CACHE_ON,    // reuse a cached rendering when it is valid, and write it back on a cache miss
+    FF_LOGO_CACHE_OFF,   // ignore the image logo cache completely: neither read nor write it
+    FF_LOGO_CACHE_REGEN, // ignore any existing cached rendering and regenerate it
+} FFLogoCacheStrategy;
+
+// Which frame of the image source to render. 0 is the only value that prints an animation; the
+// others all produce a static image, which keeps the default (1, the first frame) byte-identical
+// to the behaviour before animations existed.
+#define FF_LOGO_ANIMATION_FRAME_FIRST 1
+#define FF_LOGO_ANIMATION_FRAME_ANIMATE 0
+
+typedef struct FFOptionsLogo {
+    FFstrbuf source;
+    FFLogoType type;
+    FFLogoPosition position;
+    FFstrbuf colors[FASTFETCH_LOGO_MAX_COLORS];
+    uint32_t width;
+    uint32_t height;
+    uint32_t paddingTop;
+    uint32_t paddingLeft;
+    uint32_t paddingRight;
+    uint32_t paddingBottom;
+    bool printRemaining;
+    bool preserveAspectRatio;
+    FFLogoCacheStrategy cache;
+    // 0 = animate, N > 0 = the N-th frame (1-based), N < 0 = the |N|-th frame from the end.
+    // Kept as given by the user: the cache entry name is built from it before the frame count
+    // is known, and negative values stay meaningful across runs (see image.c).
+    int32_t animationFrame;
+
+#if FF_HAVE_CHAFA
+    bool chafaFgOnly;
+    FFstrbuf chafaSymbols;
+    uint32_t chafaCanvasMode;
+    uint32_t chafaColorSpace;
+    uint32_t chafaDitherMode;
+#endif
+} FFOptionsLogo;
+
+const char* ffLogoPositionToString(FFLogoPosition position);
+void ffOptionsInitLogo(FFOptionsLogo* options);
+bool ffOptionsParseLogoCommandLine(FFOptionsLogo* options, const char* key, const char* value);
+void ffOptionsDestroyLogo(FFOptionsLogo* options);
+const char* ffOptionsParseLogoJsonConfig(FFOptionsLogo* options, yyjson_val* root, yyjson_val** pkey);
+void ffOptionsGenerateLogoJsonConfig(FFdata* data, FFOptionsLogo* options);

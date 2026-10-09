@@ -1,47 +1,66 @@
-# Disable Xft fontconfig engine, use built-in X11 bitmap fonts
+# Title bar fonts
 TitleFontName="fixed"
-TitleFontNameXft=""
+TitleFontNameXft="JetBrainsMono Nerd Font,monospace:size=10:bold"
+
+# Menu fonts
 MenuFontName="fixed"
-MenuFontNameXft=""
+MenuFontNameXft="JetBrainsMono Nerd Font,monospace:size=10"
+
+# Status and tooltips
 StatusFontName="fixed"
-StatusFontNameXft=""
+StatusFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
 QuickSwitchFontName="fixed"
-QuickSwitchFontNameXft=""
+QuickSwitchFontNameXft="JetBrainsMono Nerd Font,monospace:size=10:bold"
+
+# Dialog and taskbar buttons
 NormalButtonFontName="fixed"
-NormalButtonFontNameXft=""
+NormalButtonFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
 ActiveButtonFontName="fixed"
-ActiveButtonFontNameXft=""
-NormalTaskBarFontName="fixed"
-NormalTaskBarFontNameXft=""
-ActiveTaskBarFontName="fixed"
-ActiveTaskBarFontNameXft=""
+ActiveButtonFontNameXft="JetBrainsMono Nerd Font,monospace:size=9:bold"
 ToolButtonFontName="fixed"
-ToolButtonFontNameXft=""
+ToolButtonFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
+
+# Taskbar and workspaces
+TaskBarShowStartMenu=1
+TaskBarShowWindowListMenu=0
+TaskBarShowWorkspaces=1
+TaskBarShowWindows=1
+TaskBarShowClock=1
+
+NormalTaskBarFontName="fixed"
+NormalTaskBarFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
+ActiveTaskBarFontName="fixed"
+ActiveTaskBarFontNameXft="JetBrainsMono Nerd Font,monospace:size=9:bold"
 NormalWorkspaceFontName="fixed"
-NormalWorkspaceFontNameXft=""
+NormalWorkspaceFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
 ActiveWorkspaceFontName="fixed"
-ActiveWorkspaceFontNameXft=""
+ActiveWorkspaceFontNameXft="JetBrainsMono Nerd Font,monospace:size=9:bold"
+
+# Window lists and clocks
 MinimizedWindowFontName="fixed"
-MinimizedWindowFontNameXft=""
+MinimizedWindowFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
 ClockFontName="fixed"
-ClockFontNameXft=""
+ClockFontNameXft="JetBrainsMono Nerd Font,monospace:size=9:bold"
 ApmFontName="fixed"
-ApmFontNameXft=""
+ApmFontNameXft="JetBrainsMono Nerd Font,monospace:size=9"
+
+# Input fields and labels
 InputFontName="fixed"
-InputFontNameXft=""
+InputFontNameXft="JetBrainsMono Nerd Font,monospace:size=10"
 LabelFontName="fixed"
-LabelFontNameXft=""
+LabelFontNameXft="JetBrainsMono Nerd Font,monospace:size=10"
 
 # Disable hardware monitors requiring /proc
-TaskBarShowClock=1
 TaskBarShowAPMStatus=0
 TaskBarShowMailBoxStatus=0
 TaskBarShowCPUStatus=0
 TaskBarShowMEMStatus=0
 TaskBarShowNetStatus=0
-TaskBarShowWorkspaces=1
-TaskBarShowWindows=1
-TaskBarShowWindowListMenu=1
+NetworkStatusShow=0
+CPUStatusShow=0
+MEMStatusShow=0
+MailBoxStatusShow=0
+APMStatusShow=0
 
 # Desktop Window Behavior
 OpaqueMove=1

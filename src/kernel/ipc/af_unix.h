@@ -10,13 +10,13 @@
 #define AF_UNIX             1
 #define AF_LOCAL            1
 #define UNIX_PATH_MAX       108
-#define UNIX_SOCK_BUF_SIZE  16384 // 16KB circular buffer for high-bandwidth X11 packets
+#define UNIX_SOCK_BUF_SIZE  262144 // 256KB buffer matches Linux wmem_default
 #define UNIX_BACKLOG_MAX    16
 
 // POSIX sockaddr_un definition
 struct sockaddr_un {
-    uint16_t sun_family;               // AF_UNIX
-    char sun_path[UNIX_PATH_MAX];      // Path in VFS (e.g. "/tmp/.X11-unix/X0")
+    uint16_t sun_family;
+    char sun_path[UNIX_PATH_MAX];
 };
 
 typedef enum {
@@ -31,24 +31,20 @@ struct unix_socket;
 
 typedef struct unix_socket {
     unix_sock_state_t state;
-    int type; // SOCK_STREAM or SOCK_DGRAM
+    int type;
     char path[UNIX_PATH_MAX];
 
-    // Data buffer (Read by this socket, written by the peer)
-    uint8_t buffer[UNIX_SOCK_BUF_SIZE];
+    // Dynamically allocated 256KB circular ring buffer
+    uint8_t *buffer;
     uint32_t read_pos;
     uint32_t write_pos;
     uint32_t count;
 
-    // Paired Peer Socket
     struct unix_socket *peer;
-
-    // Listen / Accept Connection Backlog
     struct unix_socket *backlog[UNIX_BACKLOG_MAX];
     uint32_t backlog_count;
     uint32_t backlog_max;
 
-    // Blocking wait queues
     struct task *blocked_reader;
     struct task *blocked_writer;
     struct task *blocked_accept;

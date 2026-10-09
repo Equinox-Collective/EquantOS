@@ -32,6 +32,8 @@
 #include "../drivers/net/rtl8139.h"
 #include <stdarg.h>
 #include "../misc/rtc.h"
+#include "../equant_version.h"
+#include "../fs/procfs.h"
 #include "../misc/random.h"
 
 // ============================================================================
@@ -303,8 +305,13 @@
 #define FUTEX_WAIT                0
 #define FUTEX_WAKE                1
 #define FUTEX_REQUEUE             3
+#define FUTEX_WAIT_BITSET         9
+#define FUTEX_WAKE_BITSET        10
 #define FUTEX_PRIVATE_FLAG      128
 #define FUTEX_CLOCK_REALTIME    256
+
+#define POLLWRNORM 0x0100
+#define POLLRDNORM 0x0040
 
 #define CLONE_VM             0x00000100
 #define CLONE_FS             0x00000200

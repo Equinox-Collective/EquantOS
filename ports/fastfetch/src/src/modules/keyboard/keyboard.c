@@ -1,0 +1,191 @@
+#include "common/percent.h"
+#include "common/printing.h"
+#include "common/jsonconfig.h"
+#include "common/strutil.h"
+#include "detection/keyboard/keyboard.h"
+#include "modules/keyboard/keyboard.h"
+
+static void printDevice(FFKeyboardOptions* options, const FFKeyboardDevice* device, uint8_t index) {
+    if (options->moduleArgs.outputFormat.length == 0) {
+        ffPrintLogoAndKey(FF_MODULE_GET_DISPLAY_NAME(Keyboard), index, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT);
+        ffStrbufPutTo(&device->name, stdout);
+    } else {
+        FF_PRINT_FORMAT_CHECKED(FF_MODULE_GET_DISPLAY_NAME(Keyboard), index, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, ((FFformatarg[]) {
+                                                                                                                 FF_ARG(device->name, "name"),
+                                                                                                                 FF_ARG(device->serial, "serial"),
+                                                                                                             }));
+    }
+}
+
+bool ffPrintKeyboard(FFKeyboardOptions* options) {
+    FF_LIST_AUTO_DESTROY result = ffListCreate();
+
+    const char* error = ffDetectKeyboard(&result);
+
+    if (error) {
+        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Keyboard), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "%s", error);
+        return false;
+    }
+
+    if (!result.length) {
+        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Keyboard), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "No devices detected");
+        return false;
+    }
+
+    FF_LIST_AUTO_DESTROY filtered = ffListCreate();
+    FF_LIST_FOR_EACH (FFKeyboardDevice, device, result) {
+        bool ignored = false;
+        FF_LIST_FOR_EACH (FFstrbuf, ignore, options->ignores) {
+            if (ffStrbufStartsWithIgnCase(&device->name, ignore)) {
+                ignored = true;
+                break;
+            }
+        }
+        if (!ignored) {
+            FFKeyboardDevice** ptr = FF_LIST_ADD(FFKeyboardDevice*, filtered);
+            *ptr = device;
+        }
+    }
+
+    bool ret = true;
+    if (!filtered.length) {
+        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Keyboard), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "All devices are ignored");
+        ret = false;
+    } else {
+        uint8_t index = 0;
+        FF_LIST_FOR_EACH (FFKeyboardDevice*, pdevice, filtered) {
+            printDevice(options, *pdevice, filtered.length > 1 ? ++index : 0);
+        }
+    }
+
+    // `filtered` only holds borrowed pointers, so the strings of every device — including the
+    // ignored ones and the ones skipped when every device is ignored — have to be released here
+    FF_LIST_FOR_EACH (FFKeyboardDevice, device, result) {
+        ffStrbufDestroy(&device->serial);
+        ffStrbufDestroy(&device->name);
+    }
+
+    return ret;
+}
+
+void ffParseKeyboardJsonObject(FFKeyboardOptions* options, yyjson_val* module) {
+    yyjson_val *key, *val;
+    size_t idx, max;
+    yyjson_obj_foreach (module, idx, max, key, val) {
+        if (ffJsonConfigParseModuleArgs(key, val, &options->moduleArgs)) {
+            continue;
+        }
+
+        if (unsafe_yyjson_equals_str(key, "ignores")) {
+            yyjson_val* elem;
+            size_t eidx, emax;
+            yyjson_arr_foreach (val, eidx, emax, elem) {
+                if (yyjson_is_str(elem)) {
+                    FFstrbuf* strbuf = FF_LIST_ADD(FFstrbuf, options->ignores);
+                    ffStrbufInitJsonVal(strbuf, elem);
+                }
+            }
+            continue;
+        }
+
+        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Keyboard), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "Unknown JSON key %s", unsafe_yyjson_get_str(key));
+    }
+}
+
+void ffGenerateKeyboardJsonConfig(FFKeyboardOptions* options, yyjson_mut_doc* doc, yyjson_mut_val* module) {
+    ffJsonConfigGenerateModuleArgsConfig(doc, module, &options->moduleArgs);
+
+    if (options->ignores.length > 0) {
+        yyjson_mut_val* ignores = yyjson_mut_obj_add_arr(doc, module, "ignores");
+        FF_LIST_FOR_EACH (FFstrbuf, strbuf, options->ignores) {
+            yyjson_mut_arr_append(ignores, yyjson_mut_strncpy(doc, strbuf->chars, strbuf->length));
+        }
+    }
+}
+
+bool ffGenerateKeyboardJsonResult([[maybe_unused]] FFKeyboardOptions* options, yyjson_mut_doc* doc, yyjson_mut_val* module) {
+    FF_LIST_AUTO_DESTROY result = ffListCreate();
+
+    const char* error = ffDetectKeyboard(&result);
+
+    if (error) {
+        yyjson_mut_obj_add_str(doc, module, "error", error);
+        return false;
+    }
+
+    yyjson_mut_val* arr = yyjson_mut_obj_add_arr(doc, module, "result");
+    FF_LIST_FOR_EACH (FFKeyboardDevice, device, result) {
+        yyjson_mut_val* obj = yyjson_mut_arr_add_obj(doc, arr);
+        yyjson_mut_obj_add_strbuf(doc, obj, "serial", &device->serial);
+        yyjson_mut_obj_add_strbuf(doc, obj, "name", &device->name);
+
+        bool ignored = false;
+        FF_LIST_FOR_EACH (FFstrbuf, ignore, options->ignores) {
+            if (ffStrbufStartsWithIgnCase(&device->name, ignore)) {
+                ignored = true;
+                break;
+            }
+        }
+        yyjson_mut_obj_add_bool(doc, obj, "ignored", ignored);
+    }
+
+    FF_LIST_FOR_EACH (FFKeyboardDevice, device, result) {
+        ffStrbufDestroy(&device->serial);
+        ffStrbufDestroy(&device->name);
+    }
+
+    return true;
+}
+
+void ffInitKeyboardOptions(FFKeyboardOptions* options) {
+    ffOptionInitModuleArg(&options->moduleArgs, "");
+
+    ffListInit(&options->ignores);
+}
+
+void ffDestroyKeyboardOptions(FFKeyboardOptions* options) {
+    ffOptionDestroyModuleArg(&options->moduleArgs);
+
+    FF_LIST_FOR_EACH (FFstrbuf, str, options->ignores) {
+        ffStrbufDestroy(str);
+    }
+    ffListDestroy(&options->ignores);
+}
+
+FFModuleBaseInfo ffKeyboardModuleInfo = {
+    .name = "Keyboard",
+    .description = "List connected keyboards",
+    .displayName = {
+        .en = "Keyboard",
+        .ar = "لوحة المفاتيح",
+        .cs = "Klávesnice",
+        .de = "Tastatur",
+        .es = "Teclado",
+        .fr = "Clavier",
+        .gl = "Teclado",
+        .he = "מקלדת",
+        .id = "Papan Ketik",
+        .it = "Tastiera",
+        .ja = "キーボード",
+        .ko = "키보드",
+        .pl = "Klawiatura",
+        .pt = "Teclado",
+        .ru = "Клавиатура",
+        .tr = "Klavye",
+        .uk = "Клавіатура",
+        .vi = "Bàn phím",
+        .zh_CN = "键盘",
+        .zh_TW = "鍵盤",
+    },
+    .initOptions = (void*) ffInitKeyboardOptions,
+    .destroyOptions = (void*) ffDestroyKeyboardOptions,
+    .parseJsonObject = (void*) ffParseKeyboardJsonObject,
+    .printModule = (void*) ffPrintKeyboard,
+    .generateJsonResult = (void*) ffGenerateKeyboardJsonResult,
+    .generateJsonConfig = (void*) ffGenerateKeyboardJsonConfig,
+    .formatArgs = FF_FORMAT_ARG_LIST(((FFModuleFormatArg[]) {
+        { "Name", "name" },
+        { "Serial number", "serial" },
+    })),
+    .defaultOrder = 65,
+};

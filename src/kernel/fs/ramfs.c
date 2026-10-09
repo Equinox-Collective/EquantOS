@@ -7,6 +7,7 @@
 #include "../drivers/serial/serial.h"
 #include "iso9660.h"
 #include "../drivers/display/psf2.h"
+#include "../equant_version.h"
 
 extern volatile struct limine_module_request module_request;
 
@@ -170,7 +171,7 @@ static void ramfs_create_busybox_links(vfs_node_t *bin_dir, vfs_node_t *bbox_nod
         "ls", "cat", "cp", "mv", "rm", "mkdir", "rmdir", "touch",
         "clear", "echo", "grep", "head", "tail", "wc", "uname",
         "date", "df", "free", "ps", "kill", "sleep", "chmod", "chown",
-        "sh", NULL
+        NULL // "sh" removed so it points exclusively to GNU Bash
     };
 
     for (int i = 0; applets[i] != NULL; i++) {
@@ -184,6 +185,38 @@ static void ramfs_create_busybox_links(vfs_node_t *bin_dir, vfs_node_t *bbox_nod
                 bin_dir->children = link;
             }
         }
+    }
+}
+
+static vfs_node_t *ramfs_mkdir_p(vfs_node_t *dir, const char *const *names) {
+    for (int i = 0; dir && names[i]; i++) {
+        dir = ramfs_create_directory(dir, names[i]);
+    }
+    return dir;
+}
+
+// Distribution identity and display metadata read by userspace tools (fastfetch, etc.)
+static void ramfs_create_system_info(vfs_node_t *etc_dir, vfs_node_t *sys_dir) {
+    if (etc_dir && !vfs_finddir(etc_dir, "os-release")) {
+        static const char os_release[] =
+            "NAME=\"" EQUANT_OS_NAME "\"\n"
+            "PRETTY_NAME=\"" EQUANT_OS_NAME " " EQUANT_OS_VERSION "\"\n"
+            "ID=" EQUANT_OS_ID "\n"
+            "VERSION=\"" EQUANT_OS_VERSION "\"\n"
+            "VERSION_ID=" EQUANT_OS_VERSION_ID "\n";
+        ramfs_create_file(etc_dir, "os-release", (void *)os_release, sizeof(os_release) - 1);
+    }
+
+    // Linux DRM sysfs layout for the boot framebuffer (/sys/class/drm/card0-Virtual-1)
+    extern struct limine_framebuffer *kernel_fb;
+    static const char *const drm_path[] = { "class", "drm", "card0-Virtual-1", NULL };
+    vfs_node_t *connector = (sys_dir && kernel_fb) ? ramfs_mkdir_p(sys_dir, drm_path) : NULL;
+    if (connector && !vfs_finddir(connector, "status")) {
+        char modes[32];
+        int len = snprintf(modes, sizeof(modes), "%lux%lu\n", kernel_fb->width, kernel_fb->height);
+        ramfs_create_file(connector, "status", (void *)"connected\n", 10);
+        ramfs_create_file(connector, "enabled", (void *)"enabled\n", 8);
+        ramfs_create_file(connector, "modes", modes, (size_t)len);
     }
 }
 
@@ -209,6 +242,7 @@ static int __init ramfs_populate_modules_initcall(void) {
     if (sys_dir && !sys_bin_dir) {
         sys_bin_dir = ramfs_create_directory(sys_dir, "bin");
     }
+    ramfs_create_system_info(etc_dir, sys_dir);
 
     vfs_node_t *bbox_node = NULL;
     vfs_node_t *bashrc_node = NULL;
@@ -240,6 +274,16 @@ static int __init ramfs_populate_modules_initcall(void) {
                     bsh->parent = bin_dir;
                     bsh->next = bin_dir->children;
                     bin_dir->children = bsh;
+
+                    // Also provide standard /bin/sh pointing to Bash
+                    vfs_node_t *sh_link = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+                    if (sh_link) {
+                        memcpy(sh_link, entry, sizeof(vfs_node_t));
+                        strcpy(sh_link->name, "sh");
+                        sh_link->parent = bin_dir;
+                        sh_link->next = bin_dir->children;
+                        bin_dir->children = sh_link;
+                    }
                 }
             }
 

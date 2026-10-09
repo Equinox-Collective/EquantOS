@@ -22,6 +22,10 @@ static vfs_node_t *devfs_root = NULL;
 extern struct limine_framebuffer *kernel_fb;
 extern uint64_t hhdm_offset;
 
+static void *fb_shadow_buffer = NULL;
+static size_t fb_total_bytes = 0;
+static uint64_t last_sync_tick = 0;
+
 // Handlers for /dev/null
 static int64_t dev_null_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
     (void)node; (void)offset; (void)size; (void)buffer;
@@ -173,6 +177,40 @@ static int dev_fb_ioctl(vfs_node_t *node, uint64_t req, void *arg) {
     return -ENOTTY;
 }
 
+void devfs_fb_flush(void) {
+    if (!kernel_fb || !fb_shadow_buffer) return;
+
+    uint32_t *src = (uint32_t *)fb_shadow_buffer;
+    uint32_t *dst = (uint32_t *)kernel_fb->address;
+    size_t dwords = fb_total_bytes / 4;
+
+    // Fast block transfer from cached RAM to Write-Combining VRAM
+    for (size_t i = 0; i < dwords; i += 16) {
+        dst[i + 0] = src[i + 0];
+        dst[i + 1] = src[i + 1];
+        dst[i + 2] = src[i + 2];
+        dst[i + 3] = src[i + 3];
+        dst[i + 4] = src[i + 4];
+        dst[i + 5] = src[i + 5];
+        dst[i + 6] = src[i + 6];
+        dst[i + 7] = src[i + 7];
+        dst[i + 8] = src[i + 8];
+        dst[i + 9] = src[i + 9];
+        dst[i + 10] = src[i + 10];
+        dst[i + 11] = src[i + 11];
+        dst[i + 12] = src[i + 12];
+        dst[i + 13] = src[i + 13];
+        dst[i + 14] = src[i + 14];
+        dst[i + 15] = src[i + 15];
+    }
+}
+
+static bool fb_gui_active = false;
+
+bool devfs_is_gui_active(void) {
+    return fb_gui_active;
+}
+
 static int64_t dev_fb_mmap(vfs_node_t *node, uint64_t addr, size_t length, int prot, int flags, int64_t offset) {
     (void)node; (void)prot; (void)flags;
     if (!kernel_fb) return -ENODEV;
@@ -185,24 +223,20 @@ static int64_t dev_fb_mmap(vfs_node_t *node, uint64_t addr, size_t length, int p
         length = total_size;
     }
 
+    // Clear physical VRAM to black so X11 starts on a clean slate
+    memset((void *)kernel_fb->address, 0, total_size);
+
+    // Switch off console text drawing automatically
+    fb_gui_active = true;
+
+    size_t page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
-    uint64_t cur_offset = 0;
 
-    // Fast-path: map 2MB huge pages with Write-Combining if properly aligned
-    while (cur_offset + PAGE_SIZE_2MB <= length && 
-           ((addr + cur_offset) & (PAGE_SIZE_2MB - 1)) == 0 &&
-           ((fb_phys + (uint64_t)offset + cur_offset) & (PAGE_SIZE_2MB - 1)) == 0) {
-        
-        vmm_map_2mb(pml4, addr + cur_offset, fb_phys + (uint64_t)offset + cur_offset,
-                    PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_WC);
-        cur_offset += PAGE_SIZE_2MB;
-    }
-
-    // Residual 4KB pages mapping with Write-Combining
-    while (cur_offset < length) {
-        vmm_map(pml4, addr + cur_offset, fb_phys + (uint64_t)offset + cur_offset,
+    // Map physical video memory directly with Write-Combining enabled
+    for (size_t i = 0; i < page_count; i++) {
+        uint64_t p_addr = fb_phys + (uint64_t)offset + (i * PAGE_SIZE);
+        vmm_map(pml4, addr + (i * PAGE_SIZE), p_addr,
                 PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_WC);
-        cur_offset += PAGE_SIZE;
     }
 
     return (int64_t)addr;
@@ -303,7 +337,11 @@ static int64_t devfs_tty_write(vfs_node_t *node, uint64_t offset, uint64_t size,
     for (size_t i = 0; i < size; i++) {
         char c = (char)buffer[i];
         serial_putchar(COM1, c);
-        term_putchar_raw(c);
+        
+        // Only draw to screen if GUI is not active
+        if (!devfs_is_gui_active()) {
+            term_putchar_raw(c);
+        }
     }
     return (int64_t)size;
 }
