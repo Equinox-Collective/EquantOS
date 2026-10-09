@@ -1,4 +1,4 @@
-// userspace/epacmg.c - EquantOS Package Manager (OPM) Client (DEBUG INSTRUMENTED)
+// userspace/epacmg.c - EquantOS Package Manager (OPM) Client
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,9 +24,22 @@
 #define DB_INSTALLED "/var/lib/epacmg/installed.db"
 #define DB_CACHE "/var/lib/epacmg/packages.db"
 
-// Direct synchronous logger (Bypasses stdio buffering, visible before any crash!)
+// Direct synchronous logger (bypasses stdio buffering, visible before any crash).
+// Step tracing only with EPACMG_DEBUG=1; errors are always shown.
 static void dbg(const char *msg) {
-    write(1, msg, strlen(msg));
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("EPACMG_DEBUG") != NULL;
+    if (enabled || strncmp(msg, "[ERROR]", 7) == 0) write(1, msg, strlen(msg));
+}
+
+// Download progress on one terminal line, about every 256 KB
+static void progress(size_t received, bool done) {
+    static size_t shown = 0;
+    if (!done && received - shown < 262144 && received >= shown) return;
+    shown = received;
+    printf("\r  %zu KB received%s", received / 1024, done ? "\n" : "");
+    fflush(stdout);
+    if (done) shown = 0;
 }
 
 static int resolve_dns(const char *host, uint32_t *ip) {
@@ -91,12 +104,22 @@ static int extract_tar(const uint8_t *tar_data, size_t total_size) {
         unsigned int file_size = parse_octal(hdr->size, sizeof(hdr->size));
         offset += 512;
 
-        char dest_path[256];
-        if (hdr->name[0] == '/') {
-            snprintf(dest_path, sizeof(dest_path), "%s", hdr->name);
+        char name[256];
+        if (hdr->prefix[0] && memcmp(hdr->magic, "ustar", 5) == 0) {
+            snprintf(name, sizeof(name), "%.155s/%.100s", hdr->prefix, hdr->name);
         } else {
-            snprintf(dest_path, sizeof(dest_path), "/%s", hdr->name);
+            snprintf(name, sizeof(name), "%.100s", hdr->name);
         }
+        const char *rel = name;
+        while (rel[0] == '.' && rel[1] == '/') rel += 2;
+
+        char dest_path[256];
+        if (rel[0] == '/') {
+            snprintf(dest_path, sizeof(dest_path), "%s", rel);
+        } else {
+            snprintf(dest_path, sizeof(dest_path), "/%s", rel);
+        }
+        if (offset + file_size > total_size) break; // truncated archive
 
         if (hdr->typeflag == '5') {
             mkdir(dest_path, 0755);
@@ -105,8 +128,11 @@ static int extract_tar(const uint8_t *tar_data, size_t total_size) {
             printf("  -> Extracting: %s (%u bytes)\n", dest_path, file_size);
             int fd = open(dest_path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
             if (fd >= 0) {
-                if (file_size > 0) {
-                    write(fd, tar_data + offset, file_size);
+                size_t done = 0;
+                while (done < file_size) {
+                    ssize_t w = write(fd, tar_data + offset + done, file_size - done);
+                    if (w <= 0) break;
+                    done += (size_t)w;
                 }
                 close(fd);
                 chmod(dest_path, 0755);
@@ -252,11 +278,13 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
         ssize_t r;
         while ((r = read(fd, buf + received, buf_cap - received - 1)) > 0) {
             received += r;
+            progress(received, false);
             if (received + 4096 >= buf_cap) {
                 buf_cap *= 2;
                 buf = (uint8_t *)realloc(buf, buf_cap);
             }
         }
+        progress(received, true);
     } else {
         dbg("[STEP 5] Setting up BearSSL static structures...\n");
 
@@ -272,8 +300,9 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
 
         dbg("[STEP 8] Injecting CPU entropy...\n");
         uint8_t entropy[32];
-        uint64_t tsc;
-        __asm__ volatile("rdtsc" : "=A"(tsc));
+        uint32_t tsc_lo, tsc_hi;
+        __asm__ volatile("rdtsc" : "=a"(tsc_lo), "=d"(tsc_hi));
+        uint64_t tsc = ((uint64_t)tsc_hi << 32) | tsc_lo;
         for (int i = 0; i < 32; i++) {
             tsc = tsc * 6364136223846793005ULL + 1442695040888963407ULL;
             entropy[i] = (uint8_t)(tsc >> (i % 8 * 8));
@@ -311,11 +340,13 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
             int r = br_sslio_read(&ioc, buf + received, buf_cap - received - 1);
             if (r < 0) break;
             received += r;
+            progress(received, false);
             if (received + 4096 >= buf_cap) {
                 buf_cap *= 2;
                 buf = (uint8_t *)realloc(buf, buf_cap);
             }
         }
+        progress(received, true);
         dbg("[STEP 14] Read loop terminated.\n");
     }
 
@@ -339,6 +370,15 @@ static uint8_t *http_fetch(const char *host, int port, const char *path, bool us
         return NULL;
     }
     body += 4;
+
+    int status = 0;
+    if (sscanf((char *)buf, "HTTP/%*d.%*d %d", &status) != 1 || status != 200) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "[ERROR] Server answered HTTP %d for %s\n", status, path);
+        dbg(msg);
+        free(buf);
+        return NULL;
+    }
 
     size_t body_len = received - (size_t)(body - (char *)buf);
     uint8_t *res = (uint8_t *)malloc(body_len);
@@ -475,6 +515,61 @@ static int cmd_install(const char *pkg_name) {
     return 0;
 }
 
+// Install a package archive that is already on disk (like pacman -U)
+static int cmd_install_file(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("\033[31mError: cannot open %s\033[0m\n", path);
+        return 1;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        printf("\033[31mError: cannot stat %s\033[0m\n", path);
+        close(fd);
+        return 1;
+    }
+
+    size_t size = (size_t)st.st_size;
+    uint8_t *data = (uint8_t *)malloc(size);
+    if (!data) {
+        printf("\033[31mError: out of memory reading %s\033[0m\n", path);
+        close(fd);
+        return 1;
+    }
+    size_t got = 0;
+    while (got < size) {
+        ssize_t r = read(fd, data + got, size - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    close(fd);
+
+    printf(":: Extracting %s...\n", path);
+    int extracted = extract_tar(data, got);
+    free(data);
+    if (extracted <= 0) {
+        printf("\033[31mError: archive extracted 0 files (invalid .epkg format)\033[0m\n");
+        return 1;
+    }
+
+    mkdir("/var", 0755);
+    mkdir("/var/lib", 0755);
+    mkdir(DB_DIR, 0755);
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    char name[64];
+    snprintf(name, sizeof(name), "%s", base);
+    char *dot = strstr(name, ".epkg");
+    if (dot) *dot = '\0';
+    FILE *inst = fopen(DB_INSTALLED, "a");
+    if (inst) {
+        fprintf(inst, "%s|local\n", name);
+        fclose(inst);
+    }
+    printf("\033[32m(1/1) Installed %s (%d files)\033[0m\n", name, extracted);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("EquantOS Package Manager (epacmg) v1.0\n");
@@ -482,6 +577,7 @@ int main(int argc, char **argv) {
         printf("Operations:\n");
         printf("  sync, -Sy          Update package repository database\n");
         printf("  ins,  -S <pkg>     Install target package from repository\n");
+        printf("  -U <file.epkg>     Install a package archive from disk\n");
         printf("  list, -Q           List available packages\n");
         return 0;
     }
@@ -490,6 +586,8 @@ int main(int argc, char **argv) {
         return cmd_sync();
     } else if ((strcmp(argv[1], "ins") == 0 || strcmp(argv[1], "-S") == 0) && argc >= 3) {
         return cmd_install(argv[2]);
+    } else if (strcmp(argv[1], "-U") == 0 && argc >= 3) {
+        return cmd_install_file(argv[2]);
     } else if (strcmp(argv[1], "list") == 0 || strcmp(argv[1], "-Q") == 0) {
         FILE *f = fopen(DB_CACHE, "r");
         if (!f) { printf("No cache. Run 'epacmg sync' first.\n"); return 1; }

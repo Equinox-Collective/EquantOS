@@ -40,7 +40,9 @@ Current focus: We are entered LONG-TERM development so development is now not fu
 - Filesystems: VFS, writable RAMFS, GPT/MBR discovery, FAT32, ext2 read/write,
   Linux-compatible `/proc` (cpuinfo, meminfo, uptime, version, loadavg, swaps,
   `/proc/<pid>/{stat,cmdline,comm,status}`, exe/cwd/fd links), `/etc/os-release`
-- Ports: [fastfetch](https://github.com/fastfetch-cli/fastfetch) with a built-in EquantOS logo
+- Ports: [fastfetch](https://github.com/fastfetch-cli/fastfetch) with a built-in EquantOS logo,
+  [NetSurf](https://www.netsurf-browser.org/) 3.11 (`epacmg -S netsurf`, runs under X11/IceWM),
+  [IceWM](https://ice-wm.org/) 4.1.0 with wallpapers (icewmbg) and switchable themes
 - Storage: PCI enumeration, NVMe namespace I/O, legacy ATA PIO
 - Input/output: PS/2 keyboard, framebuffer terminal, COM1 serial log
 - Shell: interactive diagnostic shell with ~25 commands
