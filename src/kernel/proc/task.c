@@ -128,6 +128,35 @@ void yield(void) {
     sched_yield();
 }
 
+void process_set_exec_info(process_t *proc, const char *path, int argc, char **argv) {
+    if (!proc) return;
+
+    proc->exe_path[0] = '\0';
+    if (path) {
+        strncpy(proc->exe_path, path, sizeof(proc->exe_path) - 1);
+        proc->exe_path[sizeof(proc->exe_path) - 1] = '\0';
+    }
+
+    uint32_t len = 0;
+    for (int i = 0; argv && i < argc && argv[i]; i++) {
+        size_t arg_len = strlen(argv[i]) + 1;
+        if (len + arg_len > sizeof(proc->cmdline)) break;
+        memcpy(proc->cmdline + len, argv[i], arg_len);
+        len += (uint32_t)arg_len;
+    }
+    proc->cmdline_len = len;
+}
+
+process_t *process_find(uint64_t pid) {
+    if (!task_list) return NULL;
+    task_t *curr = task_list;
+    do {
+        if (curr->process && curr->process->pid == pid) return curr->process;
+        curr = curr->next;
+    } while (curr && curr != task_list);
+    return NULL;
+}
+
 static int __init tasking_subsys_initcall(void) {
     task_init();
     task_create_idle();

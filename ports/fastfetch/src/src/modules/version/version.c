@@ -1,0 +1,140 @@
+#include "common/printing.h"
+#include "common/jsonconfig.h"
+#include "common/strutil.h"
+#include "detection/libc/libc.h"
+#include "detection/version/version.h"
+#include "modules/version/version.h"
+
+bool ffPrintVersion(FFVersionOptions* options) {
+    FFVersionResult* result = &ffVersionResult;
+
+    if (options->moduleArgs.outputFormat.length == 0) {
+        ffPrintLogoAndKey(FF_MODULE_GET_DISPLAY_NAME(Version), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT);
+        printf("%s %s%s%s (%s)\n", result->projectName, result->version, result->versionTweak, result->debugMode ? "-debug" : "", result->architecture);
+    } else {
+        FFLibcResult libcResult;
+        FF_STRBUF_AUTO_DESTROY buf = ffStrbufCreate();
+        if (!ffDetectLibc(&libcResult)) {
+            ffStrbufSetS(&buf, libcResult.name);
+            if (libcResult.version) {
+                ffStrbufAppendC(&buf, ' ');
+                ffStrbufAppendS(&buf, libcResult.version);
+            }
+        }
+
+        const char* buildType = result->debugMode ? "debug" : "release";
+        FF_PRINT_FORMAT_CHECKED(FF_MODULE_GET_DISPLAY_NAME(Version), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, ((FFformatarg[]) {
+                                                                                                            FF_ARG(result->projectName, "project-name"),
+                                                                                                            FF_ARG(result->version, "version"),
+                                                                                                            FF_ARG(result->versionTweak, "version-tweak"),
+                                                                                                            FF_ARG(buildType, "build-type"),
+                                                                                                            FF_ARG(result->sysName, "sysname"),
+                                                                                                            FF_ARG(result->architecture, "arch"),
+                                                                                                            FF_ARG(result->cmakeBuiltType, "cmake-built-type"),
+                                                                                                            FF_ARG(result->compileTime, "compile-time"),
+                                                                                                            FF_ARG(result->compiler, "compiler"),
+                                                                                                            FF_ARG(buf, "libc"),
+                                                                                                        }));
+    }
+
+    return true;
+}
+
+void ffParseVersionJsonObject(FFVersionOptions* options, yyjson_val* module) {
+    yyjson_val *key, *val;
+    size_t idx, max;
+    yyjson_obj_foreach (module, idx, max, key, val) {
+        if (ffJsonConfigParseModuleArgs(key, val, &options->moduleArgs)) {
+            continue;
+        }
+
+        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Version), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "Unknown JSON key %s", unsafe_yyjson_get_str(key));
+    }
+}
+
+void ffGenerateVersionJsonConfig(FFVersionOptions* options, yyjson_mut_doc* doc, yyjson_mut_val* module) {
+    ffJsonConfigGenerateModuleArgsConfig(doc, module, &options->moduleArgs);
+}
+
+bool ffGenerateVersionJsonResult([[maybe_unused]] FFVersionOptions* options, yyjson_mut_doc* doc, yyjson_mut_val* module) {
+    FFVersionResult* result = &ffVersionResult;
+
+    yyjson_mut_val* obj = yyjson_mut_obj_add_obj(doc, module, "result");
+    yyjson_mut_obj_add_str(doc, obj, "projectName", result->projectName);
+    yyjson_mut_obj_add_str(doc, obj, "sysName", result->sysName);
+    yyjson_mut_obj_add_str(doc, obj, "architecture", result->architecture);
+    yyjson_mut_obj_add_str(doc, obj, "version", result->version);
+    yyjson_mut_obj_add_str(doc, obj, "versionGit", result->versionGit);
+    yyjson_mut_obj_add_str(doc, obj, "cmakeBuiltType", result->cmakeBuiltType);
+    yyjson_mut_obj_add_str(doc, obj, "compileTime", result->compileTime);
+    yyjson_mut_obj_add_str(doc, obj, "compiler", result->compiler);
+    yyjson_mut_obj_add_bool(doc, obj, "debugMode", result->debugMode);
+
+    FFLibcResult libcResult;
+    if (ffDetectLibc(&libcResult)) {
+        yyjson_mut_obj_add_null(doc, obj, "libc");
+    } else {
+        FF_STRBUF_AUTO_DESTROY buf = ffStrbufCreateS(libcResult.name);
+        if (libcResult.version) {
+            ffStrbufAppendC(&buf, ' ');
+            ffStrbufAppendS(&buf, libcResult.version);
+        }
+        yyjson_mut_obj_add_strbuf(doc, obj, "libc", &buf);
+    }
+
+    return true;
+}
+
+void ffInitVersionOptions(FFVersionOptions* options) {
+    ffOptionInitModuleArg(&options->moduleArgs, "");
+}
+
+void ffDestroyVersionOptions(FFVersionOptions* options) {
+    ffOptionDestroyModuleArg(&options->moduleArgs);
+}
+
+FFModuleBaseInfo ffVersionModuleInfo = {
+    .name = "Version",
+    .description = "Print the Fastfetch version and build information",
+    .displayName = {
+        .en = "Version",
+        .ar = "الإصدار",
+        .cs = "Verze",
+        .de = "Version",
+        .es = "Versión",
+        .fr = "Version",
+        .gl = "Versión",
+        .he = "גרסה",
+        .id = "Versi",
+        .it = "Versione",
+        .ja = "バージョン",
+        .ko = "버전",
+        .pl = "Wersja",
+        .pt = "Versão",
+        .ru = "Версия",
+        .tr = "Sürüm",
+        .uk = "Версія",
+        .vi = "Phiên bản",
+        .zh_CN = "版本",
+        .zh_TW = "版本",
+    },
+    .initOptions = (void*) ffInitVersionOptions,
+    .destroyOptions = (void*) ffDestroyVersionOptions,
+    .parseJsonObject = (void*) ffParseVersionJsonObject,
+    .printModule = (void*) ffPrintVersion,
+    .generateJsonResult = (void*) ffGenerateVersionJsonResult,
+    .generateJsonConfig = (void*) ffGenerateVersionJsonConfig,
+    .formatArgs = FF_FORMAT_ARG_LIST(((FFModuleFormatArg[]) {
+        { "Project name", "project-name" },
+        { "Version", "version" },
+        { "Version tweak", "version-tweak" },
+        { "Build type (debug or release)", "build-type" },
+        { "System name", "sysname" },
+        { "Architecture", "arch" },
+        { "CMake build type when compiling (Debug, Release, RelWithDebInfo, MinSizeRel)", "cmake-built-type" },
+        { "Date time when compiling", "compile-time" },
+        { "Compiler used when compiling", "compiler" },
+        { "Libc used when compiling", "libc" },
+    })),
+    .defaultOrder = 71,
+};

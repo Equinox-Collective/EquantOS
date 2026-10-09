@@ -1,0 +1,10 @@
+# Archives/objects must never get CRLF conversion (empty musl stub .a files look like text)
+*.a binary
+*.o binary
+
+# Files executed inside EquantOS must keep LF endings on Windows checkouts
+*.sh text eol=lf
+.bashrc text eol=lf
+
+# Vendored third-party sources are stored byte-for-byte as upstream ships them
+/ports/*/src/** -text

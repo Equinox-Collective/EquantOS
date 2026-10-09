@@ -30,6 +30,7 @@ SECTIONS
         *(.initcall4.init)
         *(.initcall5.init)
         *(.initcall6.init)
+        *(.initcall7.init)
         __initcall_end = .;
     } :rodata
 

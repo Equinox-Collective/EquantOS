@@ -1,0 +1,124 @@
+#pragma once
+
+#include "fastfetch.h"
+
+#ifdef FF_HAVE_THREADS
+    #if defined(_WIN32)
+        #include "common/windows/nt.h"
+        #include <synchapi.h>
+        #include <process.h>
+        #include <processthreadsapi.h>
+        #define FF_THREAD_MUTEX_INITIALIZER SRWLOCK_INIT
+typedef SRWLOCK FFThreadMutex;
+typedef HANDLE FFThreadType;
+[[gnu::nonnull(1)]] static inline void ffThreadMutexLock(FFThreadMutex* mutex) {
+    AcquireSRWLockExclusive(mutex);
+}
+[[gnu::nonnull(1)]] static inline void ffThreadMutexUnlock(FFThreadMutex* mutex) {
+    ReleaseSRWLockExclusive(mutex);
+}
+// `data` is the thread argument and may be null; `func` may not
+[[gnu::nonnull(1)]] static inline FFThreadType ffThreadCreate(unsigned(__stdcall* func)(void*), void* data) {
+    return (FFThreadType) _beginthreadex(nullptr, 0, func, data, 0, nullptr);
+}
+        #define FF_THREAD_ENTRY_DECL_WRAPPER(fn, paramType)        \
+            static __stdcall unsigned fn##ThreadMain(void* data) { \
+                fn((paramType) data);                              \
+                return 0;                                          \
+            }
+        #define FF_THREAD_ENTRY_DECL_WRAPPER_NOPARAM(fn) \
+            static __stdcall unsigned fn##ThreadMain() { \
+                fn();                                    \
+                return 0;                                \
+            }
+static inline void ffThreadDetach(FFThreadType thread) {
+    NtClose(thread);
+}
+static inline bool ffThreadJoin(FFThreadType thread, uint32_t timeout) {
+    if (NtWaitForSingleObject(thread, FALSE, timeout == 0 ? nullptr : &(LARGE_INTEGER) { .QuadPart = (int64_t) timeout * -10000 }) != STATUS_WAIT_0) {
+        TerminateThread(thread, (DWORD) -1);
+        NtClose(thread);
+        return false;
+    }
+    NtClose(thread);
+    return true;
+}
+static inline uintptr_t ffThreadGetCurrentId() {
+    return (uintptr_t) ffGetTeb()->ClientId.UniqueThread;
+}
+    #else
+        #include <pthread.h>
+        #include <signal.h>
+        #if FF_HAVE_PTHREAD_NP
+            #include <pthread_np.h>
+        #endif
+typedef pthread_t FFThreadType;
+        #if __APPLE__
+            #include <os/lock.h>
+            #define FF_THREAD_MUTEX_INITIALIZER OS_UNFAIR_LOCK_INIT
+typedef os_unfair_lock FFThreadMutex;
+[[gnu::nonnull(1)]] static inline void ffThreadMutexLock(os_unfair_lock* mutex) {
+    os_unfair_lock_lock(mutex);
+}
+[[gnu::nonnull(1)]] static inline void ffThreadMutexUnlock(os_unfair_lock* mutex) {
+    os_unfair_lock_unlock(mutex);
+}
+        #else
+            #define FF_THREAD_MUTEX_INITIALIZER PTHREAD_MUTEX_INITIALIZER
+typedef pthread_mutex_t FFThreadMutex;
+[[gnu::nonnull(1)]] static inline void ffThreadMutexLock(FFThreadMutex* mutex) {
+    pthread_mutex_lock(mutex);
+}
+[[gnu::nonnull(1)]] static inline void ffThreadMutexUnlock(FFThreadMutex* mutex) {
+    pthread_mutex_unlock(mutex);
+}
+        #endif
+// `data` is the thread argument and may be null; `func` may not
+[[gnu::nonnull(1)]] static inline FFThreadType ffThreadCreate(void* (*func)(void*), void* data) {
+    FFThreadType newThread = 0;
+    pthread_create(&newThread, nullptr, func, data);
+    return newThread;
+}
+        #define FF_THREAD_ENTRY_DECL_WRAPPER(fn, paramType) \
+            static void* fn##ThreadMain(void* data) {       \
+                fn((paramType) data);                       \
+                return nullptr;                                \
+            }
+        #define FF_THREAD_ENTRY_DECL_WRAPPER_NOPARAM(fn) \
+            static void* fn##ThreadMain() {              \
+                fn();                                    \
+                return nullptr;                             \
+            }
+static inline void ffThreadDetach(FFThreadType thread) {
+    pthread_detach(thread);
+}
+static inline bool ffThreadJoin(FFThreadType thread, [[maybe_unused]] uint32_t timeout) {
+        #if HAVE_TIMEDJOIN_NP
+    if (timeout > 0) {
+        struct timespec ts;
+        if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+            ts.tv_sec += timeout / 1000;
+            ts.tv_nsec += (timeout % 1000) * 1000000;
+            if (pthread_timedjoin_np(thread, nullptr, &ts) != 0) {
+                pthread_kill(thread, SIGTERM);
+                return false;
+            }
+            return true;
+        }
+    }
+        #endif
+    pthread_join(thread, nullptr);
+    return true;
+}
+static inline uintptr_t ffThreadGetCurrentId() {
+    return (uintptr_t) pthread_self();
+}
+    #endif
+#else // FF_HAVE_THREADS
+    #define FF_THREAD_MUTEX_INITIALIZER 0
+typedef char FFThreadMutex;
+// The stubs deliberately ignore their argument, so no `nonnull` here
+static inline void ffThreadMutexLock([[maybe_unused]] FFThreadMutex* mutex) {}
+static inline void ffThreadMutexUnlock([[maybe_unused]] FFThreadMutex* mutex) {}
+    #define FF_THREAD_ENTRY_DECL_WRAPPER(fn, paramType)
+#endif // FF_HAVE_THREADS

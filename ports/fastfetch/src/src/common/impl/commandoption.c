@@ -1,0 +1,328 @@
+#include "common/commandoption.h"
+#include "common/color.h"
+#include "common/printing.h"
+#include "common/time.h"
+#include "common/jsonconfig.h"
+#include "common/strutil.h"
+#include "fastfetch_datatext.h"
+#include "modules/modules.h"
+
+#include <ctype.h>
+#include <inttypes.h>
+
+bool ffParseModuleOptions(const char* key, const char* value) {
+    if (!ffStrStartsWith(key, "--") || !ffCharIsEnglishAlphabet(key[2])) {
+        return false;
+    }
+    if (value && !*value) {
+        value = nullptr;
+    }
+    for (FFModuleBaseInfo** modules = ffModuleInfos[toupper(key[2]) - 'A']; *modules; ++modules) {
+        FFModuleBaseInfo* baseInfo = *modules;
+        const char* subKey = ffOptionTestPrefix(key, baseInfo->name);
+        if (subKey != nullptr) {
+            if (subKey[0] == '\0' || subKey[0] == '-') // Key is exactly the module name or has a leading '-'
+            {
+                fprintf(stderr, "Error: unknown module key %s\n", key);
+                exit(477);
+            }
+
+            FF_STRBUF_AUTO_DESTROY moduleName = ffStrbufCreateS(baseInfo->name);
+            ffStrbufLowerCase(&moduleName);
+
+            FF_STRBUF_AUTO_DESTROY jsonKey = ffStrbufCreate();
+            bool flag = false;
+            for (const char* p = subKey; *p; ++p) {
+                if (*p == '-') {
+                    if (flag) {
+                        fprintf(stderr, "Error: invalid double `-` in module key %s\n", key);
+                        exit(477);
+                    }
+                    flag = true;
+                } else {
+                    if (!isalpha((unsigned char) *p) && !isdigit((unsigned char) *p)) {
+                        fprintf(stderr, "Error: invalid character `%c` in module key %s\n", *p, key);
+                        exit(477);
+                    }
+
+                    if (flag) {
+                        flag = false;
+                        ffStrbufAppendC(&jsonKey, (char) toupper((unsigned char) *p));
+                    } else {
+                        ffStrbufAppendC(&jsonKey, *p);
+                    }
+                }
+            }
+            fprintf(stderr, "Error: Unsupported module option: %s\n", key);
+            fputs("       Support of module options has been removed. Please add the flag to the JSON config instead.\n", stderr);
+            fprintf(stderr, "       Example (demonstration only): `{ \"modules\": [ { \"type\": \"%s\", \"%s\": %s%s%s } ] }`\n", moduleName.chars, jsonKey.chars, value ? "\"" : "", value ?: "true", value ? "\"" : "");
+            fputs("       See <https://github.com/fastfetch-cli/fastfetch/wiki/Configuration> for more information.\n", stderr);
+            exit(477);
+        }
+    }
+    return false;
+}
+
+static yyjson_val* findStructureModuleConfig(FFdata* data, const char* moduleType);
+
+// The module options live in the JSON config only. They must be merged here as well as in
+// `parseStructureCommand`, because `ffPrepareXxx` takes the first snapshot while `ffDetectXxx`
+// takes the second one. If the two disagree, they list different entries and the deltas are
+// meaningless. Keeping both call sites on this single helper is what makes them agree.
+static void initStructureModuleOptions(FFdata* data, FFModuleBaseInfo* baseInfo, void* options) {
+    baseInfo->initOptions(options);
+
+    yyjson_val* configModule = findStructureModuleConfig(data, baseInfo->name);
+    if (configModule != nullptr) {
+        baseInfo->parseJsonObject(options, configModule);
+    }
+}
+
+void ffPrepareCommandOption(FFdata* data) {
+    char* moduleType = nullptr;
+    size_t moduleLen = 0;
+    while (ffStrbufGetdelim(&moduleType, &moduleLen, ':', &data->structure)) {
+#define FF_IF_MODULE_MATCH(moduleNameConstant) if (ffStrEqualsIgnCase(moduleType, moduleNameConstant) && !ffStrbufSeparatedContainIgnCaseS(&data->structureDisabled, moduleNameConstant, ':'))
+
+        switch (moduleType[0]) {
+#if !FF_MODULE_DISABLE_CPUUSAGE || !FF_MODULE_DISABLE_COMMAND
+            case 'C':
+            case 'c':
+#endif
+#if !FF_MODULE_DISABLE_CPUUSAGE
+                FF_IF_MODULE_MATCH(ffCPUUsageModuleInfo.name)
+                ffPrepareCPUUsage(); // The rate is derived from the CPU's own counters; no options are involved
+#endif
+
+#if !FF_MODULE_DISABLE_COMMAND
+                FF_IF_MODULE_MATCH(ffCommandModuleInfo.name) {
+                    // `command` runs its shell commands in parallel: `ffPrepareCommand` spawns them here,
+                    // in the prepare pass, and `ffDetectCommand` collects them in the print pass. The
+                    // command line itself can only be read from the JSON config, and this code path does
+                    // not consult it, so nothing would ever be queued and the module would report an
+                    // internal error marker. Refuse it up front instead of letting it get that far.
+                    fputs("Error: module `command` is not supported with `--structure`\n", stderr);
+                    fputs("       Its options can only be read from the JSON config, which `--structure` bypasses.\n", stderr);
+                    fputs("       Add it to the config instead, e.g. `{ \"modules\": [ { \"type\": \"command\", \"text\": \"uname -r\" } ] }`\n", stderr);
+                    exit(481);
+                }
+#endif
+#if !FF_MODULE_DISABLE_CPUUSAGE || !FF_MODULE_DISABLE_COMMAND
+                break;
+#endif
+
+#if !FF_MODULE_DISABLE_DISKIO
+            case 'D':
+            case 'd':
+                FF_IF_MODULE_MATCH(ffDiskIOModuleInfo.name) {
+                    [[gnu::cleanup(ffDestroyDiskIOOptions)]] FFDiskIOOptions options;
+                    initStructureModuleOptions(data, &ffDiskIOModuleInfo, &options);
+                    ffPrepareDiskIO(&options);
+                }
+                break;
+#endif
+
+#if !FF_MODULE_DISABLE_NETIO
+            case 'N':
+            case 'n':
+                FF_IF_MODULE_MATCH(ffNetIOModuleInfo.name) {
+                    [[gnu::cleanup(ffDestroyNetIOOptions)]] FFNetIOOptions options;
+                    initStructureModuleOptions(data, &ffNetIOModuleInfo, &options);
+                    ffPrepareNetIO(&options);
+                }
+                break;
+#endif
+
+#if !FF_MODULE_DISABLE_PUBLICIP
+            case 'P':
+            case 'p':
+                FF_IF_MODULE_MATCH(ffPublicIPModuleInfo.name) {
+                    [[gnu::cleanup(ffDestroyPublicIpOptions)]] FFPublicIPOptions options;
+                    initStructureModuleOptions(data, &ffPublicIPModuleInfo, &options);
+                    ffPreparePublicIp(&options);
+                }
+                break;
+#endif
+
+#if !FF_MODULE_DISABLE_TOP
+            case 'T':
+            case 't':
+                FF_IF_MODULE_MATCH(ffTopModuleInfo.name) {
+                    [[gnu::cleanup(ffDestroyTopOptions)]] FFTopOptions options;
+                    initStructureModuleOptions(data, &ffTopModuleInfo, &options);
+                    ffPrepareTopProcesses(options.showTypes);
+                }
+                break;
+#endif
+
+#if !FF_MODULE_DISABLE_WEATHER
+            case 'W':
+            case 'w':
+                FF_IF_MODULE_MATCH(ffWeatherModuleInfo.name) {
+                    [[gnu::cleanup(ffDestroyWeatherOptions)]] FFWeatherOptions options;
+                    initStructureModuleOptions(data, &ffWeatherModuleInfo, &options);
+                    ffPrepareWeather(&options);
+                }
+                break;
+#endif
+        }
+
+#undef FF_IF_MODULE_MATCH
+    }
+}
+
+static void genJsonConfig(FFdata* data, FFModuleBaseInfo* baseInfo, void* options) {
+    yyjson_mut_doc* doc = data->resultDoc;
+
+    yyjson_mut_val* modules = yyjson_mut_obj_get(doc->root, "modules");
+    if (!modules) {
+        modules = yyjson_mut_obj_add_arr(doc, doc->root, "modules");
+    }
+
+    FF_STRBUF_AUTO_DESTROY type = ffStrbufCreateS(baseInfo->name);
+    ffStrbufLowerCase(&type);
+
+    if (data->docType == FF_RESULT_DOC_TYPE_CONFIG_FULL) {
+        yyjson_mut_val* module = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strbuf(doc, module, "type", &type);
+
+        if (baseInfo->generateJsonConfig) {
+            baseInfo->generateJsonConfig(options, doc, module);
+        }
+
+        if (yyjson_mut_obj_size(module) > 1) {
+            yyjson_mut_arr_add_val(modules, module);
+        } else {
+            yyjson_mut_arr_add_strbuf(doc, modules, &type);
+        }
+    } else {
+        yyjson_mut_arr_add_strbuf(doc, modules, &type);
+    }
+}
+
+static void genJsonResult(FFdata* data, FFModuleBaseInfo* baseInfo, void* options) {
+    yyjson_mut_doc* doc = data->resultDoc;
+    yyjson_mut_val* module = yyjson_mut_arr_add_obj(doc, doc->root);
+    yyjson_mut_obj_add_str(doc, module, "type", baseInfo->name);
+    if (baseInfo->generateJsonResult) {
+        baseInfo->generateJsonResult(options, doc, module);
+    } else {
+        yyjson_mut_obj_add_str(doc, module, "error", "Unsupported for JSON format");
+    }
+}
+
+static yyjson_val* findStructureModuleConfig(FFdata* data, const char* moduleType) {
+    if (data->configDoc == nullptr) {
+        return nullptr;
+    }
+
+    yyjson_val* root = yyjson_doc_get_root(data->configDoc);
+    if (root == nullptr) {
+        return nullptr;
+    }
+
+    yyjson_val* modules = yyjson_obj_get(root, "modules");
+    if (!yyjson_is_arr(modules)) {
+        return nullptr;
+    }
+
+    yyjson_val* item;
+    size_t idx, max;
+    yyjson_arr_foreach (modules, idx, max, item) {
+        if (yyjson_is_obj(item)) {
+            const char* type = yyjson_get_str(yyjson_obj_get(item, "type"));
+            if (type != nullptr && ffStrEqualsIgnCase(type, moduleType)) {
+                return item;
+            }
+        }
+    }
+    return nullptr;
+}
+
+static bool parseStructureCommand(
+    FFdata* data,
+    const char* line,
+    void (*fn)(FFdata*, FFModuleBaseInfo* baseInfo, void* options)) {
+    if (ffCharIsEnglishAlphabet(line[0])) {
+        for (FFModuleBaseInfo** modules = ffModuleInfos[toupper(line[0]) - 'A']; *modules; ++modules) {
+            FFModuleBaseInfo* baseInfo = *modules;
+            if (ffStrEqualsIgnCase(line, baseInfo->name)) {
+                alignas(uint64_t) uint8_t optionBuf[FF_OPTION_MAX_SIZE];
+                initStructureModuleOptions(data, baseInfo, optionBuf);
+                if (data->resultDoc != nullptr) {
+                    fn(data, baseInfo, optionBuf);
+                } else {
+                    baseInfo->printModule(optionBuf);
+                }
+                baseInfo->destroyOptions(optionBuf);
+                return true;
+            }
+        }
+    }
+
+    if (data->resultDoc) {
+        yyjson_mut_doc* doc = data->resultDoc;
+        yyjson_mut_val* module = yyjson_mut_arr_add_obj(doc, doc->root);
+        yyjson_mut_obj_add_str(doc, module, "type", line);
+        yyjson_mut_obj_add_str(doc, module, "error", "Unknown module type");
+    } else {
+        ffPrintError(line, 0, nullptr, FF_PRINT_TYPE_NO_CUSTOM_KEY, "<no implementation provided>");
+    }
+    return false;
+}
+
+void ffPrintCommandOption(FFdata* data) {
+    // Parse the structure and call the modules
+    int32_t thres = instance.config.display.stat;
+
+    char* moduleType = nullptr;
+    size_t moduleLen = 0;
+    while (ffStrbufGetdelim(&moduleType, &moduleLen, ':', &data->structure)) {
+        if (ffStrbufSeparatedContainIgnCaseS(&data->structureDisabled, moduleType, ':')) {
+            continue;
+        }
+
+        double ms = 0;
+        if (thres >= 0) {
+            ms = ffTimeGetTick();
+        }
+
+        parseStructureCommand(data, moduleType, genJsonResult);
+
+        if (thres >= 0) {
+            ms = ffTimeGetTick() - ms;
+
+            if (data->resultDoc) {
+                yyjson_mut_val* moduleJson = yyjson_mut_arr_get_last(data->resultDoc->root);
+                yyjson_mut_obj_add_real(data->resultDoc, moduleJson, "stat", ms);
+            } else {
+                char str[64];
+                int len = snprintf(str, sizeof str, "%.3fms", ms);
+                if (thres > 0) {
+                    snprintf(str, sizeof str, "\e[%sm%.3fms\e[m", (ms <= thres ? FF_COLOR_FG_GREEN : ms <= 2 * thres ? FF_COLOR_FG_YELLOW
+                                                                                                                     : FF_COLOR_FG_RED),
+                        ms);
+                }
+                printf("\e7\e[1A\e[9999999C\e[%dD%s\e8", len - 1, str); // Save; Up 1; Right 9999999; Left <len - 1>; Print <str>; Load
+            }
+        }
+
+#if defined(_WIN32)
+        if (!data->resultDoc && !instance.config.display.noBuffer) {
+            fflush(stdout);
+        }
+#endif
+    }
+}
+
+void ffMigrateCommandOptionToJsonc(FFdata* data) {
+    char* moduleType = nullptr;
+    size_t moduleLen = 0;
+    while (ffStrbufGetdelim(&moduleType, &moduleLen, ':', &data->structure)) {
+        if (ffStrbufSeparatedContainIgnCaseS(&data->structureDisabled, moduleType, ':')) {
+            continue;
+        }
+
+        parseStructureCommand(data, moduleType, genJsonConfig);
+    }
+}

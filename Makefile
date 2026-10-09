@@ -156,7 +156,8 @@ ALL_USERSPACE := build/iso/hello.elf \
 				 build/iso/preferences \
 				 build/iso/fonts.conf \
                  build/iso/font.ttf \
-				 build/iso/menu
+				 build/iso/menu \
+				 build/iso/fastfetch
 
 # ==============================================================================
 # Master Targets
@@ -287,6 +288,11 @@ build/iso/font.ttf: res/font.ttf
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/font.ttf,$@)
+
+build/iso/fastfetch: res/fastfetch.elf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/fastfetch.elf,$@)
 
 # Auto-Dependency Inclusion
 -include $(DEP_FILES)

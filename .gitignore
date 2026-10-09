@@ -21,3 +21,6 @@
 
 /sdk/
 !/sdk/**
+
+# Port recipes (build scripts are otherwise caught by *.sh)
+!/ports/**

@@ -37,7 +37,10 @@ Current focus: We are entered LONG-TERM development so development is now not fu
   context save/restore, SysV initial stack, `syscall` and `int 0x80` entry
 - Userspace: vendored musl 1.2.6 source, prebuilt static sysroot, `hello.elf`
   smoke test, `musltest.elf` syscall probe
-- Filesystems: VFS, writable RAMFS, GPT/MBR discovery, FAT32, ext2 read/write
+- Filesystems: VFS, writable RAMFS, GPT/MBR discovery, FAT32, ext2 read/write,
+  Linux-compatible `/proc` (cpuinfo, meminfo, uptime, version, loadavg, swaps,
+  `/proc/<pid>/{stat,cmdline,comm,status}`, exe/cwd/fd links), `/etc/os-release`
+- Ports: [fastfetch](https://github.com/fastfetch-cli/fastfetch) with a built-in EquantOS logo
 - Storage: PCI enumeration, NVMe namespace I/O, legacy ATA PIO
 - Input/output: PS/2 keyboard, framebuffer terminal, COM1 serial log
 - Shell: interactive diagnostic shell with ~25 commands
@@ -120,6 +123,31 @@ At boot, the kernel scans the NVMe device only. The GPT/ext2 partition mounts
 at `/ext2`. The IDE image exists for legacy driver development and is not
 currently scanned. A FAT32 partition found on the NVMe device would mount
 at `/disk`.
+
+---
+
+## Ports
+
+Third-party programs live in `ports/<name>/`: the vendored sources (with any
+EquantOS changes applied) in `src/` and a build recipe; the resulting static
+binary is committed to `res/` and packed into the ISO.
+
+### fastfetch
+
+`res/fastfetch.elf` (fastfetch 2.69.0) is installed as `/bin/fastfetch` in the
+live system. To rebuild it (needs `cmake`, `make`, Python 3 and the `crt*.o`
+objects above):
+
+```sh
+sh ports/fastfetch/build.sh
+```
+
+`ports/fastfetch/src` is upstream fastfetch 2.69.0 with two local changes:
+DRM calls in `src/detection/gpu/gpu_linux.c` are guarded for systems without
+`<drm/drm.h>`, and a built-in EquantOS logo is added
+(`src/logo/ascii/e/equantos.txt` plus its entry in `e.inc`). The binary is
+linked statically against `sdk/sysroot` using
+`ports/fastfetch/equantos-toolchain.cmake`.
 
 ---
 

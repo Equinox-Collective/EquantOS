@@ -1,0 +1,67 @@
+#include "detection/dns/dns.h"
+#include "common/netif.h"
+#include "common/mallocHelper.h"
+
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+
+const char* ffDetectDNS(FFDNSOptions* options, FFlist* results) {
+    FF_AUTO_FREE IP_ADAPTER_ADDRESSES* adapter_addresses = nullptr;
+
+    // Multiple attempts in case interfaces change while
+    // we are in the middle of querying them.
+    DWORD adapter_addresses_buffer_size = 0;
+    for (int attempts = 0;; ++attempts) {
+        if (adapter_addresses_buffer_size) {
+            adapter_addresses = (IP_ADAPTER_ADDRESSES*) realloc(adapter_addresses, adapter_addresses_buffer_size);
+            assert(adapter_addresses);
+        }
+
+        DWORD error = GetAdaptersAddresses(
+            options->showType & FF_DNS_TYPE_IPV4_BIT
+                ? options->showType & FF_DNS_TYPE_IPV6_BIT ? AF_UNSPEC : AF_INET
+                : AF_INET6,
+            GAA_FLAG_SKIP_UNICAST | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_FRIENDLY_NAME,
+            nullptr,
+            adapter_addresses,
+            &adapter_addresses_buffer_size);
+
+        if (error == ERROR_SUCCESS) {
+            break;
+        } else if (ERROR_BUFFER_OVERFLOW == error && attempts < 4) {
+            continue;
+        } else {
+            return "GetAdaptersAddresses() failed";
+        }
+    }
+
+    uint32_t defaultRouteIfIndex = ffNetifGetDefaultRouteV4()->ifIndex;
+    // Iterate through all of the adapters
+    for (IP_ADAPTER_ADDRESSES* adapter = adapter_addresses; adapter; adapter = adapter->Next) {
+        if (adapter->IfIndex != defaultRouteIfIndex) {
+            continue;
+        }
+        if (adapter->OperStatus != IfOperStatusUp) {
+            continue;
+        }
+
+        for (IP_ADAPTER_DNS_SERVER_ADDRESS_XP* ifa = adapter->FirstDnsServerAddress; ifa; ifa = ifa->Next) {
+            // The element must only be added once it can be filled: `FF_LIST_ADD` does not zero the
+            // new element, so an unrecognized address family used to leave an uninitialized FFstrbuf
+            // in the list, which the callers then read and free
+            if (ifa->Address.lpSockaddr->sa_family == AF_INET) {
+                SOCKADDR_IN* ipv4 = (SOCKADDR_IN*) ifa->Address.lpSockaddr;
+                FFstrbuf* item = FF_LIST_ADD(FFstrbuf, *results);
+                ffStrbufInitA(item, INET_ADDRSTRLEN);
+                item->length = (uint32_t) (RtlIpv4AddressToStringA(&ipv4->sin_addr, item->chars) - item->chars);
+            } else if (ifa->Address.lpSockaddr->sa_family == AF_INET6) {
+                SOCKADDR_IN6* ipv6 = (SOCKADDR_IN6*) ifa->Address.lpSockaddr;
+                FFstrbuf* item = FF_LIST_ADD(FFstrbuf, *results);
+                ffStrbufInitA(item, INET6_ADDRSTRLEN);
+                item->length = (uint32_t) (RtlIpv6AddressToStringA(&ipv6->sin6_addr, item->chars) - item->chars);
+            }
+        }
+        break;
+    }
+    return nullptr;
+}

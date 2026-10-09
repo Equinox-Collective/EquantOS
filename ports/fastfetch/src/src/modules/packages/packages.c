@@ -1,0 +1,612 @@
+#include "common/printing.h"
+#include "common/jsonconfig.h"
+#include "common/strutil.h"
+#include "detection/packages/packages.h"
+#include "modules/packages/packages.h"
+
+bool ffPrintPackages(FFPackagesOptions* options) {
+    FFPackagesResult counts = {};
+    ffStrbufInit(&counts.pacmanBranch);
+
+    const char* error = ffDetectPackages(&counts, options);
+
+    if (error) {
+        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Packages), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "%s", error);
+        return false;
+    }
+
+    if (counts.all == 0) {
+        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Packages), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "No packages from known package managers found");
+        return false;
+    }
+
+    uint32_t nixAll = counts.nixDefault + counts.nixSystem + counts.nixUser;
+    uint32_t flatpakAll = counts.flatpakSystem + counts.flatpakUser;
+    uint32_t brewAll = counts.brew + counts.brewCask;
+    uint32_t guixAll = counts.guixSystem + counts.guixUser + counts.guixHome;
+    uint32_t hpkgAll = counts.hpkgSystem + counts.hpkgUser;
+    uint32_t amAll = counts.amSystem + counts.amUser;
+    uint32_t scoopAll = counts.scoopUser + counts.scoopGlobal;
+
+    if (options->moduleArgs.outputFormat.length == 0) {
+        ffPrintLogoAndKey(FF_MODULE_GET_DISPLAY_NAME(Packages), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT);
+
+        FF_STRBUF_AUTO_DESTROY output = ffStrbufCreate();
+
+#define FF_PRINT_PACKAGE_NAME(var, name)           \
+    if (counts.var > 0) {                          \
+        ffStrbufAppendUInt(&output, counts.var);   \
+        ffStrbufAppendS(&output, " (" name "), "); \
+    }
+
+#define FF_PRINT_PACKAGE(name) FF_PRINT_PACKAGE_NAME(name, #name)
+
+#define FF_PRINT_PACKAGE_ALL(name)                  \
+    if (name##All > 0) {                            \
+        ffStrbufAppendUInt(&output, name##All);     \
+        ffStrbufAppendS(&output, " (" #name "), "); \
+    }
+
+        if (options->combined) {
+            FF_PRINT_PACKAGE_ALL(am);
+        } else {
+            FF_PRINT_PACKAGE_NAME(amSystem, "am")
+            FF_PRINT_PACKAGE_NAME(amUser, "appman")
+        }
+        FF_PRINT_PACKAGE(appimage)
+        FF_PRINT_PACKAGE(apk)
+        if (options->combined) {
+            FF_PRINT_PACKAGE_ALL(brew);
+        } else {
+            FF_PRINT_PACKAGE_NAME(brew, "brew")
+            FF_PRINT_PACKAGE_NAME(brewCask, "brew-cask")
+        }
+        FF_PRINT_PACKAGE(cards)
+        FF_PRINT_PACKAGE(choco)
+        FF_PRINT_PACKAGE(crux)
+        FF_PRINT_PACKAGE(dpkg)
+        FF_PRINT_PACKAGE(emerge)
+        FF_PRINT_PACKAGE(eopkg)
+        if (options->combined) {
+            FF_PRINT_PACKAGE_ALL(flatpak);
+        } else if (counts.flatpakUser > 0) {
+            FF_PRINT_PACKAGE_NAME(flatpakSystem, "flatpak-system")
+            FF_PRINT_PACKAGE_NAME(flatpakUser, "flatpak-user")
+        } else {
+            FF_PRINT_PACKAGE_NAME(flatpakSystem, "flatpak")
+        }
+        if (options->combined) {
+            FF_PRINT_PACKAGE_ALL(guix);
+        } else {
+            FF_PRINT_PACKAGE_NAME(guixSystem, "guix-system")
+            FF_PRINT_PACKAGE_NAME(guixUser, "guix-user")
+            FF_PRINT_PACKAGE_NAME(guixHome, "guix-home")
+        }
+        if (options->combined) {
+            FF_PRINT_PACKAGE_ALL(hpkg)
+        } else if (counts.hpkgUser > 0) {
+            FF_PRINT_PACKAGE_NAME(hpkgSystem, "hpkg-system")
+            FF_PRINT_PACKAGE_NAME(hpkgUser, "hpkg-user")
+        } else {
+            FF_PRINT_PACKAGE_NAME(hpkgSystem, "hpkg")
+        }
+        FF_PRINT_PACKAGE_NAME(installrelease, "install-release")
+        FF_PRINT_PACKAGE(kiss)
+        FF_PRINT_PACKAGE(linglong)
+        FF_PRINT_PACKAGE(lpkg)
+        FF_PRINT_PACKAGE(lpkgbuild)
+        FF_PRINT_PACKAGE(macports)
+        FF_PRINT_PACKAGE(mport)
+        FF_PRINT_PACKAGE(moss)
+        if (options->combined) {
+            FF_PRINT_PACKAGE_ALL(nix);
+        } else {
+            FF_PRINT_PACKAGE_NAME(nixSystem, "nix-system")
+            FF_PRINT_PACKAGE_NAME(nixUser, "nix-user")
+            FF_PRINT_PACKAGE_NAME(nixDefault, "nix-default")
+        }
+        FF_PRINT_PACKAGE(opkg)
+        if (counts.pacman > 0) {
+            ffStrbufAppendF(&output, "%u (pacman)", counts.pacman);
+            if (counts.pacmanBranch.length > 0) {
+                ffStrbufAppendC(&output, '[');
+                ffStrbufAppend(&output, &counts.pacmanBranch);
+                ffStrbufAppendC(&output, ']');
+            }
+            ffStrbufAppendS(&output, ", ");
+        };
+        FF_PRINT_PACKAGE(pacstall)
+        FF_PRINT_PACKAGE(paludis)
+        FF_PRINT_PACKAGE(pisi)
+        FF_PRINT_PACKAGE(pkg)
+        FF_PRINT_PACKAGE(pkgsrc)
+        FF_PRINT_PACKAGE(pkgtool)
+        FF_PRINT_PACKAGE(porg)
+        FF_PRINT_PACKAGE(rpm)
+        FF_PRINT_PACKAGE(rum)
+        if (options->combined) {
+            FF_PRINT_PACKAGE_ALL(scoop);
+        } else if (counts.scoopGlobal > 0) {
+            FF_PRINT_PACKAGE_NAME(scoopUser, "scoop-user")
+            FF_PRINT_PACKAGE_NAME(scoopGlobal, "scoop-global")
+        } else {
+            FF_PRINT_PACKAGE_NAME(scoopUser, "scoop")
+        }
+        FF_PRINT_PACKAGE(snap)
+        FF_PRINT_PACKAGE(soar)
+        FF_PRINT_PACKAGE(sorcery)
+        FF_PRINT_PACKAGE(winget)
+        FF_PRINT_PACKAGE(xbps)
+
+        assert(output.length >= 2); // counts.all > 0 guarantees that at least one package count was printed, which guarantees that ", " was appended at least once
+        ffStrbufSubstrBefore(&output, output.length - 1);
+        output.chars[output.length - 1] = '\n';
+        ffStrbufWriteTo(&output, stdout);
+    } else {
+        FF_PRINT_FORMAT_CHECKED(FF_MODULE_GET_DISPLAY_NAME(Packages),
+            0,
+            &options->moduleArgs,
+            FF_PRINT_TYPE_DEFAULT,
+            ((FFformatarg[]) {
+                FF_ARG(counts.amSystem, "am-system"),
+                FF_ARG(counts.amUser, "am-user"),
+                FF_ARG(counts.appimage, "appimage"),
+                FF_ARG(counts.apk, "apk"),
+                FF_ARG(counts.brew, "brew"),
+                FF_ARG(counts.brewCask, "brew-cask"),
+                FF_ARG(counts.cards, "cards"),
+                FF_ARG(counts.choco, "choco"),
+                FF_ARG(counts.crux, "crux"),
+                FF_ARG(counts.dpkg, "dpkg"),
+                FF_ARG(counts.emerge, "emerge"),
+                FF_ARG(counts.eopkg, "eopkg"),
+                FF_ARG(counts.flatpakSystem, "flatpak-system"),
+                FF_ARG(counts.flatpakUser, "flatpak-user"),
+                FF_ARG(counts.guixHome, "guix-home"),
+                FF_ARG(counts.guixSystem, "guix-system"),
+                FF_ARG(counts.guixUser, "guix-user"),
+                FF_ARG(counts.hpkgSystem, "hpkg-system"),
+                FF_ARG(counts.hpkgUser, "hpkg-user"),
+                FF_ARG(counts.installrelease, "install-release"),
+                FF_ARG(counts.kiss, "kiss"),
+                FF_ARG(counts.linglong, "linglong"),
+                FF_ARG(counts.lpkg, "lpkg"),
+                FF_ARG(counts.lpkgbuild, "lpkgbuild"),
+                FF_ARG(counts.macports, "macports"),
+                FF_ARG(counts.mport, "mport"),
+                FF_ARG(counts.moss, "moss"),
+                FF_ARG(counts.nixDefault, "nix-default"),
+                FF_ARG(counts.nixSystem, "nix-system"),
+                FF_ARG(counts.nixUser, "nix-user"),
+                FF_ARG(counts.opkg, "opkg"),
+                FF_ARG(counts.pacman, "pacman"),
+                FF_ARG(counts.pacmanBranch, "pacman-branch"),
+                FF_ARG(counts.pacstall, "pacstall"),
+                FF_ARG(counts.paludis, "paludis"),
+                FF_ARG(counts.pisi, "pisi"),
+                FF_ARG(counts.pkg, "pkg"),
+                FF_ARG(counts.pkgsrc, "pkgsrc"),
+                FF_ARG(counts.pkgtool, "pkgtool"),
+                FF_ARG(counts.porg, "porg"),
+                FF_ARG(counts.rpm, "rpm"),
+                FF_ARG(counts.rum, "rum"),
+                FF_ARG(counts.scoopGlobal, "scoop-global"),
+                FF_ARG(counts.scoopUser, "scoop-user"),
+                FF_ARG(counts.snap, "snap"),
+                FF_ARG(counts.soar, "soar"),
+                FF_ARG(counts.sorcery, "sorcery"),
+                FF_ARG(counts.winget, "winget"),
+                FF_ARG(counts.xbps, "xbps"),
+
+                FF_ARG(brewAll, "brew-all"),
+                FF_ARG(flatpakAll, "flatpak-all"),
+                FF_ARG(guixAll, "guix-all"),
+                FF_ARG(hpkgAll, "hpkg-all"),
+                FF_ARG(nixAll, "nix-all"),
+                FF_ARG(counts.all, "all"),
+            }));
+    }
+
+    ffStrbufDestroy(&counts.pacmanBranch);
+
+    return true;
+}
+
+void ffParsePackagesJsonObject(FFPackagesOptions* options, yyjson_val* module) {
+    yyjson_val *key, *val;
+    size_t idx, max;
+    yyjson_obj_foreach (module, idx, max, key, val) {
+        if (ffJsonConfigParseModuleArgs(key, val, &options->moduleArgs)) {
+            continue;
+        }
+
+#if !FF_PACKAGES_REMOVE_DISABLED
+        if (unsafe_yyjson_equals_str(key, "disabled")) {
+            if (!yyjson_is_null(val) && !yyjson_is_arr(val)) {
+                ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Packages), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "Invalid JSON value for %s", unsafe_yyjson_get_str(key));
+                continue;
+            }
+
+            options->disabled = FF_PACKAGES_FLAG_NONE;
+
+            if (yyjson_is_arr(val)) {
+                yyjson_val* flagObj;
+                size_t flagIdx, flagMax;
+                yyjson_arr_foreach (val, flagIdx, flagMax, flagObj) {
+                    if (!yyjson_is_str(flagObj)) {
+                        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Packages), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "Invalid JSON value for %s", unsafe_yyjson_get_str(key));
+                        continue;
+                    }
+                    const char* flag = unsafe_yyjson_get_str(flagObj);
+
+    #define FF_TEST_PACKAGE_NAME(name)                          \
+        else if (ffStrEqualsIgnCase(flag, #name)) {             \
+            options->disabled |= FF_PACKAGES_FLAG_##name##_BIT; \
+        }
+                    switch (toupper(flag[0])) {
+                        case 'A':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(AM)
+                            FF_TEST_PACKAGE_NAME(APK)
+                            FF_TEST_PACKAGE_NAME(APPIMAGE)
+                            break;
+                        case 'B':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(BREW)
+                            break;
+                        case 'C':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(CARDS)
+                            FF_TEST_PACKAGE_NAME(CHOCO)
+                            FF_TEST_PACKAGE_NAME(CRUX)
+                            break;
+                        case 'D':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(DPKG)
+                            break;
+                        case 'E':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(EMERGE)
+                            FF_TEST_PACKAGE_NAME(EOPKG)
+                            break;
+                        case 'F':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(FLATPAK)
+                            break;
+                        case 'G':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(GUIX)
+                            break;
+                        case 'H':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(HPKG)
+                            break;
+                        case 'I':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(INSTALLRELEASE)
+                            break;
+                        case 'K':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(KISS)
+                            break;
+                        case 'L':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(LINGLONG)
+                            FF_TEST_PACKAGE_NAME(LPKG)
+                            FF_TEST_PACKAGE_NAME(LPKGBUILD)
+                            break;
+                        case 'M':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(MACPORTS)
+                            FF_TEST_PACKAGE_NAME(MOSS)
+                            FF_TEST_PACKAGE_NAME(MPORT)
+                            break;
+                        case 'N':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(NIX)
+                            break;
+                        case 'O':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(OPKG)
+                            break;
+                        case 'P':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(PACMAN)
+                            FF_TEST_PACKAGE_NAME(PACSTALL)
+                            FF_TEST_PACKAGE_NAME(PALUDIS)
+                            FF_TEST_PACKAGE_NAME(PISI)
+                            FF_TEST_PACKAGE_NAME(PKG)
+                            FF_TEST_PACKAGE_NAME(PKGSRC)
+                            FF_TEST_PACKAGE_NAME(PKGTOOL)
+                            FF_TEST_PACKAGE_NAME(PORG)
+                            break;
+                        case 'R':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(RPM)
+                            FF_TEST_PACKAGE_NAME(RUM)
+                            break;
+                        case 'S':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(SCOOP)
+                            FF_TEST_PACKAGE_NAME(SNAP)
+                            FF_TEST_PACKAGE_NAME(SOAR)
+                            FF_TEST_PACKAGE_NAME(SORCERY)
+                            break;
+                        case 'W':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(WINGET)
+                            break;
+                        case 'X':
+                            if (false)
+                                ;
+                            FF_TEST_PACKAGE_NAME(XBPS)
+                            break;
+                    }
+    #undef FF_TEST_PACKAGE_NAME
+                }
+                continue;
+            }
+        }
+#endif
+
+        if (unsafe_yyjson_equals_str(key, "combined")) {
+            options->combined = yyjson_get_bool(val);
+            continue;
+        }
+
+        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Packages), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "Unknown JSON key %s", unsafe_yyjson_get_str(key));
+    }
+}
+
+void ffGeneratePackagesJsonConfig(FFPackagesOptions* options, yyjson_mut_doc* doc, yyjson_mut_val* module) {
+    ffJsonConfigGenerateModuleArgsConfig(doc, module, &options->moduleArgs);
+
+#if !FF_PACKAGES_REMOVE_DISABLED
+    FF_STRBUF_AUTO_DESTROY buf = ffStrbufCreate();
+    yyjson_mut_val* arr = yyjson_mut_obj_add_arr(doc, module, "disabled");
+    #define FF_TEST_PACKAGE_NAME(name)                                  \
+        else if ((options->disabled & FF_PACKAGES_FLAG_##name##_BIT)) { \
+            ffStrbufSetS(&buf, #name);                                  \
+            ffStrbufLowerCase(&buf);                                    \
+            yyjson_mut_arr_add_strbuf(doc, arr, &buf);                  \
+        }
+    if (false)
+        ;
+    FF_TEST_PACKAGE_NAME(AM)
+    FF_TEST_PACKAGE_NAME(APK)
+    FF_TEST_PACKAGE_NAME(APPIMAGE)
+    FF_TEST_PACKAGE_NAME(BREW)
+    FF_TEST_PACKAGE_NAME(CARDS)
+    FF_TEST_PACKAGE_NAME(CHOCO)
+    FF_TEST_PACKAGE_NAME(CRUX)
+    FF_TEST_PACKAGE_NAME(DPKG)
+    FF_TEST_PACKAGE_NAME(EMERGE)
+    FF_TEST_PACKAGE_NAME(EOPKG)
+    FF_TEST_PACKAGE_NAME(FLATPAK)
+    FF_TEST_PACKAGE_NAME(GUIX)
+    FF_TEST_PACKAGE_NAME(HPKG)
+    FF_TEST_PACKAGE_NAME(KISS)
+    FF_TEST_PACKAGE_NAME(LINGLONG)
+    FF_TEST_PACKAGE_NAME(LPKG)
+    FF_TEST_PACKAGE_NAME(LPKGBUILD)
+    FF_TEST_PACKAGE_NAME(MACPORTS)
+    FF_TEST_PACKAGE_NAME(MOSS)
+    FF_TEST_PACKAGE_NAME(MPORT)
+    FF_TEST_PACKAGE_NAME(NIX)
+    FF_TEST_PACKAGE_NAME(OPKG)
+    FF_TEST_PACKAGE_NAME(PACMAN)
+    FF_TEST_PACKAGE_NAME(PACSTALL)
+    FF_TEST_PACKAGE_NAME(PALUDIS)
+    FF_TEST_PACKAGE_NAME(PISI)
+    FF_TEST_PACKAGE_NAME(PKG)
+    FF_TEST_PACKAGE_NAME(PKGSRC)
+    FF_TEST_PACKAGE_NAME(PKGTOOL)
+    FF_TEST_PACKAGE_NAME(PORG)
+    FF_TEST_PACKAGE_NAME(RPM)
+    FF_TEST_PACKAGE_NAME(RUM)
+    FF_TEST_PACKAGE_NAME(SCOOP)
+    FF_TEST_PACKAGE_NAME(SNAP)
+    FF_TEST_PACKAGE_NAME(SOAR)
+    FF_TEST_PACKAGE_NAME(SORCERY)
+    FF_TEST_PACKAGE_NAME(WINGET)
+    FF_TEST_PACKAGE_NAME(XBPS)
+    #undef FF_TEST_PACKAGE_NAME
+#endif
+
+    yyjson_mut_obj_add_bool(doc, module, "combined", options->combined);
+}
+
+bool ffGeneratePackagesJsonResult(FFPackagesOptions* options, yyjson_mut_doc* doc, yyjson_mut_val* module) {
+    FFPackagesResult counts = {};
+    ffStrbufInit(&counts.pacmanBranch);
+
+    const char* error = ffDetectPackages(&counts, options);
+
+    if (error) {
+        yyjson_mut_obj_add_str(doc, module, "error", error);
+        return false;
+    }
+
+    yyjson_mut_val* obj = yyjson_mut_obj_add_obj(doc, module, "result");
+
+    yyjson_mut_obj_add_uint(doc, obj, "all", counts.all);
+
+#define FF_APPEND_PACKAGE_COUNT(name) \
+    if (counts.name > 0) yyjson_mut_obj_add_uint(doc, obj, #name, counts.name);
+    FF_APPEND_PACKAGE_COUNT(amSystem)
+    FF_APPEND_PACKAGE_COUNT(amUser)
+    FF_APPEND_PACKAGE_COUNT(appimage)
+    FF_APPEND_PACKAGE_COUNT(apk)
+    FF_APPEND_PACKAGE_COUNT(brew)
+    FF_APPEND_PACKAGE_COUNT(brewCask)
+    FF_APPEND_PACKAGE_COUNT(cards)
+    FF_APPEND_PACKAGE_COUNT(choco)
+    FF_APPEND_PACKAGE_COUNT(crux)
+    FF_APPEND_PACKAGE_COUNT(dpkg)
+    FF_APPEND_PACKAGE_COUNT(emerge)
+    FF_APPEND_PACKAGE_COUNT(eopkg)
+    FF_APPEND_PACKAGE_COUNT(flatpakSystem)
+    FF_APPEND_PACKAGE_COUNT(flatpakUser)
+    FF_APPEND_PACKAGE_COUNT(guixHome)
+    FF_APPEND_PACKAGE_COUNT(guixSystem)
+    FF_APPEND_PACKAGE_COUNT(guixUser)
+    FF_APPEND_PACKAGE_COUNT(hpkgSystem)
+    FF_APPEND_PACKAGE_COUNT(hpkgUser)
+    FF_APPEND_PACKAGE_COUNT(installrelease)
+    FF_APPEND_PACKAGE_COUNT(kiss)
+    FF_APPEND_PACKAGE_COUNT(linglong)
+    FF_APPEND_PACKAGE_COUNT(lpkg)
+    FF_APPEND_PACKAGE_COUNT(lpkgbuild)
+    FF_APPEND_PACKAGE_COUNT(macports)
+    FF_APPEND_PACKAGE_COUNT(mport)
+    FF_APPEND_PACKAGE_COUNT(moss)
+    FF_APPEND_PACKAGE_COUNT(nixDefault)
+    FF_APPEND_PACKAGE_COUNT(nixSystem)
+    FF_APPEND_PACKAGE_COUNT(nixUser)
+    FF_APPEND_PACKAGE_COUNT(opkg)
+    FF_APPEND_PACKAGE_COUNT(pacman)
+    FF_APPEND_PACKAGE_COUNT(pacstall)
+    FF_APPEND_PACKAGE_COUNT(paludis)
+    FF_APPEND_PACKAGE_COUNT(pisi)
+    FF_APPEND_PACKAGE_COUNT(pkg)
+    FF_APPEND_PACKAGE_COUNT(pkgsrc)
+    FF_APPEND_PACKAGE_COUNT(pkgtool)
+    FF_APPEND_PACKAGE_COUNT(porg)
+    FF_APPEND_PACKAGE_COUNT(rpm)
+    FF_APPEND_PACKAGE_COUNT(rum)
+    FF_APPEND_PACKAGE_COUNT(scoopGlobal)
+    FF_APPEND_PACKAGE_COUNT(scoopUser)
+    FF_APPEND_PACKAGE_COUNT(snap)
+    FF_APPEND_PACKAGE_COUNT(soar)
+    FF_APPEND_PACKAGE_COUNT(sorcery)
+    FF_APPEND_PACKAGE_COUNT(winget)
+    FF_APPEND_PACKAGE_COUNT(xbps)
+    if (counts.pacmanBranch.length > 0) {
+        yyjson_mut_obj_add_strbuf(doc, obj, "pacmanBranch", &counts.pacmanBranch);
+    }
+
+    return true;
+}
+
+void ffInitPackagesOptions(FFPackagesOptions* options) {
+    ffOptionInitModuleArg(&options->moduleArgs, "󰏖");
+
+    #if !FF_PACKAGES_REMOVE_DISABLED
+    options->disabled = FF_PACKAGES_DISABLE_LIST;
+    #endif
+    options->combined = false;
+}
+
+void ffDestroyPackagesOptions(FFPackagesOptions* options) {
+    ffOptionDestroyModuleArg(&options->moduleArgs);
+}
+
+FFModuleBaseInfo ffPackagesModuleInfo = {
+    .name = "Packages",
+    .description = "List installed package managers and count of installed packages",
+    .displayName = {
+        .en = "Packages",
+        .ar = "الحزم",
+        .cs = "Balíčky",
+        .de = "Pakete",
+        .es = "Paquetes",
+        .fr = "Paquets",
+        .gl = "Paquetes",
+        .he = "חבילות",
+        .id = "Paket",
+        .it = "Pacchetti",
+        .ja = "パッケージ",
+        .ko = "패키지",
+        .pl = "Pakiety",
+        .pt = "Pacotes",
+        .ru = "Пакеты",
+        .tr = "Paketler",
+        .uk = "Пакети",
+        .vi = "Gói phần mềm",
+        .zh_CN = "软件包",
+        .zh_TW = "軟體包",
+    },
+    .initOptions = (void*) ffInitPackagesOptions,
+    .destroyOptions = (void*) ffDestroyPackagesOptions,
+    .parseJsonObject = (void*) ffParsePackagesJsonObject,
+    .printModule = (void*) ffPrintPackages,
+    .generateJsonResult = (void*) ffGeneratePackagesJsonResult,
+    .generateJsonConfig = (void*) ffGeneratePackagesJsonConfig,
+    .formatArgs = FF_FORMAT_ARG_LIST(((FFModuleFormatArg[]) {
+        { "Number of am-system packages", "am-system" },
+        { "Number of am-user (aka appman) packages", "am-user" },
+        { "Number of appimage packages", "appimage" },
+        { "Number of apk packages", "apk" },
+        { "Number of brew packages", "brew" },
+        { "Number of brew-cask packages", "brew-cask" },
+        { "Number of cards packages", "cards" },
+        { "Number of choco packages", "choco" },
+        { "Number of crux packages", "crux" },
+        { "Number of dpkg packages", "dpkg" },
+        { "Number of emerge packages", "emerge" },
+        { "Number of eopkg packages", "eopkg" },
+        { "Number of flatpak-system app packages", "flatpak-system" },
+        { "Number of flatpak-user app packages", "flatpak-user" },
+        { "Number of guix-home packages", "guix-home" },
+        { "Number of guix-system packages", "guix-system" },
+        { "Number of guix-user packages", "guix-user" },
+        { "Number of hpkg-system packages", "hpkg-system" },
+        { "Number of hpkg-user packages", "hpkg-user" },
+        { "Number of install-release packages", "install-release" },
+        { "Number of kiss packages", "kiss" },
+        { "Number of linglong packages", "linglong" },
+        { "Number of lpkg packages", "lpkg" },
+        { "Number of lpkgbuild packages", "lpkgbuild" },
+        { "Number of macports packages", "macports" },
+        { "Number of mport packages", "mport" },
+        { "Number of moss packages", "moss" },
+        { "Number of nix-default packages", "nix-default" },
+        { "Number of nix-system packages", "nix-system" },
+        { "Number of nix-user packages", "nix-user" },
+        { "Number of opkg packages", "opkg" },
+        { "Number of pacman packages", "pacman" },
+        { "Pacman branch on manjaro", "pacman-branch" },
+        { "Number of pacstall packages", "pacstall" },
+        { "Number of paludis packages", "paludis" },
+        { "Number of pisi packages", "pisi" },
+        { "Number of pkg packages", "pkg" },
+        { "Number of pkgsrc packages", "pkgsrc" },
+        { "Number of pkgtool packages", "pkgtool" },
+        { "Number of porg packages", "porg" },
+        { "Number of rpm packages", "rpm" },
+        { "Number of rum overlay packages", "rum" },
+        { "Number of scoop-global packages", "scoop-global" },
+        { "Number of scoop-user packages", "scoop-user" },
+        { "Number of snap packages", "snap" },
+        { "Number of soar packages", "soar" },
+        { "Number of sorcery packages", "sorcery" },
+        { "Number of winget packages", "winget" },
+        { "Number of xbps packages", "xbps" },
+
+        { "Total number of all brew packages", "brew-all" },
+        { "Total number of all flatpak app packages", "flatpak-all" },
+        { "Total number of all guix packages", "guix-all" },
+        { "Total number of all hpkg packages", "hpkg-all" },
+        { "Total number of all nix packages", "nix-all" },
+        { "Number of all packages", "all" },
+    })),
+    .defaultOrder = 14,
+};

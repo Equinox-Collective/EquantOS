@@ -1,0 +1,51 @@
+#pragma once
+
+#include "common/FFstrbuf.h"
+#include "common/parsing.h"
+#include "common/option.h"
+
+typedef enum FFPercentageTypeFlags: uint8_t {
+    FF_PERCENTAGE_TYPE_NONE = 0,
+    FF_PERCENTAGE_TYPE_NUM_BIT = 1 << 0,
+    FF_PERCENTAGE_TYPE_BAR_BIT = 1 << 1,
+    FF_PERCENTAGE_TYPE_HIDE_OTHERS_BIT = 1 << 2,
+    FF_PERCENTAGE_TYPE_NUM_COLOR_BIT = 1 << 3,
+    FF_PERCENTAGE_TYPE_BAR_MONOCHROME_BIT = 1 << 4,
+} FFPercentageTypeFlags;
+static_assert(sizeof(FFPercentageTypeFlags) == 1, "");
+
+typedef struct FFPercentageModuleConfig {
+    uint8_t green;
+    uint8_t yellow;
+    FFPercentageTypeFlags type;
+} FFPercentageModuleConfig;
+
+// Maps a received signal strength in dBm onto the 0-100 scale the percentage formatters want.
+// -50 dBm and above counts as a perfect link, -100 dBm and below as no link at all, and the range in
+// between is linear. Both ends are clamped rather than extrapolated, so the result is always a
+// percentage -- which also keeps it usable with `{?x}` guards, unlike a raw negative RSSI.
+[[gnu::const]] static inline double ffRssiToSignalQuality(int32_t rssi) {
+    return (double) (rssi >= -50 ? 100 : rssi <= -100 ? 0 : (rssi + 100) * 2);
+}
+
+// if (green <= yellow)
+// [0, green]: print green
+// (green, yellow]: print yellow
+// (yellow, 100]: print red
+//
+// if (green > yellow)
+// [green, 100]: print green
+// [yellow, green): print yellow
+// [0, yellow): print red
+
+// `buffer` and `module` are dereferenced unconditionally; `module` carries the key/color formatting
+[[gnu::nonnull(1, 4)]] void ffPercentAppendBar(FFstrbuf* buffer, double percent, FFPercentageModuleConfig config, const FFModuleArgs* module);
+[[gnu::nonnull(1, 5)]] void ffPercentAppendNum(FFstrbuf* buffer, double percent, FFPercentageModuleConfig config, bool parentheses, const FFModuleArgs* module);
+
+typedef struct yyjson_val yyjson_val;
+typedef struct yyjson_mut_doc yyjson_mut_doc;
+typedef struct yyjson_mut_val yyjson_mut_val;
+bool ffPercentParseCommandOptions(const char* key, const char* subkey, const char* value, FFPercentageModuleConfig* config);
+bool ffPercentParseJsonObject(yyjson_val* key, yyjson_val* value, FFPercentageModuleConfig* config);
+[[gnu::nonnull(1, 2)]] void ffPercentGenerateJsonConfig(yyjson_mut_doc* doc, yyjson_mut_val* module, FFPercentageModuleConfig config);
+const char* ffPercentParseTypeJsonConfig(yyjson_val* value, FFPercentageTypeFlags* result);

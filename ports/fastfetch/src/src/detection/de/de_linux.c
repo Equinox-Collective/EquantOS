@@ -1,0 +1,276 @@
+#include "de.h"
+
+#include "common/dbus.h"
+#include "common/io.h"
+#include "common/library.h"
+#include "common/parsing.h"
+#include "common/properties.h"
+#include "common/processing.h"
+#include "common/binary.h"
+#include "common/path.h"
+#include "detection/displayserver/displayserver.h"
+
+#include <ctype.h>
+
+static void getKDE(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    ffParsePropFile(FF_PATH_PKG_BASE "/share/wayland-sessions/plasma.desktop", "X-KDE-PluginInfo-Version =", result);
+    if (result->length == 0) {
+        ffParsePropFile(FF_PATH_PKG_BASE "/share/xsessions/plasmax11.desktop", "X-KDE-PluginInfo-Version =", result);
+    }
+
+    if (result->length == 0) {
+        ffParsePropFileData("xsessions/plasma.desktop", "X-KDE-PluginInfo-Version =", result);
+    }
+    if (result->length == 0) {
+        ffParsePropFileData("xsessions/plasma5.desktop", "X-KDE-PluginInfo-Version =", result);
+    }
+
+    if (result->length == 0) {
+        ffParsePropFileData("wayland-sessions/plasmawayland.desktop", "X-KDE-PluginInfo-Version =", result);
+    }
+    if (result->length == 0) {
+        ffParsePropFileData("wayland-sessions/plasmawayland5.desktop", "X-KDE-PluginInfo-Version =", result);
+    }
+
+    if (result->length == 0) {
+        if (ffProcessAppendStdOut(result, (char* const[]) { "plasmashell", "--version", nullptr }) == nullptr) { // plasmashell 5.27.5
+            ffStrbufSubstrAfterLastC(result, ' ');
+        }
+    }
+}
+
+static const char* getGnomeByDbus([[maybe_unused]] FFstrbuf* result) {
+#ifdef FF_HAVE_DBUS
+    FF_DBUS_AUTO_DESTROY_DATA FFDBusData dbus = {};
+    if (ffDBusLoadData(DBUS_BUS_SESSION, &dbus) != nullptr) {
+        return "ffDBusLoadData() failed";
+    }
+
+    ffDBusGetPropertyString(&dbus, "org.gnome.Shell", "/org/gnome/Shell", "org.gnome.Shell", "ShellVersion", result);
+    return nullptr;
+#else  // FF_HAVE_DBUS
+    return "ffDBusLoadData() failed: dbus support not compiled in";
+#endif // FF_HAVE_DBUS
+}
+
+static void getGnome(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    getGnomeByDbus(result);
+
+    if (result->length == 0) {
+        if (ffProcessAppendStdOut(result, (char* const[]) { "gnome-shell", "--version", nullptr }) == nullptr) { // GNOME Shell 44.1
+            ffStrbufSubstrAfterLastC(result, ' ');
+        }
+    }
+}
+
+static void getCinnamon(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    ffStrbufSetS(result, getenv("CINNAMON_VERSION"));
+
+    if (result->length == 0) {
+        ffParsePropFileData("applications/cinnamon.desktop", "X-GNOME-Bugzilla-Version =", result);
+    }
+
+    if (result->length == 0) {
+        if (ffProcessAppendStdOut(result, (char* const[]) { "cinnamon", "--version", nullptr }) == nullptr) { // Cinnamon 6.2.2
+            ffStrbufSubstrAfterLastC(result, ' ');
+        }
+    }
+}
+
+static void getMate(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    FF_STRBUF_AUTO_DESTROY major = ffStrbufCreate();
+    FF_STRBUF_AUTO_DESTROY minor = ffStrbufCreate();
+    FF_STRBUF_AUTO_DESTROY micro = ffStrbufCreate();
+
+    ffParsePropFileDataValues("mate-about/mate-version.xml", 3, (FFpropquery[]) { { "<platform>", &major }, { "<minor>", &minor }, { "<micro>", &micro } });
+
+    ffParseSemver(result, &major, &minor, &micro);
+
+    if (result->length == 0) {
+        ffProcessAppendStdOut(result, (char* const[]) { "mate-session", "--version", nullptr });
+
+        ffStrbufSubstrAfterFirstC(result, ' ');
+        ffStrbufTrim(result, ' ');
+    }
+}
+
+static const char* getXfce4ByLib(FFstrbuf* result) {
+#ifndef FF_DISABLE_DLOPEN
+    const char* xfce_version_string(void); // from `xfce4/libxfce4util/xfce-misutils.h
+    FF_LIBRARY_LOAD_MESSAGE(xfce4util, "libxfce4util" FF_LIBRARY_EXTENSION, 7);
+    FF_LIBRARY_LOAD_SYMBOL_MESSAGE(xfce4util, xfce_version_string);
+    ffStrbufSetS(result, ffxfce_version_string());
+    return nullptr;
+#else
+    FF_UNUSED(result);
+    return "dlopen is disabled";
+#endif
+}
+
+static void getXFCE4(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    getXfce4ByLib(result);
+
+    if (result->length == 0) {
+        // This is somewhat slow
+        ffProcessAppendStdOut(result, (char* const[]) { "xfce4-session", "--version", nullptr });
+
+        ffStrbufSubstrBeforeFirstC(result, ')');
+        ffStrbufSubstrAfterLastC(result, ' ');
+        ffStrbufTrim(result, ' ');
+    }
+}
+
+static void getLXQt(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    ffParsePropFileData("gconfig/lxqt.pc", "Version:", result);
+
+    if (result->length == 0) {
+        ffParsePropFileData("cmake/lxqt/lxqt-config.cmake", "set ( LXQT_VERSION", result);
+    }
+    if (result->length == 0) {
+        ffParsePropFileData("cmake/lxqt/lxqt-config-version.cmake", "set ( PACKAGE_VERSION", result);
+    }
+
+    if (result->length == 0) {
+        // This is really, really, really slow. Thank you, LXQt developers
+        ffProcessAppendStdOut(result, (char* const[]) { "lxqt-session", "-v", nullptr });
+
+        result->length = 0; // don't set '\0' byte
+        ffParsePropLines(result->chars, "liblxqt", result);
+    }
+}
+
+static void getBudgie(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    ffParsePropFileData("budgie/budgie-version.xml", "<str>", result);
+}
+
+static void getUnity(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    if (ffParsePropFile("/usr/bin/unity", "parser = OptionParser(version= \"%prog ", result)) {
+        ffStrbufSubstrBeforeFirstC(result, '"');
+    }
+}
+
+static bool extractTdeVersion(const char* line, uint32_t len, void* userdata) {
+    int count = 0;
+    sscanf(line, "R%*d.%*d.%*d%n", &count);
+    if (count == 0) {
+        return true;
+    }
+
+    ffStrbufSetNS((FFstrbuf*) userdata, len, line);
+    return false;
+}
+
+static const char* getTrinity(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    FF_STRBUF_AUTO_DESTROY path = ffStrbufCreate();
+    const char* error = ffFindExecutableInPath("tde-config", &path);
+    if (error) {
+        return "Failed to find tde-config path";
+    }
+
+    ffStrbufSubstrBeforeLastC(&path, '/');
+    ffStrbufAppendS(&path, "/../lib/libtdecore.so");
+
+    if (ffBinaryExtractStrings(path.chars, extractTdeVersion, result, strlen("R0.0.0")) == nullptr) {
+        return nullptr;
+    }
+
+    ffStrbufClear(&path);
+    if (ffProcessAppendStdOut(&path, (char* const[]) { "tde-config", "--version", nullptr }) == nullptr) {
+        ffParsePropLines(path.chars, "TDE: ", result);
+        return nullptr;
+    }
+
+    return "All methods failed";
+}
+
+static const char* getCosmic(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    const char* env = getenv("COSMIC_VERSION");
+    if (env) {
+        ffStrbufSetS(result, env);
+        return nullptr;
+    }
+
+    if (ffProcessAppendStdOut(result, (char* const[]) { "cosmic-comp", "--version", nullptr }) == nullptr) {
+        // cosmic-comp 0.1.0 (git commit fa88002ba41d2edec25dd7ffdee9719fbb928fc0)
+        ffStrbufSubstrAfterFirstC(result, ' ');
+        ffStrbufSubstrBeforeFirstC(result, ' ');
+        return nullptr;
+    }
+
+    return "All methods failed";
+}
+
+static const char* getEnlightenmentByDbus([[maybe_unused]] FFstrbuf* result) {
+#ifdef FF_HAVE_DBUS
+    FF_DBUS_AUTO_DESTROY_DATA FFDBusData dbus = {};
+    if (ffDBusLoadData(DBUS_BUS_SESSION, &dbus) != nullptr) {
+        return "ffDBusLoadData() failed";
+    }
+
+    DBusMessage* reply = ffDBusGetMethodReply(&dbus, "org.enlightenment.wm.service", "/org/enlightenment/wm/RemoteObject", "org.enlightenment.wm.Core", "Version", nullptr, nullptr);
+    if (!reply) {
+        return "ffDBusGetMethodReply() failed";
+    }
+
+    DBusMessageIter rootIterator;
+    if (!dbus.lib->ffdbus_message_iter_init(reply, &rootIterator)) {
+        dbus.lib->ffdbus_message_unref(reply);
+        return "dbus_message_iter_init() failed";
+    }
+    if (!ffDBusGetString(&dbus, &rootIterator, result)) {
+        dbus.lib->ffdbus_message_unref(reply);
+        return "ffDBusGetString() failed";
+    }
+    dbus.lib->ffdbus_message_unref(reply);
+
+    return nullptr;
+#else  // FF_HAVE_DBUS
+    return "ffDBusLoadData() failed: dbus support not compiled in";
+#endif // FF_HAVE_DBUS
+}
+
+static void getEnlightenment(FFstrbuf* result, [[maybe_unused]] FFDEOptions* options) {
+    getEnlightenmentByDbus(result);
+
+    if (result->length == 0) {
+        if (ffProcessAppendStdOut(result, (char* const[]) { "enlightenment", "--version", nullptr }) == nullptr) { // ...\nVersion: 0.27.1\n...
+            ffStrbufSubstrAfterFirstS(result, "Version: ");
+            ffStrbufSubstrBeforeFirstC(result, '\n');
+        }
+    }
+}
+const char* ffDetectDEVersion(const FFstrbuf* deName, FFstrbuf* result, FFDEOptions* options) {
+    if (!instance.config.general.detectVersion) {
+        return "Disabled by config";
+    }
+
+    if (ffStrbufEqualS(deName, FF_DE_PRETTY_PLASMA)) {
+        getKDE(result, options);
+    } else if (ffStrbufEqualS(deName, FF_DE_PRETTY_GNOME)) {
+        getGnome(result, options);
+    } else if (ffStrbufEqualS(deName, FF_DE_PRETTY_GNOME_CLASSIC)) {
+        // GNOME Classic is GNOME Shell in classic mode, so gnome-shell reports the same version
+        getGnome(result, options);
+    } else if (ffStrbufEqualS(deName, FF_DE_PRETTY_CINNAMON)) {
+        getCinnamon(result, options);
+    } else if (ffStrbufEqualS(deName, FF_DE_PRETTY_XFCE4)) {
+        getXFCE4(result, options);
+    } else if (ffStrbufEqualS(deName, FF_DE_PRETTY_MATE)) {
+        getMate(result, options);
+    } else if (ffStrbufEqualS(deName, FF_DE_PRETTY_LXQT)) {
+        getLXQt(result, options);
+    } else if (ffStrbufEqualS(deName, FF_DE_PRETTY_BUDGIE)) {
+        getBudgie(result, options);
+    } else if (ffStrbufEqualS(deName, FF_DE_PRETTY_UNITY)) {
+        getUnity(result, options);
+    } else if (ffStrbufIgnCaseEqualS(deName, "trinity") || ffStrbufIgnCaseEqualS(deName, "tde")) {
+        getTrinity(result, options);
+    } else if (ffStrbufEqualS(deName, FF_DE_PRETTY_COSMIC)) {
+        getCosmic(result, options);
+    } else if (ffStrbufEqualS(deName, FF_DE_PRETTY_ENLIGHTENMENT)) {
+        getEnlightenment(result, options);
+    } else {
+        return "Unsupported DE";
+    }
+    return nullptr;
+}
