@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#define SI_LOAD_SHIFT 16
+
 struct sysinfo {
     long uptime;
     unsigned long loads[3];
@@ -21,5 +23,9 @@ struct sysinfo {
 };
 
 int sysinfo (struct sysinfo *info);
+int get_nprocs_conf (void);
+int get_nprocs (void);
+long get_phys_pages (void);
+long get_avphys_pages (void);
 
 #endif
