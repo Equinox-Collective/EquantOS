@@ -261,6 +261,7 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     proc->files[0] = &dev_tty_master_node;
     proc->files[1] = &dev_tty_master_node;
     proc->files[2] = &dev_tty_master_node;
+    process_set_exec_info(proc, argc > 0 ? argv[0] : NULL, argc, argv);
 
     task_t *task = (task_t *)kmalloc(sizeof(task_t));
     if (!task) return false;

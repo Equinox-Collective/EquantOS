@@ -4,6 +4,7 @@
 #include "io.h"
 #include "../mem/vmm.h"
 #include "../../drivers/serial/serial.h"
+#include "../../misc/timer.h"
 #include <stddef.h>
 
 static volatile uint8_t *lapic_base = NULL;
@@ -112,7 +113,7 @@ void apic_init(void) {
     apic_write(LAPIC_SVR, 0xFF | LAPIC_SVR_ENABLE);
 
     // 6. Start LAPIC Timer at 250 Hz
-    apic_timer_init(250);
+    apic_timer_init(TIMER_HZ);
 
     serial_puts(COM1, "[APIC] Local APIC initialized successfully.\n");
 }
