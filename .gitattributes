@@ -6,5 +6,5 @@
 *.sh text eol=lf
 .bashrc text eol=lf
 
-# Port patches are applied to LF upstream sources
-*.patch text eol=lf
+# Vendored third-party sources are stored byte-for-byte as upstream ships them
+/ports/*/src/** -text

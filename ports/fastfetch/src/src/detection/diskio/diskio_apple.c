@@ -1,0 +1,57 @@
+#include "diskio.h"
+#include "common/apple/cf_helpers.h"
+
+#include <IOKit/IOKitLib.h>
+#include <IOKit/IOBSD.h>
+#include <IOKit/storage/IOMedia.h>
+#include <IOKit/storage/IOBlockStorageDriver.h>
+#include <IOKit/storage/IOStorageDeviceCharacteristics.h>
+#include <IOKit/storage/IOStorageProtocolCharacteristics.h>
+
+const char* ffDiskIOGetIoCounters(FFlist* result, FFDiskIOOptions* options) {
+    FF_IOOBJECT_AUTO_RELEASE io_iterator_t iterator = 0;
+    if (IOServiceGetMatchingServices(MACH_PORT_NULL, IOServiceMatching(kIOBlockStorageDriverClass), &iterator) != KERN_SUCCESS) {
+        return "IOServiceGetMatchingServices() failed";
+    }
+
+    io_registry_entry_t registryEntry;
+    while ((registryEntry = IOIteratorNext(iterator)) != IO_OBJECT_NULL) {
+        FF_IOOBJECT_AUTO_RELEASE io_registry_entry_t entryDriver = registryEntry;
+
+        FF_IOOBJECT_AUTO_RELEASE io_registry_entry_t entryMedia = IO_OBJECT_NULL;
+        if (IORegistryEntryGetChildEntry(entryDriver, kIOServicePlane, &entryMedia) != KERN_SUCCESS) {
+            continue;
+        }
+
+        io_name_t deviceName;
+        if (IORegistryEntryGetName(entryMedia, deviceName) != KERN_SUCCESS) {
+            continue;
+        }
+
+        if (options->namePrefix.length && strncmp(deviceName, options->namePrefix.chars, options->namePrefix.length) != 0) {
+            continue;
+        }
+
+        FF_CFTYPE_AUTO_RELEASE CFDictionaryRef statistics = IORegistryEntryCreateCFProperty(entryDriver, CFSTR(kIOBlockStorageDriverStatisticsKey), kCFAllocatorDefault, kNilOptions);
+        if (!statistics) {
+            continue;
+        }
+
+        FFDiskIOResult* device = FF_LIST_ADD(FFDiskIOResult, *result);
+        ffStrbufInitS(&device->name, deviceName);
+        ffStrbufInit(&device->devPath);
+
+        ffCfDictGetInt64(statistics, CFSTR(kIOBlockStorageDriverStatisticsBytesReadKey), (int64_t*) &device->bytesRead);
+        ffCfDictGetInt64(statistics, CFSTR(kIOBlockStorageDriverStatisticsBytesWrittenKey), (int64_t*) &device->bytesWritten);
+        ffCfDictGetInt64(statistics, CFSTR(kIOBlockStorageDriverStatisticsReadsKey), (int64_t*) &device->readCount);
+        ffCfDictGetInt64(statistics, CFSTR(kIOBlockStorageDriverStatisticsWritesKey), (int64_t*) &device->writeCount);
+
+        FF_CFTYPE_AUTO_RELEASE CFStringRef bsdName = IORegistryEntryCreateCFProperty(entryMedia, CFSTR(kIOBSDNameKey), kCFAllocatorDefault, kNilOptions);
+        if (bsdName) {
+            ffCfStrGetString(bsdName, &device->devPath);
+            ffStrbufPrependS(&device->devPath, "/dev/");
+        }
+    }
+
+    return nullptr;
+}

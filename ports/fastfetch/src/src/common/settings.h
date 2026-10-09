@@ -1,0 +1,47 @@
+#pragma once
+
+#include "fastfetch.h"
+
+typedef enum FFvarianttype: uint8_t {
+    FF_VARIANT_TYPE_STRING,
+    FF_VARIANT_TYPE_BOOL,
+    FF_VARIANT_TYPE_INT,
+} FFvarianttype;
+
+typedef union FFvariant {
+    const char* strValue;
+    int32_t intValue;
+    struct
+    {
+        bool boolValueSet;
+        bool boolValue;
+    };
+} FFvariant;
+
+#define FF_VARIANT_NULL ((FFvariant) { .strValue = nullptr })
+
+FFvariant ffSettingsGetDConf(const char* key, FFvarianttype type);
+FFvariant ffSettingsGetGSettings(const char* schemaName, const char* path, const char* key, FFvarianttype type);
+FFvariant ffSettingsGetGnome(const char* dconfKey, const char* gsettingsSchemaName, const char* gsettingsPath, const char* gsettingsKey, FFvarianttype type);
+FFvariant ffSettingsGetXFConf(const char* channelName, const char* propertyName, FFvarianttype type);
+typedef bool FFTestXfconfPropCallback(void* data, const char* propertyName); // Return false to break loop
+FFvariant ffSettingsGetXFConfFirstMatch(const char* channelName, const char* propertyPrefix, FFvarianttype type, void* data, FFTestXfconfPropCallback* cb);
+
+int ffSettingsGetSQLite3Int(const char* dbPath, const char* query);
+bool ffSettingsGetSQLite3String(const char* dbPath, const char* query, FFstrbuf* result);
+
+typedef struct {
+    char* theme;
+    char* icon_theme;
+    bool use_e_cursor;
+    int cursor_size;
+    char* desktop_default_background;
+    char* font;
+} ffEnlightenmentSettings;
+bool ffSettingsGetEnlightenmentProperty(ffEnlightenmentSettings* result);
+
+#ifdef __ANDROID__
+bool ffSettingsGetAndroidProperty(const char* propName, FFstrbuf* result);
+#elif defined(__FreeBSD__)
+bool ffSettingsGetFreeBSDKenv(const char* propName, FFstrbuf* result);
+#endif

@@ -1,0 +1,230 @@
+#include "fastfetch.h"
+#include "common/processing.h"
+#include "common/apple/cf_helpers.h"
+#include "common/time.h"
+#include "detection/media/media.h"
+
+#import <Foundation/Foundation.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <CoreServices/CoreServices.h>
+
+// https://github.com/andrewwiik/iOS-Blocks/blob/master/Widgets/Music/MediaRemote.h
+[[clang::weak_import]] extern void MRMediaRemoteGetNowPlayingInfo(dispatch_queue_t dispatcher, void (^callback)(_Nullable CFDictionaryRef info));
+[[clang::weak_import]] extern void MRMediaRemoteGetNowPlayingApplicationIsPlaying(dispatch_queue_t queue, void (^callback)(BOOL playing));
+[[clang::weak_import]] extern void MRMediaRemoteGetNowPlayingApplicationDisplayID(dispatch_queue_t queue, void (^callback)(_Nullable CFStringRef displayID));
+[[clang::weak_import]] extern void MRMediaRemoteGetNowPlayingApplicationDisplayName(int unknown, dispatch_queue_t queue, void (^callback)(_Nullable CFStringRef name));
+
+static uint32_t getTrueElapsedTime(CFDictionaryRef info) {
+    double elapsedTime;
+    if (ffCfDictGetDouble(info, CFSTR("kMRMediaRemoteNowPlayingInfoElapsedTime"), &elapsedTime) != nullptr) {
+        return 0;
+    }
+
+    elapsedTime *= 1000;
+
+    double playbackRate;
+    uint64_t timestampEpoch;
+    if (ffCfDictGetDouble(info, CFSTR("kMRMediaRemoteNowPlayingInfoPlaybackRate"), &playbackRate) == nullptr &&
+        ffCfDictGetDateAsEpoch(info, CFSTR("kMRMediaRemoteNowPlayingInfoTimestamp"), &timestampEpoch) == nullptr) {
+        uint64_t timeDiff = ffTimeGetNow() - timestampEpoch;
+        elapsedTime += (double) timeDiff * playbackRate;
+    }
+
+    return (uint32_t) elapsedTime;
+}
+
+static const char* getMediaByMediaRemote(FFMediaResult* result, bool saveCover) {
+#define FF_TEST_FN_EXISTENCE(fn) \
+    if (!fn) return "MediaRemote function " #fn " is not available"
+    FF_TEST_FN_EXISTENCE(MRMediaRemoteGetNowPlayingInfo);
+    FF_TEST_FN_EXISTENCE(MRMediaRemoteGetNowPlayingApplicationIsPlaying);
+#undef FF_TEST_FN_EXISTENCE
+
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0);
+
+    dispatch_group_enter(group);
+    __block const char* error = nullptr;
+    MRMediaRemoteGetNowPlayingInfo(queue, ^(_Nullable CFDictionaryRef info) {
+        if (info != nil) {
+            ffCfDictGetString(info, CFSTR("kMRMediaRemoteNowPlayingInfoTitle"), &result->song);
+            ffCfDictGetString(info, CFSTR("kMRMediaRemoteNowPlayingInfoArtist"), &result->artist);
+            ffCfDictGetString(info, CFSTR("kMRMediaRemoteNowPlayingInfoAlbum"), &result->album);
+            double value;
+            if (ffCfDictGetDouble(info, CFSTR("kMRMediaRemoteNowPlayingInfoDuration"), &value) == nullptr) {
+                result->length = (uint32_t) (value * 1000);
+                result->position = getTrueElapsedTime(info);
+            }
+
+            if (saveCover) {
+                NSData* artworkData = (__bridge NSData*) CFDictionaryGetValue(info, CFSTR("kMRMediaRemoteNowPlayingInfoArtworkData"));
+                if (artworkData) {
+                    CFStringRef mime = (CFStringRef) CFDictionaryGetValue(info, CFSTR("kMRMediaRemoteNowPlayingInfoArtworkMIMEType"));
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                    FF_CFTYPE_AUTO_RELEASE CFStringRef uti = UTTypeCreatePreferredIdentifierForTag(kUTTagClassMIMEType, mime, nullptr);
+                    FF_CFTYPE_AUTO_RELEASE CFStringRef ext = UTTypeCopyPreferredTagWithClass(uti, kUTTagClassFilenameExtension);
+#pragma clang diagnostic pop
+                    NSString* tmpDir = NSTemporaryDirectory();
+                    NSString* uuid = NSUUID.UUID.UUIDString;
+                    NSString* path = [tmpDir stringByAppendingPathComponent:[NSString stringWithFormat:@"ff_%@.%@", uuid, ext ? (__bridge NSString*) ext : @"img"]];
+                    if ([artworkData writeToFile:path atomically:NO])
+                        ffStrbufSetS(&result->cover, path.UTF8String);
+                }
+            }
+        } else
+            error = "MRMediaRemoteGetNowPlayingInfo() failed";
+
+        dispatch_group_leave(group);
+    });
+
+    dispatch_group_enter(group);
+    MRMediaRemoteGetNowPlayingApplicationIsPlaying(queue, ^(BOOL playing) {
+        ffStrbufSetStatic(&result->status, playing ? "Playing" : "Paused");
+        dispatch_group_leave(group);
+    });
+
+    if (MRMediaRemoteGetNowPlayingApplicationDisplayID) {
+        dispatch_group_enter(group);
+        MRMediaRemoteGetNowPlayingApplicationDisplayID(queue, ^(_Nullable CFStringRef displayID) {
+            ffCfStrGetString(displayID, &result->playerId);
+            dispatch_group_leave(group);
+        });
+    }
+
+    if (MRMediaRemoteGetNowPlayingApplicationDisplayName) {
+        dispatch_group_enter(group);
+        MRMediaRemoteGetNowPlayingApplicationDisplayName(0, queue, ^(_Nullable CFStringRef name) {
+            ffCfStrGetString(name, &result->player);
+            dispatch_group_leave(group);
+        });
+    }
+
+    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+    // Don't dispatch_release because we are using ARC
+
+    if (result->song.length > 0) {
+        return nullptr;
+    }
+
+    return error;
+}
+
+#if !FF_MODULE_DISABLE_MEDIA
+// Called from the Perl helper process through `DynaLoader::dl_install_xsub`. That mechanism installs a
+// plain C function as an XSUB, so Perl calls it with the `CV*` in the first parameter slot and no Perl
+// argument ever reaches a parameter — a `bool saveCover` parameter read as a pointer and was always
+// truthy. The flag has to travel in the environment instead; see `getMediaByAuthorizedProcess`.
+[[gnu::visibility("default"), gnu::used]] int ffPrintMediaByMediaRemote(void) {
+    const char* saveCoverEnv = getenv("FF_MEDIA_REMOTE_SAVE_COVER");
+    bool saveCover = saveCoverEnv && saveCoverEnv[0] == '1';
+
+    FFMediaResult media = {
+        .status = ffStrbufCreate(),
+        .song = ffStrbufCreate(),
+        .artist = ffStrbufCreate(),
+        .album = ffStrbufCreate(),
+        .playerId = ffStrbufCreate(),
+        .player = ffStrbufCreate(),
+        .cover = ffStrbufCreate(),
+    };
+    if (getMediaByMediaRemote(&media, saveCover) != nullptr) {
+        return 1;
+    }
+    ffStrbufAppendC(&media.status, '\n');
+    ffStrbufAppend(&media.status, &media.song);
+    ffStrbufAppendC(&media.status, '\n');
+    ffStrbufAppend(&media.status, &media.artist);
+    ffStrbufAppendC(&media.status, '\n');
+    ffStrbufAppend(&media.status, &media.album);
+    ffStrbufAppendC(&media.status, '\n');
+    ffStrbufAppend(&media.status, &media.playerId);
+    ffStrbufAppendC(&media.status, '\n');
+    ffStrbufAppend(&media.status, &media.player);
+    ffStrbufAppendC(&media.status, '\n');
+    if (saveCover) {
+        ffStrbufAppend(&media.status, &media.cover);
+    }
+    ffStrbufAppendC(&media.status, '\n');
+    ffStrbufAppendUInt(&media.status, media.position);
+    ffStrbufAppendC(&media.status, '\n');
+    ffStrbufAppendUInt(&media.status, media.length);
+    write(STDOUT_FILENO, media.status.chars, media.status.length);
+    ffStrbufDestroy(&media.status);
+    ffStrbufDestroy(&media.song);
+    ffStrbufDestroy(&media.artist);
+    ffStrbufDestroy(&media.album);
+    ffStrbufDestroy(&media.playerId);
+    ffStrbufDestroy(&media.player);
+    ffStrbufDestroy(&media.cover);
+    return 0;
+}
+#endif
+
+static const char* getMediaByAuthorizedProcess(FFMediaResult* result, bool saveCover) {
+    // #1737
+    // `DynaLoader::dl_install_xsub` hands the C function the `CV*` as its first parameter, so the flag
+    // cannot be passed as a Perl argument — `ffPrintMediaByMediaRemote` reads it from the environment,
+    // which the child process inherits.
+    FF_STRBUF_AUTO_DESTROY script = ffStrbufCreateF("$ENV{'FF_MEDIA_REMOTE_SAVE_COVER'}='%c';\
+require DynaLoader;\
+my $so = DynaLoader::dl_load_file('%s', 0);\
+my $sym = DynaLoader::dl_find_symbol($so, 'ffPrintMediaByMediaRemote');\
+DynaLoader::dl_install_xsub('fn', $sym, __FILE__);\
+exit(fn())",
+                                                    saveCover ? '1' : '0',
+                                                    instance.state.platform.exePath.chars);
+    FF_STRBUF_AUTO_DESTROY buffer = ffStrbufCreate();
+
+    const char* error = ffProcessAppendStdOut(
+        &buffer,
+        (char* const[]) { "/usr/bin/perl", // Must be signed by Apple. Homebrew version doesn't work
+                          "-e",
+                          script.chars,
+                          nil });
+    if (error) {
+        return error;
+    }
+    if (buffer.length == 0) {
+        return "No media found";
+    }
+
+    // status\ntitle\nartist\nalbum\nbundleName\nappName\ncoverPath\nelapsedTimeMS\ndurationMS
+    FFstrbuf* const strList[] = { &result->status, &result->song, &result->artist, &result->album, &result->playerId, &result->player, &result->cover };
+    char* line = nullptr;
+    size_t len = 0;
+    for (uint32_t i = 0; i < ARRAY_SIZE(strList) && ffStrbufGetline(&line, &len, &buffer); ++i) {
+        ffStrbufSetS(strList[i], line);
+    }
+    uint32_t* const numList[] = { &result->position, &result->length };
+    for (uint32_t i = 0; i < ARRAY_SIZE(numList) && ffStrbufGetline(&line, &len, &buffer); ++i) {
+        *numList[i] = (uint32_t) strtoul(line, nullptr, 10);
+    }
+    return nullptr;
+}
+
+void ffDetectMediaImpl(FFMediaResult* media, bool saveCover) {
+    const char* error;
+    if (@available(macOS 15.4, *)) {
+        error = getMediaByAuthorizedProcess(media, saveCover);
+    } else {
+        error = getMediaByMediaRemote(media, saveCover);
+    }
+    if (error) {
+        ffStrbufAppendS(&media->error, error);
+    } else {
+        if (media->player.length == 0 && media->playerId.length > 0) {
+            ffStrbufSet(&media->player, &media->playerId);
+            if (ffStrbufStartsWithIgnCaseS(&media->player, "com.")) {
+                ffStrbufSubstrAfter(&media->player, strlen("com.") - 1);
+            }
+            ffStrbufReplaceAllC(&media->player, '.', ' ');
+        }
+        // The cover is a temporary file that this process created, so it is ours to delete. This used
+        // to be flagged only in the branch above, which meant the file was left behind on every run
+        // whose player name was already known — that is, almost all of them.
+        if (media->cover.length > 0) {
+            media->removeCoverAfterUse = true;
+        }
+    }
+}

@@ -1,0 +1,95 @@
+#include "FFPlatform_private.h"
+#include "common/strutil.h"
+#include "common/io.h"
+#include "detection/version/version.h"
+
+void ffPlatformInit(FFPlatform* platform) {
+    ffStrbufInit(&platform->homeDir);
+    ffStrbufInit(&platform->cacheDir);
+    ffListInit(&platform->configDirs);
+    ffListInit(&platform->dataDirs);
+    ffStrbufInit(&platform->exePath);
+    ffStrbufInit(&platform->cwd);
+
+    ffStrbufInit(&platform->userName);
+    ffStrbufInit(&platform->fullUserName);
+    ffStrbufInit(&platform->hostName);
+    ffStrbufInit(&platform->userShell);
+
+#ifdef _WIN32
+    ffStrbufInit(&platform->sid);
+    platform->initCP = 0;
+#endif
+
+    FFPlatformSysinfo* info = &platform->sysinfo;
+
+    ffStrbufInit(&info->name);
+    ffStrbufInit(&info->release);
+    ffStrbufInit(&info->version);
+    ffStrbufInit(&info->architecture);
+    info->pageSizeShift = 12; // 4096, reasonable fallback
+
+    ffPlatformInitImpl(platform);
+
+    if (info->name.length == 0) {
+        ffStrbufSetStatic(&info->name, ffVersionResult.sysName);
+    }
+
+    if (info->architecture.length == 0) {
+        ffStrbufSetStatic(&info->architecture, ffVersionResult.architecture);
+    }
+}
+
+void ffPlatformDestroy(FFPlatform* platform) {
+    ffStrbufDestroy(&platform->homeDir);
+    ffStrbufDestroy(&platform->cacheDir);
+
+    FF_LIST_FOR_EACH (FFstrbuf, dir, platform->configDirs) {
+        ffStrbufDestroy(dir);
+    }
+    ffListDestroy(&platform->configDirs);
+
+    FF_LIST_FOR_EACH (FFstrbuf, dir, platform->dataDirs) {
+        ffStrbufDestroy(dir);
+    }
+    ffListDestroy(&platform->dataDirs);
+    ffStrbufDestroy(&platform->exePath);
+    ffStrbufDestroy(&platform->cwd);
+
+    ffStrbufDestroy(&platform->userName);
+    ffStrbufDestroy(&platform->hostName);
+    ffStrbufDestroy(&platform->userShell);
+    ffStrbufDestroy(&platform->fullUserName);
+
+#ifdef _WIN32
+    ffStrbufDestroy(&platform->sid);
+#endif
+
+    FFPlatformSysinfo* info = &platform->sysinfo;
+    ffStrbufDestroy(&info->architecture);
+    ffStrbufDestroy(&info->name);
+    ffStrbufDestroy(&info->release);
+    ffStrbufDestroy(&info->version);
+}
+
+void ffPlatformPathAddAbsolute(FFlist* dirs, const char* path) {
+    if (!ffPathExists(path, FF_PATHTYPE_DIRECTORY)) {
+        return;
+    }
+
+    FF_STRBUF_AUTO_DESTROY buffer = ffStrbufCreateS(path);
+    ffStrbufEnsureEndsWithC(&buffer, '/');
+    if (!FF_LIST_CONTAINS(*dirs, &buffer, ffStrbufEqual)) {
+        ffStrbufInitMove(FF_LIST_ADD(FFstrbuf, *dirs), &buffer);
+    }
+}
+
+void ffPlatformPathAddHome(FFlist* dirs, const FFPlatform* platform, const char* suffix) {
+    FF_STRBUF_AUTO_DESTROY buffer = ffStrbufCreateA(64);
+    ffStrbufAppend(&buffer, &platform->homeDir);
+    ffStrbufAppendS(&buffer, suffix);
+    ffStrbufEnsureEndsWithC(&buffer, '/');
+    if (ffPathExists(buffer.chars, FF_PATHTYPE_DIRECTORY) && !FF_LIST_CONTAINS(*dirs, &buffer, ffStrbufEqual)) {
+        ffStrbufInitMove(FF_LIST_ADD(FFstrbuf, *dirs), &buffer);
+    }
+}

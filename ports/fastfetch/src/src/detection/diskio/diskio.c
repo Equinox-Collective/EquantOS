@@ -1,0 +1,86 @@
+#include "diskio.h"
+
+#include "common/time.h"
+
+const char* ffDiskIOGetIoCounters(FFlist* result, FFDiskIOOptions* options);
+
+static FFlist ioCounters1;
+static double time1;
+
+void ffPrepareDiskIO(FFDiskIOOptions* options) {
+    if (options->detectTotal) {
+        return;
+    }
+
+    if (time1 != 0) {
+        return; // Already prepared
+    }
+
+    // The options cannot change between this call and `ffDetectDiskIO`: `ffPrepareCommandOption`
+    // and `parseStructureCommand` both build them through `initStructureModuleOptions`, which
+    // merges the module object from the JSON config. So the baseline always matches the second
+    // snapshot and needs no re-validation.
+    ffListInit(&ioCounters1);
+    ffDiskIOGetIoCounters(&ioCounters1, options);
+    time1 = ffTimeGetTick();
+}
+
+const char* ffDetectDiskIO(FFlist* result, FFDiskIOOptions* options) {
+    const char* error = nullptr;
+
+    if (options->detectTotal) {
+        error = ffDiskIOGetIoCounters(result, options);
+        if (error) {
+            return error;
+        }
+        return nullptr;
+    }
+
+    if (time1 == 0) {
+        ffPrepareDiskIO(options);
+    }
+
+    if (ioCounters1.length == 0) {
+        return "No physical disk found";
+    }
+
+    double time2 = ffTimeGetTick();
+    while (time2 - time1 < (double) options->waitTime) {
+        ffTimeSleep((uint32_t) (options->waitTime - (time2 - time1)));
+        time2 = ffTimeGetTick();
+    }
+
+    error = ffDiskIOGetIoCounters(result, options);
+    if (error) {
+        return error;
+    }
+
+    if (result->length != ioCounters1.length) {
+        return "Different number of physical disks. Hardware change?";
+    }
+
+    for (uint32_t i = 0; i < result->length; ++i) {
+        FFDiskIOResult* icPrev = FF_LIST_GET(FFDiskIOResult, ioCounters1, i);
+        FFDiskIOResult* icCurr = FF_LIST_GET(FFDiskIOResult, *result, i);
+        if (!ffStrbufEqual(&icPrev->devPath, &icCurr->devPath)) {
+            return "Physical disk device path changed";
+        }
+
+        static_assert(sizeof(FFDiskIOResult) - offsetof(FFDiskIOResult, bytesRead) == sizeof(uint64_t) * 4, "Unexpected struct FFDiskIOResult layout");
+        for (size_t off = offsetof(FFDiskIOResult, bytesRead); off < sizeof(FFDiskIOResult); off += sizeof(uint64_t)) {
+            uint64_t* prevValue = (uint64_t*) ((uint8_t*) icPrev + off);
+            uint64_t* currValue = (uint64_t*) ((uint8_t*) icCurr + off);
+            uint64_t temp = *currValue;
+            *currValue = (uint64_t) ((double) (*currValue - *prevValue) * 1000.0 / (time2 - time1)); // Calculate per second
+
+            // For next function call
+            *prevValue = temp;
+        }
+    }
+
+    // For next function call
+    time1 = time2;
+    // Leak ioCounters1 here
+
+    return nullptr;
+}

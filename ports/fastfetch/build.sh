@@ -2,16 +2,19 @@
 # Builds a static fastfetch for EquantOS against the musl SDK in sdk/sysroot
 # and installs it as res/fastfetch.elf (picked up by the main Makefile).
 #
+# Sources: ports/fastfetch/src is fastfetch 2.69.0
+# (https://github.com/fastfetch-cli/fastfetch) with two local changes:
+#   - src/detection/gpu/gpu_linux.c: DRM calls guarded by __has_include(<drm/drm.h>),
+#     since the EquantOS SDK has no Linux DRM headers
+#   - src/logo/ascii/e/equantos.txt + e.inc entry: built-in EquantOS logo (ID=equantos)
+#
 # usage: sh ports/fastfetch/build.sh        (run from the repository root)
-# needs: git, cmake, make, python3, x86_64-elf-gcc, sdk/sysroot/lib/crt{1,i,n}.o
+# needs: cmake, make, python3, x86_64-elf-gcc, sdk/sysroot/lib/crt{1,i,n}.o
 set -e
-
-FASTFETCH_VERSION=2.69.0
-FASTFETCH_REPO=https://github.com/fastfetch-cli/fastfetch.git
 
 ROOT=$(pwd)
 PORT_DIR="$ROOT/ports/fastfetch"
-SRC_DIR="$ROOT/build/ports/fastfetch-src"
+SRC_DIR="$PORT_DIR/src"
 BUILD_DIR="$ROOT/build/ports/fastfetch-build"
 
 for f in crt1.o crti.o crtn.o; do
@@ -20,15 +23,6 @@ for f in crt1.o crti.o crtn.o; do
         exit 1
     fi
 done
-
-if [ ! -d "$SRC_DIR" ]; then
-    mkdir -p "$ROOT/build/ports"
-    git -c core.autocrlf=false clone --depth 1 --branch "$FASTFETCH_VERSION" "$FASTFETCH_REPO" "$SRC_DIR"
-    for p in "$PORT_DIR"/patches/*.patch; do
-        echo "applying $(basename "$p")"
-        git -C "$SRC_DIR" apply --whitespace=nowarn "$p"
-    done
-fi
 
 # Native Windows CMake (Git Bash / MSYS2) needs Windows paths and the MinGW generator
 case "$(uname -s)" in

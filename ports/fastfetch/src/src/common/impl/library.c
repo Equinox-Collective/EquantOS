@@ -1,0 +1,260 @@
+#include "fastfetch.h"
+#include "common/library.h"
+#include "common/debug.h"
+
+#if _WIN32
+    #include "common/windows/nt.h"
+    #include <errno.h>
+    #include <ntstatus.h>
+#endif
+
+#ifndef FF_DISABLE_DLOPEN
+
+    #include <stdarg.h>
+
+    // Clang doesn't define __SANITIZE_ADDRESS__ but defines __has_feature(address_sanitizer)
+    #if !defined(__SANITIZE_ADDRESS__) && defined(__has_feature)
+        #if __has_feature(address_sanitizer)
+            #define __SANITIZE_ADDRESS__
+        #endif
+    #endif
+
+    #ifndef FF_DLOPEN_FLAGS
+        #ifdef __SANITIZE_ADDRESS__
+            #define FF_DLOPEN_FLAGS RTLD_LAZY | RTLD_NODELETE
+        #else
+            #define FF_DLOPEN_FLAGS RTLD_LAZY
+        #endif
+    #endif
+
+void* ffLibraryLoadSingle(const char* path, int maxVersion) {
+    void* result = dlopen(path, FF_DLOPEN_FLAGS);
+
+    #if _WIN32
+
+    // libX.dll.1 never exists on Windows, while libX-1.dll may exist
+    FF_UNUSED(maxVersion)
+
+    if (result != nullptr) {
+        return result;
+    }
+
+    uint32_t pathLen = ffStrbufLastIndexC(&instance.state.platform.exePath, '/');
+    if (pathLen == instance.state.platform.exePath.length) {
+        return result;
+    }
+
+    char absPath[MAX_PATH * 2];
+    strcpy(mempcpy(absPath, instance.state.platform.exePath.chars, pathLen + 1), path);
+    return dlopen(absPath, FF_DLOPEN_FLAGS);
+
+    #else
+
+    if (result == nullptr) {
+        FF_DEBUG("dlopen(\"%s\"): %s", path, dlerror());
+    }
+
+    if (result != nullptr || maxVersion < 0) {
+        return result;
+    }
+
+    FF_STRBUF_AUTO_DESTROY pathbuf = ffStrbufCreateA(64);
+    ffStrbufAppendS(&pathbuf, path);
+    ffStrbufAppendC(&pathbuf, '.');
+
+    for (int i = maxVersion; i >= 0; --i) {
+        uint32_t originalLength = pathbuf.length;
+        ffStrbufAppendSInt(&pathbuf, i);
+
+        result = dlopen(pathbuf.chars, FF_DLOPEN_FLAGS);
+        if (result != nullptr) {
+            break;
+        } else {
+            FF_DEBUG("dlopen(\"%s\"): %s", pathbuf.chars, dlerror());
+        }
+
+        ffStrbufSubstrBefore(&pathbuf, originalLength);
+    }
+
+    #endif
+
+    return result;
+}
+
+void* ffLibraryLoadMulti(const char* path, int maxVersion, ...) {
+    void* result = ffLibraryLoadSingle(path, maxVersion);
+
+    if (!result) {
+        va_list defaultNames;
+        va_start(defaultNames, maxVersion);
+
+        do {
+            const char* pathRest = va_arg(defaultNames, const char*);
+            if (pathRest == nullptr) {
+                break;
+            }
+
+            int maxVersionRest = va_arg(defaultNames, int);
+            result = ffLibraryLoadSingle(pathRest, maxVersionRest);
+        } while (!result);
+
+        va_end(defaultNames);
+    }
+
+    return result;
+}
+
+#endif
+
+#if _WIN32
+
+void* dlopen(const char* path, [[maybe_unused]] int mode) {
+    wchar_t pathW[MAX_PATH + 1];
+    ULONG pathWBytes = 0;
+
+    NTSTATUS status = RtlUTF8ToUnicodeN(pathW, sizeof(pathW), &pathWBytes, path, (uint32_t) strlen(path) + 1);
+    if (!NT_SUCCESS(status)) {
+        FF_DEBUG("RtlUTF8ToUnicodeN failed for path %s with status 0x%08lX: %s", path, status, ffDebugNtStatus(status));
+        return nullptr;
+    }
+
+    PVOID module = nullptr;
+    status = LdrLoadDll(nullptr, nullptr, &(UNICODE_STRING) {
+                                        .Length = (USHORT) (pathWBytes - sizeof(wchar_t)), // Exclude null terminator
+                                        .MaximumLength = (USHORT) pathWBytes,
+                                        .Buffer = pathW,
+                                    },
+        &module);
+
+    if (!NT_SUCCESS(status)) {
+        FF_DEBUG("LdrLoadDll failed for path %s with status 0x%08lX: %s", path, status, ffDebugNtStatus(status));
+        return nullptr;
+    }
+
+    return module;
+}
+
+int dlclose(void* handle) {
+    NTSTATUS status = LdrUnloadDll(handle);
+    if (!NT_SUCCESS(status)) {
+        FF_DEBUG("LdrUnloadDll failed for handle %p with status 0x%08lX: %s", handle, status, ffDebugNtStatus(status));
+        return -1;
+    }
+    return 0;
+}
+
+void* dlsym(void* handle, const char* symbol) {
+    void* address;
+    USHORT symbolBytes = (USHORT) (strlen(symbol) + 1);
+    NTSTATUS status = LdrGetProcedureAddress(handle, &(ANSI_STRING) {
+                                                         .Length = symbolBytes - sizeof(char),
+                                                         .MaximumLength = symbolBytes,
+                                                         .Buffer = (char*) symbol,
+                                                     },
+        0,
+        &address);
+    if (!NT_SUCCESS(status)) {
+        FF_DEBUG("LdrGetProcedureAddress failed for symbol %s with status 0x%08lX: %s", symbol, status, ffDebugNtStatus(status));
+        return nullptr;
+    }
+    return address;
+}
+
+void* ffLibraryGetModule(const wchar_t* libraryFileName) {
+    // `libraryFileName` is non-null per the `nonnull(1)` contract.
+    // Prefer `ffGetPeb()->ImageBaseAddress` over looking the main module up by name.
+    void* module = nullptr;
+    USHORT libraryFileNameBytes = (USHORT) (wcslen(libraryFileName) * sizeof(wchar_t) + sizeof(wchar_t));
+    NTSTATUS status = LdrGetDllHandle(nullptr, nullptr, &(UNICODE_STRING) {
+                                                      .Length = libraryFileNameBytes - sizeof(wchar_t),
+                                                      .MaximumLength = libraryFileNameBytes,
+                                                      .Buffer = (wchar_t*) libraryFileName,
+                                                  },
+        &module);
+    if (!NT_SUCCESS(status)) {
+        FF_DEBUG("LdrGetDllHandle failed for library %ls with status 0x%08lX: %s", libraryFileName, status, ffDebugNtStatus(status));
+        return nullptr;
+    }
+    return module;
+}
+#endif
+
+struct LibraryIterateDynamicLibsBundle {
+    FFLibraryIterateCallback callback;
+    void* userData;
+};
+
+#if _WIN32
+
+static void ffLibraryIterateDynamicLibsCallback(PLDR_DATA_TABLE_ENTRY DataTableEntry, PVOID Context, BOOLEAN* StopEnumeration) {
+    if (DataTableEntry->FullDllName.Buffer == nullptr || DataTableEntry->FullDllName.Buffer[0] == L'\0') {
+        return;
+    }
+
+    char path[PATH_MAX * 3];
+    ULONG outBytes;
+    if (NT_SUCCESS(RtlUnicodeToUTF8N(path, sizeof(path), &outBytes, DataTableEntry->FullDllName.Buffer, DataTableEntry->FullDllName.Length))) {
+        path[outBytes] = '\0';
+        struct LibraryIterateDynamicLibsBundle* bundle = (struct LibraryIterateDynamicLibsBundle*) Context;
+        *StopEnumeration = !bundle->callback(path, bundle->userData);
+    }
+}
+
+bool ffLibraryIterateDynamicLibs(FFLibraryIterateCallback callback, void* userData) {
+    struct LibraryIterateDynamicLibsBundle bundle = {
+        .callback = callback,
+        .userData = userData,
+    };
+    return NT_SUCCESS(LdrEnumerateLoadedModules(FALSE, ffLibraryIterateDynamicLibsCallback, &bundle));
+}
+
+#elif defined(__APPLE__)
+
+#include <mach-o/dyld.h>
+
+bool ffLibraryIterateDynamicLibs(FFLibraryIterateCallback callback, void* userData) {
+    uint32_t imageCount = _dyld_image_count();
+    for (uint32_t i = 0; i < imageCount; ++i) {
+        const char* name = _dyld_get_image_name(i);
+        if (name == nullptr || name[0] == '\0') {
+            continue;
+        }
+
+        if (!callback(name, userData)) {
+            break;
+        }
+    }
+
+    return true;
+}
+
+#elif __has_include(<link.h>)
+    #include <link.h>
+
+static int ffLibraryIterateDynamicLibsCallback(struct dl_phdr_info* info, size_t, void* data) {
+    if (info->dlpi_name == nullptr || info->dlpi_name[0] == '\0') {
+        return 0;
+    }
+
+    struct LibraryIterateDynamicLibsBundle* bundle = (struct LibraryIterateDynamicLibsBundle*) data;
+    return !bundle->callback(info->dlpi_name, bundle->userData);
+}
+
+bool ffLibraryIterateDynamicLibs(bool (*callback)(const char* name, void* userData), void* userData) {
+    dl_iterate_phdr(
+        ffLibraryIterateDynamicLibsCallback,
+        &(struct LibraryIterateDynamicLibsBundle) {
+            .callback = callback,
+            .userData = userData,
+        });
+    return true;
+}
+
+#else
+
+bool ffLibraryIterateDynamicLibs(FFLibraryIterateCallback, void*) {
+    // Not implemented for this platform
+    return false;
+}
+
+#endif

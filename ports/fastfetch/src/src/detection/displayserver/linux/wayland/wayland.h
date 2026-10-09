@@ -1,0 +1,95 @@
+#pragma once
+
+#ifdef FF_HAVE_WAYLAND
+
+    #include "common/library.h"
+    #include "common/strutil.h"
+
+    #include <wayland-client.h>
+
+    #include "../displayserver_linux.h"
+
+static inline uint32_t min(uint32_t a, uint32_t b) {
+    return a < b ? a : b;
+}
+
+typedef enum WaylandProtocolType: uint8_t {
+    FF_WAYLAND_PROTOCOL_TYPE_NONE,
+    FF_WAYLAND_PROTOCOL_TYPE_GLOBAL,
+    FF_WAYLAND_PROTOCOL_TYPE_KDE_DEPRECATED,
+    FF_WAYLAND_PROTOCOL_TYPE_KDE_REGISTRY,
+} WaylandProtocolType;
+
+// In case users have an ancient version of libwayland-client
+int wl_display_dispatch_timeout(struct wl_display *display, const struct timespec *timeout);
+
+typedef struct WaylandData {
+    FFDisplayServerResult* result;
+    FF_LIBRARY_SYMBOL(wl_proxy_marshal_constructor_versioned)
+    FF_LIBRARY_SYMBOL(wl_proxy_add_listener)
+    FF_LIBRARY_SYMBOL(wl_proxy_destroy)
+    FF_LIBRARY_SYMBOL(wl_display_roundtrip)
+    union {
+        FF_LIBRARY_SYMBOL(wl_display_dispatch)
+        FF_LIBRARY_SYMBOL(wl_display_dispatch_timeout)
+    };
+    struct wl_display* display;
+    WaylandProtocolType protocolType;
+    struct wl_proxy* zxdgOutputManager;
+    struct wl_proxy* wpColorManager;
+} WaylandData;
+
+typedef struct WaylandDisplay {
+    WaylandData* parent;
+    void* internal;
+    int32_t width;
+    int32_t height;
+    int32_t refreshRate;
+    int32_t preferredWidth;
+    int32_t preferredHeight;
+    int32_t preferredRefreshRate;
+    int32_t physicalWidth;
+    int32_t physicalHeight;
+    uint32_t dpi;
+    enum wl_output_transform transform;
+    FFDisplayType type;
+    FFstrbuf name;
+    FFstrbuf description;
+    FFstrbuf edidName;
+    uint64_t id;
+    bool hdrInfoAvailable;
+    bool hdrSupported;
+    bool hdrEnabled;
+    uint16_t myear;
+    uint16_t mweek;
+    FFstrbuf serial;
+    uint8_t bitDepth;
+    bool primary;
+    bool done;
+} WaylandDisplay;
+
+inline static uint64_t ffWaylandGenerateIdFromName(const char* name) {
+    uint64_t id = 0;
+    size_t len = strlen(name);
+    if (len > sizeof(id)) {
+        memcpy(&id, name + (len - sizeof(id)), sizeof(id)); // copy the last 8 bytes
+    } else if (len > 0) {
+        memcpy(&id, name, len);
+    }
+    return id;
+}
+
+void ffWaylandOutputNameListener(void* data, [[maybe_unused]] void* output, const char* name);
+void ffWaylandOutputDescriptionListener(void* data, [[maybe_unused]] void* output, const char* description);
+// Modifies content of display. Don't call this function when calling ffdsAppendDisplay
+uint32_t ffWaylandHandleRotation(WaylandDisplay* display);
+const char* ffWaylandWaitForDone(WaylandDisplay* display);
+
+const char* ffWaylandHandleGlobalOutput(WaylandData* wldata, struct wl_registry* registry, uint32_t name, uint32_t version);
+const char* ffWaylandHandleKdeOutputRegistry(WaylandData* wldata, struct wl_registry* registry, uint32_t name, uint32_t version);
+const char* ffWaylandHandleKdeOutput(WaylandData* wldata, struct wl_registry* registry, uint32_t name, uint32_t version);
+const char* ffWaylandHandleKdeOutputOrder(WaylandData* wldata, struct wl_registry* registry, uint32_t name, uint32_t version);
+const char* ffWaylandHandleZxdgOutput(WaylandData* wldata, struct wl_registry* registry, uint32_t name, uint32_t version);
+const char* ffWaylandHandleWpColor(WaylandData* wldata, struct wl_registry* registry, uint32_t name, uint32_t version);
+
+#endif

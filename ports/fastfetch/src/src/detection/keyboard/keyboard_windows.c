@@ -1,0 +1,85 @@
+#define INITGUID
+
+#include "keyboard.h"
+#include "common/io.h"
+#include "common/mallocHelper.h"
+#include "common/windows/unicode.h"
+
+#include <windows.h>
+#include <hidsdi.h>
+#include <cfgmgr32.h>
+#include <devpkey.h>
+
+const char* ffDetectKeyboard(FFlist* devices /* List of FFKeyboardDevice */) {
+    UINT nDevices = 0;
+    if (GetRawInputDeviceList(nullptr, &nDevices, sizeof(RAWINPUTDEVICELIST))) {
+        return "GetRawInputDeviceList(nullptr) failed";
+    }
+    if (nDevices == 0) {
+        return "No HID devices found";
+    }
+
+    FF_AUTO_FREE RAWINPUTDEVICELIST* pRawInputDeviceList = (RAWINPUTDEVICELIST*) malloc(sizeof(RAWINPUTDEVICELIST) * nDevices);
+    if ((nDevices = GetRawInputDeviceList(pRawInputDeviceList, &nDevices, sizeof(RAWINPUTDEVICELIST))) == (UINT) -1) {
+        return "GetRawInputDeviceList(pRawInputDeviceList) failed";
+    }
+
+    for (UINT i = 0; i < nDevices; ++i) {
+        if (pRawInputDeviceList[i].dwType != RIM_TYPEKEYBOARD) {
+            continue;
+        }
+
+        HANDLE hDevice = pRawInputDeviceList[i].hDevice;
+
+        RID_DEVICE_INFO rdi;
+        UINT rdiSize = sizeof(rdi);
+        if (GetRawInputDeviceInfoW(hDevice, RIDI_DEVICEINFO, &rdi, &rdiSize) == (UINT) -1) {
+            continue;
+        }
+
+        WCHAR devName[MAX_PATH];
+        UINT nameSize = MAX_PATH;
+        if (GetRawInputDeviceInfoW(hDevice, RIDI_DEVICENAME, devName, &nameSize) == (UINT) -1) {
+            continue;
+        }
+
+        FFKeyboardDevice* device = FF_LIST_ADD(FFKeyboardDevice, *devices);
+        ffStrbufInit(&device->serial);
+        ffStrbufInit(&device->name);
+
+        wchar_t buffer[MAX_PATH];
+
+        FF_AUTO_CLOSE_FD HANDLE hHidFile = CreateFileW(devName, 0 /* must be 0 instead of GENERIC_READ */, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hHidFile != INVALID_HANDLE_VALUE) {
+            if (HidD_GetProductString(hHidFile, buffer, (ULONG) sizeof(buffer))) {
+                ffStrbufSetWS(&device->name, buffer);
+            }
+
+            if (HidD_GetSerialNumberString(hHidFile, buffer, sizeof(buffer))) {
+                ffStrbufSetWS(&device->serial, buffer);
+            }
+        }
+
+        if (!device->name.length) {
+            // https://stackoverflow.com/a/64321096/9976392
+            DEVPROPTYPE propertyType;
+            ULONG propertySize = sizeof(buffer);
+
+            if (CM_Get_Device_Interface_PropertyW(devName, &DEVPKEY_Device_InstanceId, &propertyType, (PBYTE) buffer, &propertySize, 0) == CR_SUCCESS) {
+                DEVINST devInst;
+                if (CM_Locate_DevNodeW(&devInst, buffer, CM_LOCATE_DEVNODE_NORMAL) == CR_SUCCESS) {
+                    propertySize = sizeof(buffer);
+                    if (CM_Get_DevNode_PropertyW(devInst, &DEVPKEY_NAME, &propertyType, (PBYTE) buffer, &propertySize, 0) == CR_SUCCESS) {
+                        ffStrbufSetWS(&device->name, buffer);
+                    }
+                }
+            }
+        }
+
+        if (!device->name.length) {
+            ffStrbufSetF(&device->name, "Unknown device %04X-%04X", (unsigned) rdi.hid.dwVendorId, (unsigned) rdi.hid.dwProductId);
+        }
+    }
+
+    return nullptr;
+}

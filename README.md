@@ -128,23 +128,26 @@ at `/disk`.
 
 ## Ports
 
-Third-party programs live in `ports/<name>/` as a build recipe plus patches;
-the resulting static binary is committed to `res/` and packed into the ISO.
+Third-party programs live in `ports/<name>/`: the vendored sources (with any
+EquantOS changes applied) in `src/` and a build recipe; the resulting static
+binary is committed to `res/` and packed into the ISO.
 
 ### fastfetch
 
 `res/fastfetch.elf` (fastfetch 2.69.0) is installed as `/bin/fastfetch` in the
-live system. To rebuild it (needs `git`, `cmake`, `make`, Python 3 and the
-`crt*.o` objects above):
+live system. To rebuild it (needs `cmake`, `make`, Python 3 and the `crt*.o`
+objects above):
 
 ```sh
 sh ports/fastfetch/build.sh
 ```
 
-The script clones the pinned release into `build/ports/`, applies
-`ports/fastfetch/patches/` (DRM calls guarded for systems without
-`<drm/drm.h>`, built-in EquantOS logo) and links it statically against
-`sdk/sysroot` using `ports/fastfetch/equantos-toolchain.cmake`.
+`ports/fastfetch/src` is upstream fastfetch 2.69.0 with two local changes:
+DRM calls in `src/detection/gpu/gpu_linux.c` are guarded for systems without
+`<drm/drm.h>`, and a built-in EquantOS logo is added
+(`src/logo/ascii/e/equantos.txt` plus its entry in `e.inc`). The binary is
+linked statically against `sdk/sysroot` using
+`ports/fastfetch/equantos-toolchain.cmake`.
 
 ---
 

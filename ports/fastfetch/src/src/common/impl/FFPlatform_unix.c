@@ -1,0 +1,358 @@
+#include "FFPlatform_private.h"
+#include "common/FFstrbuf.h"
+#include "common/arrutil.h"
+#include "common/strutil.h"
+#include "common/io.h"
+#include "common/path.h"
+#include "common/mallocHelper.h"
+
+#include <unistd.h>
+#include <pwd.h>
+#include <limits.h>
+#include <sys/utsname.h>
+#include <paths.h>
+
+#ifdef __APPLE__
+    #include <mach-o/dyld.h>
+    #include <sys/sysctl.h>
+#elif defined(__FreeBSD__) || defined(__NetBSD__)
+    #include <sys/sysctl.h>
+#elif defined(__OpenBSD__)
+    #include <sys/sysctl.h>
+    #include <sys/stat.h>
+    #include "common/path.h"
+#elif defined(__HAIKU__)
+    #include <image.h>
+    #include <OS.h>
+#endif
+
+static void getExePath(FFPlatform* platform) {
+    char exePath[PATH_MAX];
+#if defined(__linux__) || defined(__GNU__)
+    ssize_t exePathLen = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+    if (exePathLen > 0) {
+        exePath[exePathLen] = '\0';
+    }
+#elif defined(__APPLE__)
+    uint32_t exePathLen = sizeof(exePath);
+    if (_NSGetExecutablePath(exePath, &exePathLen) == 0) {
+        exePathLen = (uint32_t) strlen(exePath);
+    } else {
+        exePathLen = 0;
+    }
+#elif defined(__FreeBSD__) || defined(__NetBSD__)
+    size_t exePathLen = sizeof(exePath);
+    if (sysctl(
+            (int[]) { CTL_KERN,
+    #ifdef __FreeBSD__
+                KERN_PROC,
+                KERN_PROC_PATHNAME,
+                (pid_t) platform->pid
+    #else
+                KERN_PROC_ARGS,
+                (pid_t) platform->pid,
+                KERN_PROC_PATHNAME
+    #endif
+            },
+            4,
+            exePath,
+            &exePathLen,
+            nullptr,
+            0) < 0)
+        exePathLen = 0;
+    else {
+        exePathLen--; // remove terminating NUL
+    }
+#elif defined(__OpenBSD__)
+    // OpenBSD doesn't have a reliable way to get the executable path.
+    // Current implementation uses argv[0], which can be easily spoofed.
+    // See #2195
+    size_t exePathLen = 0;
+    {
+        char argvBuf[ARG_MAX];
+        size_t argvSize = sizeof(argvBuf);
+        int argvMib[] = { CTL_KERN, KERN_PROC_ARGS, (pid_t) platform->pid, KERN_PROC_ARGV };
+        if (sysctl(argvMib, ARRAY_SIZE(argvMib), argvBuf, &argvSize, nullptr, 0) == 0) {
+            // The buffer is filled with an array of char pointers followed by the strings themselves
+            char** argv = (char**) argvBuf;
+            if (argv[0] && (char*) argv[0] >= argvBuf && (char*) argv[0] < argvBuf + argvSize) {
+                char* arg0 = argv[0];
+                if (arg0[0]) {
+                    if (strchr(arg0, '/') != nullptr) // likely a path (absolute or relative)
+                    {
+                        exePathLen = strlen(arg0);
+                        if (exePathLen < ARRAY_SIZE(exePath)) {
+                            memcpy(exePath, arg0, exePathLen);
+                            exePath[exePathLen] = '\0';
+                        } else {
+                            exePathLen = 0;
+                        }
+                    } else {
+                        FF_STRBUF_AUTO_DESTROY tmpPath = ffStrbufCreate();
+                        if (ffFindExecutableInPath(arg0, &tmpPath) == nullptr && tmpPath.length < ARRAY_SIZE(exePath)) {
+                            memcpy(exePath, tmpPath.chars, tmpPath.length + 1);
+                            exePathLen = tmpPath.length;
+                        }
+                    }
+
+                    if (exePathLen > 0) {
+                        struct stat st;
+                        if (stat(exePath, &st) == 0 && S_ISREG(st.st_mode)) {
+                            // Replicate kvm_getfiles()'s live path: {CTL_KERN, KERN_FILE, KERN_FILE_BYPID, pid, esize, count}
+                            int fileMib[6] = { CTL_KERN, KERN_FILE, KERN_FILE_BYPID, (pid_t) platform->pid, (int) sizeof(struct kinfo_file), 0 };
+                            size_t fileSize = 0;
+                            if (sysctl(fileMib, ARRAY_SIZE(fileMib), nullptr, &fileSize, nullptr, 0) == 0) {
+                                fileSize += fileSize / 8; // add 12.5% for the table growing between the two calls
+                                size_t fileCapacity = fileSize;
+                                FF_AUTO_FREE struct kinfo_file* kf = (struct kinfo_file*) malloc(fileCapacity);
+                                if (kf) {
+                                    int rv;
+                                    // The table only grows, so the loop terminates as long as it grows by less
+                                    // than 12.5% per retry. Cap it anyway: spinning on a pathological growth
+                                    // rate would hang fastfetch, and giving up only costs the executable check
+                                    // below, which already assumes the path is correct when the list is missing.
+                                    int retries = 5;
+                                    while (true) {
+                                        fileMib[5] = (int) (fileCapacity / sizeof(struct kinfo_file));
+                                        fileSize = fileCapacity; // sysctl takes the size of the buffer as input
+                                        rv = sysctl(fileMib, ARRAY_SIZE(fileMib), kf, &fileSize, nullptr, 0);
+                                        if (rv == 0 || errno != ENOMEM || retries-- == 0) {
+                                            break;
+                                        }
+                                        // The file table grew between the two calls. The buffer has to grow
+                                        // before the retry: the next call advertises fileCapacity as the size
+                                        // of kf, and the kernel would copy that many bytes into the old
+                                        // allocation.
+                                        // OpenBSD writes back the size it needs, FreeBSD only the number of
+                                        // bytes it managed to copy, so take the larger one and add ~10% on
+                                        // top -- the growth libprocstat uses for this very sysctl.
+                                        size_t newCapacity = fileSize > fileCapacity ? fileSize : fileCapacity;
+                                        newCapacity += newCapacity / 8;
+                                        struct kinfo_file* newKf = (struct kinfo_file*) realloc(kf, newCapacity);
+                                        if (newKf == nullptr) {
+                                            rv = -1;
+                                            break;
+                                        }
+                                        kf = newKf;
+                                        fileCapacity = newCapacity;
+                                    }
+
+                                    if (rv == 0) {
+                                        int cntp = (int) (fileSize / sizeof(struct kinfo_file));
+                                        int i;
+                                        for (i = 0; i < cntp; i++) {
+                                            if (kf[i].fd_fd == KERN_FILE_TEXT) {
+                                                // KERN_FILE_TEXT is the executable file, not a shared library, and should be unique in the list.
+                                                if (st.st_dev != (dev_t) kf[i].va_fsid || st.st_ino != (ino_t) kf[i].va_fileid) {
+                                                    i = -1;
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        if (i < 0) {
+                                            exePathLen = 0;
+                                        }
+                                    }
+                                    // If we can't get the list of open files, we can't verify that the file is actually the executable
+                                    // Assume it is
+                                }
+                            }
+                        } else {
+                            exePathLen = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+#elif defined(__sun)
+    ssize_t exePathLen = readlink("/proc/self/path/a.out", exePath, sizeof(exePath) - 1);
+    if (exePathLen > 0) {
+        exePath[exePathLen] = '\0';
+    }
+#elif defined(__HAIKU__)
+    size_t exePathLen = 0;
+    image_info info;
+    int32 cookie = 0;
+
+    while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
+        if (info.type == B_APP_IMAGE) {
+            exePathLen = strlcpy(exePath, info.name, sizeof(exePath));
+            break;
+        }
+    }
+#endif
+    if (exePathLen > 0) {
+        ffStrbufEnsureFree(&platform->exePath, PATH_MAX);
+        if (realpath(exePath, platform->exePath.chars)) {
+            ffStrbufRecalculateLength(&platform->exePath);
+        } else {
+            ffStrbufSetNS(&platform->exePath, (uint32_t) exePathLen, exePath);
+        }
+    }
+}
+
+static void platformPathAddEnv(FFlist* dirs, const char* env) {
+    const char* envValue = getenv(env);
+    if (!ffStrSet(envValue)) {
+        return;
+    }
+
+    FF_STRBUF_AUTO_DESTROY value = ffStrbufCreateA(64);
+    ffStrbufAppendS(&value, envValue);
+
+    uint32_t startIndex = 0;
+    while (startIndex < value.length) {
+        uint32_t colonIndex = ffStrbufNextIndexC(&value, startIndex, ':');
+        value.chars[colonIndex] = '\0';
+
+        if (!ffStrSet(value.chars + startIndex)) {
+            startIndex = colonIndex + 1;
+            continue;
+        }
+
+        ffPlatformPathAddAbsolute(dirs, value.chars + startIndex);
+
+        startIndex = colonIndex + 1;
+    }
+}
+
+static void getHomeDir(FFPlatform* platform, const struct passwd* pwd) {
+    const char* home = pwd ? pwd->pw_dir : getenv("HOME");
+    ffStrbufAppendS(&platform->homeDir, home);
+    ffStrbufEnsureEndsWithC(&platform->homeDir, '/');
+}
+
+static void getCacheDir(FFPlatform* platform) {
+    const char* cache = getenv("XDG_CACHE_HOME");
+    if (ffStrSet(cache)) {
+        ffStrbufAppendS(&platform->cacheDir, cache);
+        ffStrbufEnsureEndsWithC(&platform->cacheDir, '/');
+    } else {
+        ffStrbufAppend(&platform->cacheDir, &platform->homeDir);
+        ffStrbufAppendS(&platform->cacheDir, ".cache/");
+    }
+}
+
+static void getConfigDirs(FFPlatform* platform) {
+    // Always make sure `${XDG_CONFIG_HOME:-$HOME/.config}` is the first entry
+    platformPathAddEnv(&platform->configDirs, "XDG_CONFIG_HOME");
+    ffPlatformPathAddHome(&platform->configDirs, platform, ".config/");
+
+#if defined(__APPLE__)
+    ffPlatformPathAddHome(&platform->configDirs, platform, "Library/Preferences/");
+    ffPlatformPathAddHome(&platform->configDirs, platform, "Library/Application Support/");
+#endif
+#if defined(__HAIKU__)
+    ffPlatformPathAddHome(&platform->configDirs, platform, "config/settings/");
+#endif
+
+    ffPlatformPathAddHome(&platform->configDirs, platform, "");
+    platformPathAddEnv(&platform->configDirs, "XDG_CONFIG_DIRS");
+
+#if !defined(__APPLE__)
+    ffPlatformPathAddAbsolute(&platform->configDirs, FASTFETCH_TARGET_DIR_ETC "/xdg/");
+#endif
+
+    ffPlatformPathAddAbsolute(&platform->configDirs, FASTFETCH_TARGET_DIR_ETC "/");
+    ffPlatformPathAddAbsolute(&platform->configDirs, FASTFETCH_TARGET_DIR_INSTALL_SYSCONF "/");
+}
+
+static void getDataDirs(FFPlatform* platform) {
+    platformPathAddEnv(&platform->dataDirs, "XDG_DATA_HOME");
+    ffPlatformPathAddHome(&platform->dataDirs, platform, ".local/share/");
+
+    // Add ${currentExePath}/../share
+    if (platform->exePath.length > 0) {
+        FF_STRBUF_AUTO_DESTROY path = ffStrbufCreateCopy(&platform->exePath);
+        ffStrbufSubstrBeforeLastC(&path, '/');
+        ffStrbufSubstrBeforeLastC(&path, '/');
+        ffStrbufAppendS(&path, "/share");
+        ffPlatformPathAddAbsolute(&platform->dataDirs, path.chars);
+    }
+
+#ifdef __APPLE__
+    ffPlatformPathAddHome(&platform->dataDirs, platform, "Library/Application Support/");
+#endif
+
+    ffPlatformPathAddHome(&platform->dataDirs, platform, "");
+    platformPathAddEnv(&platform->dataDirs, "XDG_DATA_DIRS");
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    ffPlatformPathAddAbsolute(&platform->dataDirs, FF_PATH_PKG_BASE "/share/");
+#endif
+    ffPlatformPathAddAbsolute(&platform->dataDirs, FASTFETCH_TARGET_DIR_USR "/local/share/");
+    ffPlatformPathAddAbsolute(&platform->dataDirs, FASTFETCH_TARGET_DIR_USR "/share/");
+}
+
+static void getUserName(FFPlatform* platform, const struct passwd* pwd) {
+    if (pwd) {
+        ffStrbufSetS(&platform->userName, pwd->pw_name);
+        ffStrbufSetS(&platform->fullUserName, pwd->pw_gecos);
+        ffStrbufTrimSpace(&platform->fullUserName);
+    } else {
+        ffStrbufSetS(&platform->userName, getenv("USER"));
+    }
+}
+
+static void getHostName(FFPlatform* platform, const struct utsname* uts) {
+    ffStrbufAppendS(&platform->hostName, uts->nodename);
+}
+
+static void getUserShell(FFPlatform* platform, const struct passwd* pwd) {
+    const char* shell = getenv("SHELL");
+    if (!ffStrSet(shell) && pwd) {
+        shell = pwd->pw_shell;
+    }
+
+    ffStrbufAppendS(&platform->userShell, shell);
+}
+
+static void getSysinfo(FFPlatformSysinfo* info, const struct utsname* uts) {
+    ffStrbufAppendS(&info->name, uts->sysname);
+    ffStrbufAppendS(&info->release, uts->release);
+    ffStrbufAppendS(&info->version, uts->version);
+#ifdef __HAIKU__
+    /* historical reason */
+    if (ffStrEquals(uts->machine, "BePC")) {
+        ffStrbufSetStatic(&info->architecture, "i386");
+    } else
+#endif
+        ffStrbufAppendS(&info->architecture, uts->machine);
+
+    // _SC_PAGESIZE is one of the sysconf names <unistd.h> requires every implementation to define,
+    // and the only failure POSIX defines for sysconf is an invalid name, so this does not fail.
+    // It replaces the former sysctl(CTL_HW, HW_PAGESIZE) call on FreeBSD / macOS / OpenBSD / NetBSD.
+    info->pageSizeShift = (uint32_t) __builtin_ctzl((unsigned long) sysconf(_SC_PAGESIZE));
+}
+
+static void getCwd(FFPlatform* platform) {
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+        ffStrbufSetS(&platform->cwd, cwd);
+        ffStrbufEnsureEndsWithC(&platform->cwd, '/');
+    }
+}
+
+void ffPlatformInitImpl(FFPlatform* platform) {
+    platform->pid = (uint32_t) getpid();
+    platform->uid = getuid();
+    struct passwd* pwd = getpwuid(platform->uid);
+
+    struct utsname uts;
+    if (uname(&uts) < 0) {
+        memset(&uts, 0, sizeof(uts));
+    }
+
+    getExePath(platform);
+    getCwd(platform);
+    getHomeDir(platform, pwd);
+    getCacheDir(platform);
+    getConfigDirs(platform);
+    getDataDirs(platform);
+
+    getUserName(platform, pwd);
+    getHostName(platform, &uts);
+    getUserShell(platform, pwd);
+
+    getSysinfo(&platform->sysinfo, &uts);
+}

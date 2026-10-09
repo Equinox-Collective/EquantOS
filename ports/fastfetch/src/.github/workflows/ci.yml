@@ -1,0 +1,212 @@
+name: CI
+
+on:
+  - push
+  - pull_request
+
+jobs:
+  spellcheck:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-spellcheck.yml
+
+  no-features-test:
+    needs: spellcheck
+    name: No-features-test
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-no-features-test.yml
+
+  linux-hosts:
+    needs: no-features-test
+    name: Linux-${{ matrix.arch }}
+    permissions:
+      security-events: write
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-22.04
+          - arch: aarch64
+            runs-on: ubuntu-22.04-arm
+    uses: ./.github/workflows/build-linux-hosts.yml
+    with:
+      arch: ${{ matrix.arch }}
+      runs-on: ${{ matrix.runs-on }}
+
+  linux-i686:
+    needs: no-features-test
+    name: Linux-i686
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-linux-i686.yml
+
+  linux-armv7l:
+    needs: no-features-test
+    name: Linux-armv7l
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-linux-armv7l.yml
+
+  linux-loong64:
+    needs: no-features-test
+    name: Linux-loong64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-linux-loong64.yml
+
+  linux-vms:
+    needs: no-features-test
+    name: Linux-${{ matrix.arch }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - arch: riscv64
+          - arch: ppc64le
+          - arch: s390x
+    uses: ./.github/workflows/build-linux-vms.yml
+    with:
+      arch: ${{ matrix.arch }}
+
+  musl-amd64:
+    needs: no-features-test
+    name: Musl-amd64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-musl-amd64.yml
+
+  macos-hosts:
+    needs: no-features-test
+    name: macOS-${{ matrix.arch }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: macos-15-intel
+          - arch: aarch64
+            runs-on: macos-latest
+    uses: ./.github/workflows/build-macos-hosts.yml
+    with:
+      arch: ${{ matrix.arch }}
+      runs-on: ${{ matrix.runs-on }}
+
+  omnios-amd64:
+    needs: no-features-test
+    name: OmniOS-amd64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-omnios-amd64.yml
+
+  solaris-amd64:
+    needs: no-features-test
+    name: Solaris-amd64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-solaris-amd64.yml
+
+  freebsd-amd64:
+    needs: no-features-test
+    name: FreeBSD-amd64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-freebsd-amd64.yml
+
+  openbsd-amd64:
+    needs: no-features-test
+    name: OpenBSD-amd64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-openbsd-amd64.yml
+
+  netbsd-amd64:
+    needs: no-features-test
+    name: NetBSD-amd64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-netbsd-amd64.yml
+
+  dragonfly-amd64:
+    needs: no-features-test
+    name: DragonFly-amd64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-dragonfly-amd64.yml
+
+  haiku-amd64:
+    needs: no-features-test
+    name: Haiku-amd64
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-haiku-amd64.yml
+
+  windows-hosts:
+    needs: no-features-test
+    name: Windows-${{ matrix.arch }}
+    permissions:
+      contents: read
+      # The SignPath action reads job details and downloads the unsigned
+      # artifact with the workflow token.
+      actions: read
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: windows-latest
+            msystem: CLANG64
+            msystem-lower: clang64
+            msys-arch: x86_64
+          - arch: aarch64
+            runs-on: windows-11-arm
+            msystem: CLANGARM64
+            msystem-lower: clangarm64
+            msys-arch: aarch64
+    uses: ./.github/workflows/build-windows-hosts.yml
+    with:
+      arch: ${{ matrix.arch }}
+      runs-on: ${{ matrix.runs-on }}
+      msystem: ${{ matrix.msystem }}
+      msystem-lower: ${{ matrix.msystem-lower }}
+      msys-arch: ${{ matrix.msys-arch }}
+    secrets:
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+
+  benchmark:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev' && github.repository == 'fastfetch-cli/fastfetch'
+    name: Benchmark
+    needs:
+      - linux-hosts
+      - macos-hosts
+      - windows-hosts
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-benchmark.yml
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && github.repository == 'fastfetch-cli/fastfetch'
+    name: Release
+    needs:
+      - linux-hosts
+      - linux-i686
+      - linux-armv7l
+      - linux-loong64
+      - linux-vms
+      - musl-amd64
+      - macos-hosts
+      - freebsd-amd64
+      - openbsd-amd64
+      - netbsd-amd64
+      - dragonfly-amd64
+      - solaris-amd64
+      - omnios-amd64
+      - haiku-amd64
+      - windows-hosts
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-release.yml
+    with:
+      ffversion: ${{ needs.linux-hosts.outputs.ffversion }}

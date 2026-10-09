@@ -1,0 +1,79 @@
+#include "netio.h"
+
+#include "common/time.h"
+
+static FFlist ioCounters1;
+static double time1;
+
+void ffPrepareNetIO(FFNetIOOptions* options) {
+    if (options->detectTotal) {
+        return;
+    }
+
+    if (time1 != 0) {
+        return; // Already prepared
+    }
+
+    // The options cannot change between this call and `ffDetectNetIO`: `ffPrepareCommandOption`
+    // and `parseStructureCommand` both build them through `initStructureModuleOptions`, which
+    // merges the module object from the JSON config. So the baseline always matches the second
+    // snapshot and needs no re-validation.
+    ffListInit(&ioCounters1);
+    ffNetIOGetIoCounters(&ioCounters1, options);
+    time1 = ffTimeGetTick();
+}
+
+const char* ffDetectNetIO(FFlist* result, FFNetIOOptions* options) {
+    const char* error = nullptr;
+
+    if (options->detectTotal) {
+        error = ffNetIOGetIoCounters(result, options);
+        if (error) {
+            return error;
+        }
+        return nullptr;
+    }
+
+    if (time1 == 0) {
+        ffPrepareNetIO(options);
+    }
+
+    if (ioCounters1.length == 0) {
+        return "No network interfaces found";
+    }
+
+    double time2 = ffTimeGetTick();
+    while (time2 - time1 < (double) options->waitTime) {
+        ffTimeSleep((uint32_t) (options->waitTime - (time2 - time1)));
+        time2 = ffTimeGetTick();
+    }
+
+    error = ffNetIOGetIoCounters(result, options);
+    if (error) {
+        return error;
+    }
+
+    if (result->length != ioCounters1.length) {
+        return "Different number of network interfaces. Network change?";
+    }
+
+    for (uint32_t i = 0; i < result->length; ++i) {
+        FFNetIOResult* icPrev = FF_LIST_GET(FFNetIOResult, ioCounters1, i);
+        FFNetIOResult* icCurr = FF_LIST_GET(FFNetIOResult, *result, i);
+        if (!ffStrbufEqual(&icPrev->name, &icCurr->name)) {
+            return "Network interface name changed";
+        }
+
+        static_assert(sizeof(FFNetIOResult) - offsetof(FFNetIOResult, txBytes) == sizeof(uint64_t) * 8, "Unexpected struct FFNetIOResult layout");
+        for (size_t off = offsetof(FFNetIOResult, txBytes); off < sizeof(FFNetIOResult); off += sizeof(uint64_t)) {
+            uint64_t* prevValue = (uint64_t*) ((uint8_t*) icPrev + off);
+            uint64_t* currValue = (uint64_t*) ((uint8_t*) icCurr + off);
+            uint64_t temp = *currValue;
+            *currValue = (uint64_t) ((double) (*currValue - *prevValue) * 1000.0 / (time2 - time1)); // Calculate per second
+            *prevValue = temp;
+        }
+    }
+    time1 = time2;
+
+    return nullptr;
+}

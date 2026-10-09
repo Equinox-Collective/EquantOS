@@ -1,0 +1,125 @@
+#include "common/printing.h"
+#include "common/jsonconfig.h"
+#include "common/strutil.h"
+#include "detection/theme/theme.h"
+#include "modules/theme/theme.h"
+
+bool ffPrintTheme(FFThemeOptions* options) {
+    FFThemeResult result = {
+        .theme1 = ffStrbufCreate(),
+        .theme2 = ffStrbufCreate()
+    };
+    const char* error = ffDetectTheme(&result);
+
+    if (error) {
+        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Theme), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "%s", error);
+        return false;
+    }
+
+    if (options->moduleArgs.outputFormat.length == 0) {
+        ffPrintLogoAndKey(FF_MODULE_GET_DISPLAY_NAME(Theme), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT);
+        if (result.theme1.length) {
+            ffStrbufWriteTo(&result.theme1, stdout);
+        }
+        if (result.theme2.length) {
+            if (result.theme1.length) {
+                fputs(", ", stdout);
+            }
+            ffStrbufWriteTo(&result.theme2, stdout);
+        }
+        putchar('\n');
+    } else {
+        FF_PRINT_FORMAT_CHECKED(FF_MODULE_GET_DISPLAY_NAME(Theme), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, ((FFformatarg[]) {
+                                                                                                          FF_ARG(result.theme1, "theme1"),
+                                                                                                          FF_ARG(result.theme2, "theme2"),
+                                                                                                      }));
+    }
+
+    ffStrbufDestroy(&result.theme1);
+    ffStrbufDestroy(&result.theme2);
+    return true;
+}
+
+void ffParseThemeJsonObject(FFThemeOptions* options, yyjson_val* module) {
+    yyjson_val *key, *val;
+    size_t idx, max;
+    yyjson_obj_foreach (module, idx, max, key, val) {
+        if (ffJsonConfigParseModuleArgs(key, val, &options->moduleArgs)) {
+            continue;
+        }
+
+        ffPrintError(FF_MODULE_GET_DISPLAY_NAME(Theme), 0, &options->moduleArgs, FF_PRINT_TYPE_DEFAULT, "Unknown JSON key %s", unsafe_yyjson_get_str(key));
+    }
+}
+
+void ffGenerateThemeJsonConfig(FFThemeOptions* options, yyjson_mut_doc* doc, yyjson_mut_val* module) {
+    ffJsonConfigGenerateModuleArgsConfig(doc, module, &options->moduleArgs);
+}
+
+bool ffGenerateThemeJsonResult([[maybe_unused]] FFThemeOptions* options, yyjson_mut_doc* doc, yyjson_mut_val* module) {
+    FFThemeResult result = {
+        .theme1 = ffStrbufCreate(),
+        .theme2 = ffStrbufCreate()
+    };
+    const char* error = ffDetectTheme(&result);
+
+    if (error) {
+        yyjson_mut_obj_add_str(doc, module, "error", error);
+        return false;
+    }
+
+    yyjson_mut_val* theme = yyjson_mut_obj_add_obj(doc, module, "result");
+    yyjson_mut_obj_add_strbuf(doc, theme, "theme1", &result.theme1);
+    yyjson_mut_obj_add_strbuf(doc, theme, "theme2", &result.theme2);
+
+    ffStrbufDestroy(&result.theme1);
+    ffStrbufDestroy(&result.theme2);
+
+    return true;
+}
+
+void ffInitThemeOptions(FFThemeOptions* options) {
+    ffOptionInitModuleArg(&options->moduleArgs, "󰉼");
+}
+
+void ffDestroyThemeOptions(FFThemeOptions* options) {
+    ffOptionDestroyModuleArg(&options->moduleArgs);
+}
+
+FFModuleBaseInfo ffThemeModuleInfo = {
+    .name = "Theme",
+    .description = "Print the current desktop environment theme",
+    .displayName = {
+        .en = "Theme",
+        .ar = "السمة",
+        .cs = "Motiv",
+        .de = "Thema",
+        .es = "Tema",
+        .fr = "Thème",
+        .gl = "Tema",
+        .he = "ערכת נושא",
+        .id = "Tema",
+        .it = "Tema",
+        .ja = "テーマ",
+        .ko = "테마",
+        .pl = "Motyw",
+        .pt = "Tema",
+        .ru = "Тема",
+        .tr = "Tema",
+        .uk = "Тема",
+        .vi = "Chủ đề",
+        .zh_CN = "主题",
+        .zh_TW = "主題",
+    },
+    .initOptions = (void*) ffInitThemeOptions,
+    .destroyOptions = (void*) ffDestroyThemeOptions,
+    .parseJsonObject = (void*) ffParseThemeJsonObject,
+    .printModule = (void*) ffPrintTheme,
+    .generateJsonResult = (void*) ffGenerateThemeJsonResult,
+    .generateJsonConfig = (void*) ffGenerateThemeJsonConfig,
+    .formatArgs = FF_FORMAT_ARG_LIST(((FFModuleFormatArg[]) {
+        { "Theme part 1", "theme1" },
+        { "Theme part 2", "theme2" },
+    })),
+    .defaultOrder = 24,
+};
