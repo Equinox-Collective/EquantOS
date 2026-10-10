@@ -35,6 +35,7 @@ QEMUFLAGS := -m 512M \
 			 -bios OVMF.fd \
              -netdev user,id=net0 \
              -device rtl8139,netdev=net0 \
+             -device AC97 \
 			 -object filter-dump,id=netdump0,netdev=net0,file=net.pcap \
              -device qemu-xhci,id=xhci \
              -device usb-kbd,bus=xhci.0 \
@@ -58,6 +59,7 @@ QEMUBDFLAGS := -m 512M \
                -serial stdio \
                -netdev user,id=net0 \
                -device rtl8139,netdev=net0 \
+               -device AC97 \
                -object filter-dump,id=netdump0,netdev=net0,file=net.pcap \
                -d guest_errors,unimp -D qemu_bd.log
 

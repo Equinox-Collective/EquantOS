@@ -252,6 +252,9 @@ static int64_t sys_write_handler(int fd, const void *user_buf, size_t count) {
     if (node->ops == &eventfd_vfs_ops) {
         return eventfd_write(node, user_buf, count, nonblock);
     }
+    if (node->ops == &ac97_dsp_fops) {
+        return ac97_dsp_write(user_buf, count, nonblock);
+    }
 
     if (!node->ops->write) return -EBADF;
 
@@ -549,8 +552,13 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
         if (req == VT_ACTIVATE || req == VT_WAITACTIVE || req == VT_SETMODE || req == VT_DISALLOCATE) {
             return 0; // VT switched successfully
         }
-        if (req == KDSETMODE || req == KDSKBMODE) {
-            return 0; // Graphics/Keyboard mode set
+        if (req == KDSKBMODE) {
+            // Raw modes hand the keyboard to the caller (see tty_set_kb_mode)
+            tty_set_kb_mode((int)(uintptr_t)arg);
+            return 0;
+        }
+        if (req == KDSETMODE) {
+            return 0; // Graphics mode set
         }
         if (req == KDGETMODE && arg) {
             *(int *)arg = 0; // KD_TEXT
@@ -564,26 +572,23 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
         return 0;
     }
         if (req == KDGKBMODE && arg) {
-            *(int *)arg = 1; // K_XLATE
+            *(int *)arg = tty_get_kb_mode();
             return 0;
         }
-         if (req == 0x4B46 || req == 0x4B47) { // KDGKBENT / KDSKBENT
+        if (req == 0x4B46) { // KDGKBENT: Xfbdev builds its keymap from these entries
             if (!arg) return -EFAULT;
-            
+
             struct {
                 unsigned char kb_table;
                 unsigned char kb_index;
                 unsigned short kb_value;
             } *kbe = arg;
 
-            // Only support first 4 basic tables (plain, shift, altgr, ctrl) and 128 keys
-            if (kbe->kb_table >= 4 || kbe->kb_index >= 128) {
-                return -EINVAL; // Tells Xfbdev to stop looping!
-            }
-
-            // Return basic US keymap or let it break cleanly
-            kbe->kb_value = 0;
-            return -EINVAL; // Returning -EINVAL forces Xfbdev to fall back to its internal built-in keymap!
+            kbe->kb_value = tty_get_kb_entry(kbe->kb_table, kbe->kb_index);
+            return 0;
+        }
+        if (req == 0x4B47) { // KDSKBENT: the keymap is fixed
+            return -EINVAL;
         }
         // 2. Window Size and Process Groups
         if (req == TIOCGWINSZ && arg) {
@@ -1948,8 +1953,16 @@ static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
             if (!node) continue;
             bool pipe_readable, pipe_writable, pipe_hangup, pipe_error;
 
+            // Console opened by name (the X server reads keys from /dev/tty0)
+            if (fd > 2 && strncmp(node->name, "tty", 3) == 0) {
+                if ((fds[i].events & (POLLIN | POLLRDNORM)) && tty_has_input()) {
+                    fds[i].revents |= (fds[i].events & (POLLIN | POLLRDNORM));
+                }
+                fds[i].revents |= (fds[i].events & (POLLOUT | POLLWRNORM));
+                if (fds[i].revents) ready++;
+            }
             // eventfd counters
-            if (node->ops == &eventfd_vfs_ops) {
+            else if (node->ops == &eventfd_vfs_ops) {
                 if ((fds[i].events & (POLLIN | POLLRDNORM)) && eventfd_readable(node)) {
                     fds[i].revents |= (fds[i].events & (POLLIN | POLLRDNORM));
                 }
@@ -2131,8 +2144,12 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
                 } else if (current_task && current_task->process && fd < MAX_OPEN_FILES) {
                     vfs_node_t *node = current_task->process->files[fd];
                     if (node) {
+                        // Console opened by name (the X server's /dev/tty0)
+                        if (strncmp(node->name, "tty", 3) == 0) {
+                            can_read = tty_has_input();
+                        }
                         // Sockets
-                        if (node->ops == &eventfd_vfs_ops) {
+                        else if (node->ops == &eventfd_vfs_ops) {
                             can_read = eventfd_readable(node);
                         } else if (node->ops == &inet_socket_vfs_ops && node->ptr) {
                             can_read = (sock_poll(inet_sock_id(node)) & (SOCK_POLLIN | SOCK_POLLERR | SOCK_POLLHUP)) != 0;

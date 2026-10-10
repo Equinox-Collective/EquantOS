@@ -209,6 +209,7 @@ char input_code_to_ascii(uint16_t code, bool shift) {
 
 void tty_poll_input(void) {
     input_event_t ev;
+    if (tty_kb_grabbed()) return;   // keys go to the raw reader (X server)
     while (input_pop_event(&ev)) {
 
         if (globalkeybinds_process(&ev)) {
