@@ -1,0 +1,501 @@
+--- a/libhubbub/src/treebuilder/element-type.gperf
++++ b/libhubbub/src/treebuilder/element-type.gperf
+@@ -104,6 +104,8 @@
+ output,              OUTPUT
+ p,                   P
+ param,               PARAM
++source,              PARAM
++track,               PARAM
+ plaintext,           PLAINTEXT
+ pre,                 PRE
+ s,                   S
+--- a/netsurf/content/Makefile
++++ b/netsurf/content/Makefile
+@@ -7,6 +7,7 @@
+ 	hlcache.c		\
+ 	llcache.c		\
+ 	mimesniff.c		\
++	sitejs.c		\
+ 	textsearch.c		\
+ 	urldb.c			\
+ 	no_backing_store.c
+--- a/netsurf/content/handlers/html/box_special.c
++++ b/netsurf/content/handlers/html/box_special.c
+@@ -38,10 +38,12 @@
+ #include "utils/string.h"
+ #include "utils/ascii.h"
+ #include "utils/nsurl.h"
++#include "utils/url.h"
+ #include "netsurf/plot_style.h"
+ #include "css/hints.h"
+ #include "desktop/frame_types.h"
+ #include "content/content_factory.h"
++#include "image/video.h"
+ 
+ #include "html/html.h"
+ #include "html/private.h"
+@@ -1846,6 +1848,132 @@
+ 
+ 
+ /**
++ * Media element (HTML5 video): shown as a player object.
++ *
++ * The player (image/video.c) streams the media itself; the object it is
++ * created from only carries a description of the element as "key=value"
++ * lines in a data: URL.
++ */
++static bool
++box_video(dom_node *n,
++	  html_content *content,
++	  struct box *box,
++	  bool *convert_children)
++{
++	static const char * const flags[] = { "autoplay", "loop", "muted" };
++	static const char * const numbers[] = { "width", "height" };
++	dom_string *src = NULL;
++	dom_exception err;
++	nsurl *media = NULL, *url;
++	char *desc, *value, *escaped, *data_url;
++	unsigned int i;
++	bool ok;
++
++	if (box->style && ns_computed_display(box->style,
++			box_is_root(n)) == CSS_DISPLAY_NONE)
++		return true;
++
++	/* the element's src, or else that of its first <source> */
++	err = dom_element_get_attribute(n, corestring_dom_src, &src);
++	if (err != DOM_NO_ERR)
++		return true;
++	if (src == NULL) {
++		dom_node *child = NULL, *next;
++
++		err = dom_node_get_first_child(n, &child);
++		while (err == DOM_NO_ERR && child != NULL && src == NULL) {
++			dom_node_type type;
++			dom_string *name = NULL;
++
++			if (dom_node_get_node_type(child, &type) == DOM_NO_ERR &&
++			    type == DOM_ELEMENT_NODE &&
++			    dom_node_get_node_name(child, &name) == DOM_NO_ERR &&
++			    name != NULL) {
++				if (strcasecmp(dom_string_data(name),
++						"source") == 0) {
++					err = dom_element_get_attribute(child,
++							corestring_dom_src, &src);
++					if (err != DOM_NO_ERR)
++						src = NULL;
++				}
++				dom_string_unref(name);
++			}
++			next = NULL;
++			err = dom_node_get_next_sibling(child, &next);
++			dom_node_unref(child);
++			child = next;
++		}
++		if (child != NULL)
++			dom_node_unref(child);
++	}
++	if (src == NULL)
++		return true; /* nothing to play: show the fallback content */
++
++	ok = box_extract_link(content, src, content->base_url, &media);
++	dom_string_unref(src);
++	if (ok == false)
++		return false;
++	if (media == NULL)
++		return true;
++
++	desc = talloc_asprintf(content->bctx, "url=%s\n", nsurl_access(media));
++	nsurl_unref(media);
++	if (desc == NULL)
++		return false;
++
++	value = NULL;
++	if (box_get_attribute(n, "poster", content->bctx, &value) &&
++			value != NULL && value[0] != '\0') {
++		nsurl *poster;
++
++		if (nsurl_join(content->base_url, value, &poster) ==
++				NSERROR_OK) {
++			desc = talloc_asprintf_append(desc, "poster=%s\n",
++					nsurl_access(poster));
++			nsurl_unref(poster);
++		}
++	}
++	for (i = 0; i < 3 && desc != NULL; i++) {
++		value = NULL;
++		if (box_get_attribute(n, flags[i], content->bctx, &value) &&
++				value != NULL)
++			desc = talloc_asprintf_append(desc, "%s=1\n", flags[i]);
++	}
++	for (i = 0; i < 2 && desc != NULL; i++) {
++		value = NULL;
++		if (box_get_attribute(n, numbers[i], content->bctx, &value) &&
++				value != NULL && atoi(value) > 0)
++			desc = talloc_asprintf_append(desc, "%s=%d\n",
++					numbers[i], atoi(value));
++	}
++	value = NULL;
++	if (desc != NULL &&
++	    box_get_attribute(n, "data-duration", content->bctx, &value) &&
++	    value != NULL && atof(value) > 0)
++		desc = talloc_asprintf_append(desc, "duration=%s\n", value);
++	if (desc == NULL)
++		return false;
++
++	if (url_escape(desc, false, NULL, &escaped) != NSERROR_OK)
++		return false;
++	data_url = talloc_asprintf(content->bctx,
++			"data:" NSVIDEO_MIME_TYPE ",%s", escaped);
++	free(escaped);
++	if (data_url == NULL)
++		return false;
++	if (nsurl_create(data_url, &url) != NSERROR_OK)
++		return false;
++
++	box->flags |= IS_REPLACED;
++	ok = html_fetch_object(content, url, box, CONTENT_IMAGE, false);
++	nsurl_unref(url);
++
++	*convert_children = false;
++	return ok;
++}
++
++
++/**
+  * \}
+  */
+ 
+@@ -1927,6 +2055,10 @@
+ 		res = box_textarea(node, content, box, convert_children);
+ 		break;
+ 
++	case DOM_HTML_ELEMENT_TYPE_VIDEO:
++		res = box_video(node, content, box, convert_children);
++		break;
++
+ 	default:
+ 		res = true;
+ 	}
+--- a/netsurf/content/handlers/html/html.c
++++ b/netsurf/content/handlers/html/html.c
+@@ -50,6 +50,7 @@
+ #include "content/hlcache.h"
+ #include "content/content_factory.h"
+ #include "content/textsearch.h"
++#include "content/sitejs.h"
+ #include "desktop/selection.h"
+ #include "desktop/scrollbar.h"
+ #include "desktop/textarea.h"
+@@ -533,6 +534,16 @@
+ 		c->encoding_source = DOM_HUBBUB_ENCODING_SOURCE_HEADER;
+ 	}
+ 
++	/* A site script sees the whole document before the parser does and
++	 * hands back UTF-8, whatever the server declared.
++	 */
++	c->sitejs = sitejs_wants(c->base_url);
++	if (c->sitejs) {
++		free(c->encoding);
++		c->encoding = strdup("UTF-8");
++		c->encoding_source = DOM_HUBBUB_ENCODING_SOURCE_HEADER;
++	}
++
+ 	/* Create the parser binding */
+ 	parse_params.enc = c->encoding;
+ 	parse_params.fix_enc = true;
+@@ -739,6 +750,11 @@
+ 	dom_hubbub_error dom_ret;
+ 	nserror err = NSERROR_OK; /* assume its all going to be ok */
+ 
++	if (html->sitejs) {
++		/* parsed in html_convert(), once the script has seen it all */
++		return true;
++	}
++
+ 	dom_ret = dom_hubbub_parser_parse_chunk(html->parser,
+ 					      (const uint8_t *) data,
+ 					      size);
+@@ -779,6 +795,32 @@
+ 	html_content *htmlc = (html_content *) c;
+ 	dom_exception exc; /* returned by libdom functions */
+ 
++	if (htmlc->sitejs) {
++		const uint8_t *source;
++		size_t source_size, out_size = 0;
++		dom_hubbub_error dom_ret;
++		nserror err;
++		char *out;
++
++		htmlc->sitejs = false;
++		source = content__get_source_data(c, &source_size);
++		out = sitejs_transform(content_get_url(c), source, source_size,
++				c->http_code, &out_size);
++		if (out != NULL) {
++			dom_ret = dom_hubbub_parser_parse_chunk(htmlc->parser,
++					(const uint8_t *) out, out_size);
++			free(out);
++		} else {
++			dom_ret = dom_hubbub_parser_parse_chunk(htmlc->parser,
++					source, source_size);
++		}
++		err = libdom_hubbub_error_to_nserror(dom_ret);
++		if (err != NSERROR_OK) {
++			content_broadcast_error(c, err, NULL);
++			return false;
++		}
++	}
++
+ 	/* The quirk check and associated stylesheet fetch is "safe"
+ 	 * once the root node has been inserted into the document
+ 	 * which must have happened by this point in the parse.
+--- a/netsurf/content/handlers/html/interaction.c
++++ b/netsurf/content/handlers/html/interaction.c
+@@ -58,6 +58,7 @@
+ #include "html/private.h"
+ #include "html/imagemap.h"
+ #include "html/interaction.h"
++#include "image/video.h"
+ 
+ /**
+  * Get pointer shape for given box
+@@ -703,7 +704,8 @@
+ 		}
+ 
+ 		if (box->object) {
+-			if (content_get_type(box->object) == CONTENT_HTML) {
++			if (content_get_type(box->object) == CONTENT_HTML ||
++			    nsvideo_is_player(box->object)) {
+ 				man->html_object.box = box;
+ 				man->html_object.pos_x = box_x;
+ 				man->html_object.pos_y = box_y;
+--- a/netsurf/content/handlers/html/private.h
++++ b/netsurf/content/handlers/html/private.h
+@@ -95,6 +95,7 @@
+ 
+ 	dom_hubbub_parser *parser; /**< Parser object handle */
+ 	bool parse_completed; /**< Whether the parse has been completed */
++	bool sitejs; /**< A site script rewrites the source before parsing */
+ 	bool conversion_begun; /**< Whether or not the conversion has begun */
+ 
+ 	/** Document tree */
+--- a/netsurf/content/handlers/image/image.c
++++ b/netsurf/content/handlers/image/image.c
+@@ -38,6 +38,7 @@
+ #include "image/rsvg.h"
+ #include "image/svg.h"
+ #include "image/webp.h"
++#include "image/video.h"
+ #include "image/image.h"
+ 
+ /**
+@@ -108,6 +109,12 @@
+ 	if (error != NSERROR_OK)
+ 		return error;
+ #endif
++
++#ifdef WITH_VIDEO
++	error = nsvideo_init();
++	if (error != NSERROR_OK)
++		return error;
++#endif
+ 
+ 	return error;
+ }
+--- a/netsurf/frontends/framebuffer/fbtk/text.c
++++ b/netsurf/frontends/framebuffer/fbtk/text.c
+@@ -347,6 +347,7 @@
+ 
+ 	switch (value) {
+ 	case NSFB_KEY_BACKSPACE:
++		widget->u.text.fresh = 0;
+ 		if (widget->u.text.idx <= 0)
+ 			break;
+ 		memmove(widget->u.text.text + widget->u.text.idx - 1,
+@@ -367,6 +368,7 @@
+ 		break;
+ 
+ 	case NSFB_KEY_RIGHT:
++		widget->u.text.fresh = 0;
+ 		if (widget->u.text.idx < widget->u.text.len) {
+ 			if (modifier == FBTK_MOD_CLEAR)
+ 				widget->u.text.idx++;
+@@ -378,6 +380,7 @@
+ 		break;
+ 
+ 	case NSFB_KEY_LEFT:
++		widget->u.text.fresh = 0;
+ 		if (widget->u.text.idx > 0) {
+ 			if (modifier == FBTK_MOD_CLEAR)
+ 				widget->u.text.idx--;
+@@ -389,6 +392,7 @@
+ 		break;
+ 
+ 	case NSFB_KEY_HOME:
++		widget->u.text.fresh = 0;
+ 		if (widget->u.text.idx > 0) {
+ 			widget->u.text.idx = 0;
+ 
+@@ -397,6 +401,7 @@
+ 		break;
+ 
+ 	case NSFB_KEY_END:
++		widget->u.text.fresh = 0;
+ 		if (widget->u.text.idx < widget->u.text.len) {
+ 			widget->u.text.idx = widget->u.text.len;
+ 
+@@ -437,11 +442,24 @@
+ 				widget->u.text.len = 0;
+ 				widget->u.text.text[widget->u.text.len] = '\0';
+ 				widget->u.text.width = 0;
++				widget->u.text.fresh = 0;
+ 				caret_moved = true;
++			} else if (value == NSFB_KEY_a) {
++				/* CTRL+A: what is typed next replaces it all */
++				widget->u.text.fresh = 2;
+ 			}
+ 			break;
+ 		}
+ 
++		if (widget->u.text.fresh == 2) {
++			/* typing straight after clicking into the field
++			 * replaces its text, as if it had been selected */
++			widget->u.text.idx = 0;
++			widget->u.text.len = 0;
++			widget->u.text.text[0] = '\0';
++		}
++		widget->u.text.fresh = 0;
++
+ 		/* allow for new character and null */
+ 		temp = realloc(widget->u.text.text, widget->u.text.len + 2);
+ 		if (temp == NULL) {
+@@ -495,6 +513,11 @@
+ 
+ 	fb_text_font_style(widget, &fh, &border, &font_style);
+ 
++	/* the first click "selects" the text, another one starts editing
++	 * (the handler runs for the button going down and coming up) */
++	if (cbi->event == NULL || cbi->event->type == NSFB_EVENT_KEY_DOWN)
++		widget->u.text.fresh = (widget->u.text.fresh == 1) ? 2 : 0;
++
+ 	widget->u.text.idx = widget->u.text.len;
+ 
+ 	fb_font_position(&font_style, widget->u.text.text,
+@@ -523,6 +546,7 @@
+ text_input_strip_focus(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+ {
+ 	fbtk_set_caret(widget, false, 0, 0, 0, NULL);
++	widget->u.text.fresh = 1;
+ 
+ 	return 0;
+ }
+@@ -533,6 +557,7 @@
+ {
+ 	widget->u.text.enter = enter;
+ 	widget->u.text.pw = pw;
++	widget->u.text.fresh = 1;
+ 
+ 	fbtk_set_handler(widget, FBTK_CBT_INPUT, text_input, widget);
+ }
+@@ -556,6 +581,7 @@
+ 	widget->u.text.text = strdup(text);
+ 	widget->u.text.len = strlen(text);
+ 	widget->u.text.idx = widget->u.text.len;
++	widget->u.text.fresh = 1;
+ 
+ 
+ 	fb_text_font_style(widget, &fh, &border, &font_style);
+--- a/netsurf/frontends/framebuffer/fbtk/widget.h
++++ b/netsurf/frontends/framebuffer/fbtk/widget.h
+@@ -187,6 +187,10 @@
+ 			int len; /* text length */
+ 			int width; /* text width in px */
+ 			int idx_offset; /* caret pos in pixels */
++			/* 1: untouched since it was set or lost focus,
++			 * 2: clicked once - typing replaces the text,
++			 * 0: being edited */
++			int fresh;
+ 		} text;
+ 
+ 		/* application driven widget */
+--- a/netsurf/frontends/framebuffer/gui.c
++++ b/netsurf/frontends/framebuffer/gui.c
+@@ -37,12 +37,14 @@
+ #include "netsurf/browser_window.h"
+ #include "netsurf/keypress.h"
+ #include "desktop/browser_history.h"
++#include "desktop/searchweb.h"
+ #include "netsurf/plotters.h"
+ #include "netsurf/window.h"
+ #include "netsurf/misc.h"
+ #include "netsurf/netsurf.h"
+ #include "netsurf/cookie_db.h"
+ #include "content/fetch.h"
++#include "content/sitejs.h"
+ 
+ #include "framebuffer/gui.h"
+ #include "framebuffer/fbtk.h"
+@@ -1167,7 +1169,20 @@
+ 	nsurl *url;
+ 	nserror error;
+ 
+-	error = nsurl_create(text, &url);
++	enum search_web_omni_flags flags = SEARCH_WEB_OMNI_NONE;
++
++	/* "example.org" gets a scheme.  Words rather than an address (spaces,
++	 * or nothing that marks a host or a path) go to the search provider.
++	 */
++	while (*text == ' ')
++		text++;
++	if (strchr(text, ' ') != NULL ||
++	    (strchr(text, '.') == NULL && strchr(text, ':') == NULL &&
++	     strchr(text, '/') == NULL && strcmp(text, "localhost") != 0)) {
++		if (nsoption_bool(search_url_bar))
++			flags = SEARCH_WEB_OMNI_SEARCHONLY;
++	}
++	error = search_web_omni(text, flags, &url);
+ 	if (error != NSERROR_OK) {
+ 		fb_warn_user("Errorcode:", messages_get_errorcode(error));
+ 	} else {
+@@ -2217,6 +2232,14 @@
+ 	free(options);
+ 	nsoption_commandline(&argc, argv, nsoptions);
+ 
++	/* site scripts are kept next to the other resources */
++	options = filepath_find(respaths, "sitejs/00-lib.js");
++	if (options != NULL) {
++		*strrchr(options, '/') = '\0';
++		sitejs_set_path(options);
++		free(options);
++	}
++
+ 	/* message init */
+ 	messages = filepath_find(respaths, "Messages");
+         ret = messages_add_from_file(messages);
+@@ -2234,6 +2257,12 @@
+ 	/* Override, since we have no support for non-core SELECT menu */
+ 	nsoption_set_bool(core_select_menu, true);
+ 
++	/* web search providers for the URL bar */
++	options = filepath_find(respaths, "SearchEngines");
++	search_web_init(options);
++	free(options);
++	search_web_select_provider(nsoption_int(search_provider));
++
+ 	if (process_cmdline(argc,argv) != true)
+ 		die("unable to process command line.\n");
+ 
+--- a/netsurf/resources/default.css
++++ b/netsurf/resources/default.css
+@@ -143,6 +143,10 @@
+ 
+ noembed, script, style, title { display: none; }
+ 
++/* never rendered: hidden content, templates, lists of suggestions, and
++ * dialogs (which only scripts can open) */
++[hidden], template, datalist, dialog { display: none; }
++
+ /* HTML5 elements */
+ article, aside, figcaption, figure, footer, header, main, nav, section {
+ 	display: block;

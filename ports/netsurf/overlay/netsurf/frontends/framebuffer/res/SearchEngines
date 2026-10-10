@@ -1,0 +1,6 @@
+DuckDuckGo|html.duckduckgo.com|https://html.duckduckgo.com/html/?q=%s|https://duckduckgo.com/favicon.ico|
+Wikipedia|en.wikipedia.org|https://en.wikipedia.org/w/index.php?title=Special%%3ASearch&search=%s|https://en.wikipedia.org/favicon.ico|
+YouTube|www.youtube.com|https://www.youtube.com/results?search_query=%s|https://www.youtube.com/favicon.ico|
+GitHub|github.com|https://github.com/search?q=%s&type=repositories|https://github.com/favicon.ico|
+Google|www.google.com|https://www.google.com/search?q=%s|https://www.google.com/favicon.ico|
+Bing|www.bing.com|https://www.bing.com/search?q=%s|https://www.bing.com/favicon.ico|
