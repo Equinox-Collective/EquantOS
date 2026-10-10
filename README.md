@@ -41,12 +41,16 @@ Current focus: We are entered LONG-TERM development so development is now not fu
   Linux-compatible `/proc` (cpuinfo, meminfo, uptime, version, loadavg, swaps,
   `/proc/<pid>/{stat,cmdline,comm,status}`, exe/cwd/fd links), `/etc/os-release`
 - Ports: [fastfetch](https://github.com/fastfetch-cli/fastfetch) with a built-in EquantOS logo,
-  [NetSurf](https://www.netsurf-browser.org/) 3.11 (`epacmg -S netsurf`, runs under X11/IceWM),
+  [NetSurf](https://www.netsurf-browser.org/) 3.11 (`epacmg -S netsurf`, runs under X11/IceWM) with
+  site scripts that make YouTube and GitHub usable and a built-in video player,
   [IceWM](https://ice-wm.org/) 4.1.0 with wallpapers (icewmbg) and switchable themes
 - Storage: PCI enumeration, NVMe namespace I/O, legacy ATA PIO
 - Input/output: PS/2 keyboard, framebuffer terminal, COM1 serial log
+- X11 input: raw console keyboard mode (`KDSKBMODE`) and the console keymap
+  (`KDGKBENT`), so the X server gets key codes and typing works in X programs
 - Shell: interactive diagnostic shell with ~25 commands
 - USB: xHCI driver, USB HID input
+- Sound: Intel AC'97 playback as an OSS `/dev/dsp` (QEMU `-device AC97`)
 - Installer: early-stage installer code present
 
 ### In progress
@@ -118,6 +122,7 @@ qemu-system-x86_64 \
   -device nvme,drive=nvme0,serial=deadbeef \
   -drive file=disk_mbr_fat32.img,format=raw,if=none,id=fat0 \
   -device ide-hd,drive=fat0 \
+  -device AC97 \
   -serial stdio
 ```
 
@@ -150,6 +155,43 @@ DRM calls in `src/detection/gpu/gpu_linux.c` are guarded for systems without
 (`src/logo/ascii/e/equantos.txt` plus its entry in `e.inc`). The binary is
 linked statically against `sdk/sysroot` using
 `ports/fastfetch/equantos-toolchain.cmake`.
+
+### NetSurf
+
+`ports/netsurf/build.sh` builds a static NetSurf 3.11 (framebuffer frontend in
+an X11 window) inside Alpine Linux and packs it as `netsurf.epkg`; the header
+of the script says how. Install it with `epacmg -S netsurf` (or
+`epacmg -U netsurf.epkg` for a local build) and start it from the IceWM menu
+or with `netsurf-x [url]`.
+
+On top of upstream NetSurf the port adds the following (`ports/netsurf/overlay/`
+holds the new files, `ports/netsurf/patches/` the changes to existing ones):
+
+- **Site scripts** (`content/sitejs.c`, `res/sitejs/*.js`). YouTube and GitHub
+  ship applications that need a JavaScript and layout engine far beyond
+  NetSurf's, but they embed the data of each page in the HTML they serve. A
+  script run by an embedded QuickJS engine turns that data into markup NetSurf
+  lays out well. `youtube.js` covers search, video pages, channels, playlists,
+  topic feeds and comments; `github.js` covers repositories, directories, files
+  with syntax colouring, issues, pull requests, commits and diffs, releases,
+  search, profiles and trending. The scripts are plain files in
+  `/usr/share/netsurf/sitejs/` and can be edited in place; append `?ns_raw=1`
+  to an address to see the page as the site sent it.
+- **Video** (`content/handlers/image/video.c`). `<video>` elements play in the
+  page: ffmpeg demuxing and decoding (H.264, VP8/VP9, MPEG-4, AAC, MP3, Opus,
+  Vorbis in MP4, WebM, ...), a libcurl range transfer with a sliding window,
+  no threads. Sound goes to `/dev/dsp` and is the clock pictures are shown by.
+  Click the picture to pause, the bar to seek. YouTube videos play from the
+  single-file stream the InnerTube API returns (360p).
+- A start page, web search from the address bar (DuckDuckGo's HTML front end),
+  JavaScript (NetSurf's Duktape engine) switched on, and `[hidden]`,
+  `<template>` and `<dialog>` content no longer rendered.
+
+Limits: scripts of a page still run on NetSurf's ES5 engine, so sites that
+are JavaScript applications and have no site script look as they did before;
+live streams and anything above the single-file 360p stream are not played;
+signing in to YouTube is not supported. The site scripts follow the current
+page formats of both sites and need updating when those change.
 
 ---
 

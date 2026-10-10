@@ -8,3 +8,8 @@
 
 # Vendored third-party sources are stored byte-for-byte as upstream ships them
 /ports/*/src/** -text
+
+# The NetSurf port is built inside Alpine: patches and site scripts must stay LF
+/ports/netsurf/patches/** text eol=lf
+/ports/netsurf/overlay/** text eol=lf
+/ports/netsurf/Makefile.config text eol=lf

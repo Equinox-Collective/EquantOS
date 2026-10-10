@@ -36,6 +36,7 @@
 #include "../fs/procfs.h"
 #include "../misc/random.h"
 #include "../ipc/eventfd.h"
+#include "../drivers/audio/ac97.h"
 
 // ============================================================================
 // 1. Linux Standard Error Codes (Negative Return Values)

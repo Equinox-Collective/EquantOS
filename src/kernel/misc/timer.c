@@ -8,6 +8,7 @@
 #include "../drivers/net/rtl8139.h"
 #include "../net/tcp.h"
 #include "../drivers/tty/tty.h"
+#include "../drivers/audio/ac97.h"
 
 volatile uint32_t tick = 0;
 
@@ -20,6 +21,9 @@ void timer_callback(void) {
 
     // Poll USB HID on every tick for 250 Hz mouse responsiveness
     xhci_timer_tick();
+
+    // Follow the sound card's play position
+    ac97_tick();
 
     // Network polling
     if ((tick % 2) == 0) {

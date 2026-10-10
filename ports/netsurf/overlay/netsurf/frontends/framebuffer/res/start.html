@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Start - NetSurf on EquantOS</title>
+<style>
+body { margin: 0; font-family: sans-serif; font-size: 15px; color: #1f2328; background: #f6f8fa; }
+.top { background: #24292f; color: #fff; padding: 14px 32px; font-size: 18px; font-weight: bold; }
+.top span { color: #8c959f; font-weight: normal; font-size: 14px; margin-left: 12px; }
+.main { width: 900px; margin: 0 auto; padding: 40px 0; }
+h1 { font-size: 34px; text-align: center; margin: 0 0 24px 0; }
+form { text-align: center; margin-bottom: 36px; }
+input.q { width: 560px; height: 34px; font-size: 17px; border: 1px solid #d0d7de; padding: 1px 10px; vertical-align: middle; }
+input.go { height: 38px; font-size: 16px; background: #0969da; color: #fff; border: 1px solid #0969da; padding: 0 22px; vertical-align: middle; }
+.tiles { text-align: center; }
+.tile { display: inline-block; vertical-align: top; width: 196px; height: 96px; margin: 0 10px 20px 10px; background: #fff;
+        border: 1px solid #d0d7de; text-decoration: none; color: #1f2328; }
+.tile b { display: block; font-size: 19px; padding: 20px 0 6px 0; }
+.tile span { display: block; font-size: 13px; color: #57606a; }
+.yt b { color: #e00; }
+.gh b { color: #24292f; }
+p.note { color: #57606a; font-size: 13px; line-height: 1.5; text-align: center; margin: 24px 60px 0 60px; }
+</style>
+</head>
+<body>
+<div class="top">NetSurf<span>on EquantOS</span></div>
+<div class="main">
+<h1>Search the web</h1>
+<form action="https://html.duckduckgo.com/html/" method="get">
+<input class="q" type="text" name="q"> <input class="go" type="submit" value="Search">
+</form>
+<div class="tiles">
+<a class="tile yt" href="https://www.youtube.com/"><b>YouTube</b><span>search and watch videos</span></a>
+<a class="tile gh" href="https://github.com/"><b>GitHub</b><span>code, issues, pull requests</span></a>
+<a class="tile" href="https://en.wikipedia.org/"><b>Wikipedia</b><span>the free encyclopedia</span></a>
+<a class="tile" href="https://github.com/Equinox-Collective/EquantOS"><b>EquantOS</b><span>this system's repository</span></a>
+<a class="tile" href="https://news.ycombinator.com/"><b>Hacker News</b><span>tech news</span></a>
+<a class="tile" href="https://lite.cnn.com/"><b>CNN Lite</b><span>text-only news</span></a>
+<a class="tile" href="https://wttr.in/"><b>wttr.in</b><span>weather</span></a>
+<a class="tile" href="https://www.netsurf-browser.org/"><b>NetSurf</b><span>the browser's home page</span></a>
+</div>
+<p class="note">The address bar takes addresses (youtube.com) and search words.
+YouTube and GitHub are shown through site scripts (/usr/share/netsurf/sitejs): they turn the data those sites
+embed in their pages into markup NetSurf can lay out, and videos play in the built-in player.
+Add <b>?ns_raw=1</b> to an address to see the page as the site sent it.</p>
+</div>
+</body>
+</html>

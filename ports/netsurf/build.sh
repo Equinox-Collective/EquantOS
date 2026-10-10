@@ -20,12 +20,14 @@ JOBS=$(nproc)
 
 NETSURF_VER=3.11
 CURL_VER=8.22.0
+FFMPEG_VER=8.1.2
+QUICKJS_VER=2026-06-04
 XAU_VER=1.0.12
 XDMCP_VER=1.1.5
 XCB_UTIL_VER=0.4.1
 XCB_WM_VER=0.4.2
 
-apk add --no-progress -q build-base coreutils perl bison flex gperf pkgconf xz wget tar \
+apk add --no-progress -q build-base coreutils perl bison flex gperf pkgconf xz wget tar nasm \
     linux-headers openssl-dev openssl-libs-static zlib-dev zlib-static \
     libpng-dev libpng-static libjpeg-turbo-dev libjpeg-turbo-static \
     libwebp-dev libwebp-static freetype-dev freetype-static \
@@ -91,6 +93,41 @@ autotools_lib curl "https://curl.se/download/curl-$CURL_VER.tar.xz" \
     --disable-tftp --disable-docs --disable-manual \
     --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt --with-ca-path=/etc/ssl/certs
 
+# --- ffmpeg: demuxers/decoders for the <video> player, no network, no threads
+# (the player feeds it through its own libcurl transfer and runs in NetSurf's
+# main loop, so EquantOS needs neither blocking sockets in threads nor SMP)
+if [ ! -f "$PREFIX/.stamp-ffmpeg" ]; then
+    echo ">>> ffmpeg"
+    tarball=$(fetch "https://ffmpeg.org/releases/ffmpeg-$FFMPEG_VER.tar.xz")
+    rm -rf "$SRC/ffmpeg-$FFMPEG_VER" && tar -C "$SRC" -xf "$tarball"
+    (cd "$SRC/ffmpeg-$FFMPEG_VER" && ./configure --prefix="$PREFIX" \
+        --enable-static --disable-shared --disable-programs --disable-doc \
+        --disable-autodetect --disable-everything --disable-network \
+        --disable-pthreads --disable-debug --disable-avdevice --disable-avfilter \
+        --extra-cflags="-fno-pie -fno-pic" \
+        --enable-protocol=file \
+        --enable-demuxer=mov,matroska,mp3,ogg,wav,flac,aac,flv,mpegts \
+        --enable-decoder=h264,vp8,vp9,mpeg4,aac,mp3,opus,vorbis,flac,pcm_s16le \
+        --enable-parser=h264,vp8,vp9,aac,mpegaudio,opus,vorbis,flac,mpeg4video \
+        --enable-bsf=vp9_superframe_split \
+        --enable-swscale --enable-swresample >/dev/null \
+        && make -j"$JOBS" >"$WORK/ffmpeg-build.log" 2>&1 && make install >/dev/null)
+    touch "$PREFIX/.stamp-ffmpeg"
+fi
+
+# --- QuickJS: modern JS engine that runs the site scripts (res/sitejs/*.js) --
+if [ ! -f "$PREFIX/.stamp-quickjs" ]; then
+    echo ">>> quickjs"
+    tarball=$(fetch "https://bellard.org/quickjs/quickjs-$QUICKJS_VER.tar.xz")
+    rm -rf "$SRC/quickjs-$QUICKJS_VER" && tar -C "$SRC" -xf "$tarball"
+    (cd "$SRC/quickjs-$QUICKJS_VER" && make -j"$JOBS" libquickjs.a >/dev/null \
+        && mkdir -p "$PREFIX/include/quickjs" && cp quickjs.h "$PREFIX/include/quickjs/" \
+        && cp libquickjs.a "$PREFIX/lib/")
+    touch "$PREFIX/.stamp-quickjs"
+fi
+
+[ "$1" = deps ] && exit 0
+
 # --- NetSurf and its libraries ---------------------------------------------
 NSDIR=$SRC/netsurf-all-$NETSURF_VER
 if [ ! -d "$NSDIR" ]; then
@@ -99,10 +136,21 @@ if [ ! -d "$NSDIR" ]; then
         [ -f "$p" ] && patch -d "$NSDIR" -p1 < "$p"
     done
 fi
+# files this port adds: site scripts, the video player, the script engine glue
+cp -r "$PORT_DIR/overlay/." "$NSDIR/"
 cp "$PORT_DIR/Makefile.config" "$NSDIR/netsurf/Makefile.config"
 
 echo ">>> netsurf"
+# The first run builds NetSurf's libraries and the browser and leaves a stamp;
+# after that only the browser itself is rebuilt (incrementally).
+INST=$NSDIR/inst-framebuffer
 make -C "$NSDIR" -j"$JOBS" TARGET=framebuffer PREFIX=/usr
+PATH="$PATH:$INST/bin" PKG_CONFIG_PATH="$INST/lib/pkgconfig:$PKG_CONFIG_PATH" \
+    make -C "$NSDIR/netsurf" -j"$JOBS" TARGET=framebuffer PREFIX=/usr >"$WORK/netsurf-build.log" 2>&1 || {
+        grep -E "error|undefined reference|Error " "$WORK/netsurf-build.log" | head -40
+        exit 1
+    }
+[ "$1" = nopack ] && exit 0
 
 # --- package tree: /usr/bin/netsurf + resources + fonts + CA bundle ---------
 ROOT=$OUT/root
