@@ -72,6 +72,7 @@ static int64_t pipe_write_op(vfs_node_t *node, uint64_t offset, uint64_t size, u
         p->write_pos = (p->write_pos + 1) % PIPE_BUF_SIZE;
         p->count++;
 
+        io_wake_all();
         if (p->blocked_reader) {
             sched_unblock(p->blocked_reader);
             p->blocked_reader = NULL;

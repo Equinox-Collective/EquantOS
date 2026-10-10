@@ -22,15 +22,18 @@
 #define REG_RCR         0x44
 #define REG_CONFIG1     0x52
 
-#define RX_BUFFER_SIZE  16384
-#define RX_WRAP_PAD     1500
-#define RCR_RBLEN_16K   (1u << 11)
+// 32 KB receive ring in WRAP mode: a frame that crosses the end continues linearly
+// into the pad after it (the 64 KB mode ignores WRAP and splits frames instead)
+#define RX_BUFFER_SIZE  32768
+#define RX_WRAP_PAD     (16 + 1536)
+#define RX_BUFFER_PAGES ((RX_BUFFER_SIZE + RX_WRAP_PAD + 4095) / 4096)
+#define RCR_RBLEN_32K   (2u << 11)
 
 static uint32_t rtl_io_base = 0;
 static int tx_cur_desc = 0;
 static uint64_t rx_phys_addr = 0;
 static uint64_t tx_phys_addr = 0;
-static uint16_t rx_offset = 0;
+static uint32_t rx_offset = 0;
 static bool rtl_initialized = false;
 
 static net_interface_t rtl_iface;
@@ -59,10 +62,16 @@ void rtl8139_send_packet(void *data, uint32_t len) {
 }
 
 void rtl8139_poll(void) {
-    if (!rtl_initialized) return;
+    // Sending from inside packet handling (ARP wait) may poll again: never nest
+    static bool polling = false;
+    if (!rtl_initialized || polling) return;
+    polling = true;
 
     uint16_t isr_status = inw(rtl_io_base + REG_ISR);
-    if (!(isr_status & 0x01)) return;
+    if (!(isr_status & 0x01) && (inb(rtl_io_base + REG_COMMAND) & 0x01)) {
+        polling = false;
+        return;
+    }
 
     outw(rtl_io_base + REG_ISR, 0x05);
 
@@ -78,9 +87,10 @@ void rtl8139_poll(void) {
             outb(rtl_io_base + REG_COMMAND, 0x10);
             while ((inb(rtl_io_base + REG_COMMAND) & 0x10) != 0);
             outl(rtl_io_base + REG_RBSTART, (uint32_t)rx_phys_addr);
-            outl(rtl_io_base + REG_RCR, 0x0F | (1 << 7) | RCR_RBLEN_16K);
+            outl(rtl_io_base + REG_RCR, 0x0F | (1 << 7) | RCR_RBLEN_32K);
             outb(rtl_io_base + REG_COMMAND, 0x0C);
             rx_offset = 0;
+            polling = false;
             return;
         }
 
@@ -95,6 +105,7 @@ void rtl8139_poll(void) {
         uint16_t capr = (uint16_t)((rx_offset + RX_BUFFER_SIZE - 16) % RX_BUFFER_SIZE);
         outw(rtl_io_base + REG_CAPR, capr);
     }
+    polling = false;
 }
 
 static int rtl8139_probe(pci_device_t *dev) {
@@ -114,8 +125,8 @@ static int rtl8139_probe(pci_device_t *dev) {
     rtl_io_base = bar0 & ~0x03;
 
     // Allocate continuous physical DMA memory via Buddy Allocator
-    // RX requires 16KB + 1.5KB wrap pad = ~18KB -> 5 pages (20KB, order 3)
-    void *rx_page = pmm_alloc_continuous(5);
+    // RX ring + wrap pad must be physically contiguous
+    void *rx_page = pmm_alloc_continuous(RX_BUFFER_PAGES);
     if (!rx_page) {
         serial_puts(COM1, "[RTL8139] Failed to allocate DMA RX buffer!\n");
         return -1;
@@ -140,8 +151,8 @@ static int rtl8139_probe(pci_device_t *dev) {
     // Set Receive Buffer Start
     outl(rtl_io_base + REG_RBSTART, (uint32_t)rx_phys_addr);
 
-    // RCR: Accept Broadcast, Multicast, My-Physical, Wrap mode, 16K Buffer
-    outl(rtl_io_base + REG_RCR, 0x0000000F | (1 << 7) | RCR_RBLEN_16K);
+    // RCR: Accept Broadcast, Multicast, My-Physical, Wrap mode, 32K Buffer
+    outl(rtl_io_base + REG_RCR, 0x0000000F | (1 << 7) | RCR_RBLEN_32K);
 
     // Enable Transmitter and Receiver
     outb(rtl_io_base + REG_COMMAND, 0x0C);

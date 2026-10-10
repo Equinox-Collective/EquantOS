@@ -145,6 +145,7 @@ int unix_socket_connect(unix_socket_t *client_sock, const struct sockaddr_un *ad
     // Wake up server accept thread if waiting
     if (server_sock->blocked_accept) {
         sched_unblock(server_sock->blocked_accept);
+        io_wake_all();
         server_sock->blocked_accept = NULL;
     }
 
@@ -249,6 +250,7 @@ int64_t unix_socket_write(unix_socket_t *sock, const void *buf, size_t count, bo
         dest->count++;
 
         // Wake up reading peer immediately
+        io_wake_all();
         if (dest->blocked_reader) {
             sched_unblock(dest->blocked_reader);
             dest->blocked_reader = NULL;
@@ -266,6 +268,7 @@ void unix_socket_close(unix_socket_t *sock) {
 
     if (sock->peer) {
         sock->peer->peer_closed = true;
+        io_wake_all();
         if (sock->peer->blocked_reader) {
             sched_unblock(sock->peer->blocked_reader);
             sock->peer->blocked_reader = NULL;

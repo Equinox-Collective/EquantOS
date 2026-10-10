@@ -19,6 +19,8 @@ typedef struct {
     void **phys_pages;
     uint32_t nattch;
     uint32_t mode;
+    int32_t cpid;
+    int32_t lpid;
 } shm_segment_t;
 
 static shm_segment_t shm_segments[SHM_MAX_SEGMENTS];
@@ -79,6 +81,8 @@ int64_t sys_shmget_handler(uint64_t key, size_t size, int shmflg) {
     seg->phys_pages = phys_list;
     seg->nattch = 0;
     seg->mode = (uint32_t)(shmflg & 0777);
+    seg->cpid = (current_task && current_task->process) ? (int32_t)current_task->process->pid : 0;
+    seg->lpid = 0;
 
     return (int64_t)seg->shmid;
 }
@@ -110,6 +114,7 @@ int64_t sys_shmat_handler(int shmid, uint64_t shmaddr, int shmflg) {
     }
 
     seg->nattch++;
+    seg->lpid = (int32_t)current_task->process->pid;
     return (int64_t)vaddr;
 }
 
@@ -159,6 +164,7 @@ int64_t sys_shmctl_handler(int shmid, int cmd, void *buf) {
     }
     if (!seg) return -EINVAL;
 
+    cmd &= ~IPC_64;
     if (cmd == IPC_RMID) {
         if (seg->nattch == 0) {
             for (size_t i = 0; i < seg->page_count; i++) {
@@ -172,12 +178,23 @@ int64_t sys_shmctl_handler(int shmid, int cmd, void *buf) {
         return 0;
     }
 
-    if (cmd == IPC_STAT && buf) {
+    if (cmd == IPC_STAT) {
+        if (!buf) return -EFAULT;
         struct shmid_ds *ds = (struct shmid_ds *)buf;
         memset(ds, 0, sizeof(struct shmid_ds));
-        ds->shm_perm_key = seg->key;
+        ds->shm_perm_key = (int32_t)seg->key;
+        ds->shm_perm_mode = seg->mode;
+        ds->shm_perm_seq = (uint16_t)seg->shmid;
         ds->shm_segsz = seg->size;
+        ds->shm_cpid = seg->cpid;
+        ds->shm_lpid = seg->lpid;
         ds->shm_nattch = seg->nattch;
+        return 0;
+    }
+
+    if (cmd == IPC_SET) {
+        if (!buf) return -EFAULT;
+        seg->mode = ((struct shmid_ds *)buf)->shm_perm_mode & 0777;
         return 0;
     }
 

@@ -16,15 +16,31 @@
 #define SHM_MAX_SEGMENTS 32
 #define SHM_MAX_SIZE     (64 * 1024 * 1024) // 64MB max per segment
 
+#define IPC_SET     1
+#define IPC_INFO    3
+#define IPC_64      0x100   // glibc/musl OR this into every *ctl command
+
+// Linux x86-64 struct shmid_ds (struct ipc64_perm + segment info), 112 bytes
 struct shmid_ds {
-    uint32_t shm_perm_key;
+    int32_t  shm_perm_key;
     uint32_t shm_perm_uid;
     uint32_t shm_perm_gid;
+    uint32_t shm_perm_cuid;
+    uint32_t shm_perm_cgid;
     uint32_t shm_perm_mode;
+    uint16_t shm_perm_seq;
+    uint16_t shm_perm_pad;
+    uint64_t shm_perm_unused1;
+    uint64_t shm_perm_unused2;
     uint64_t shm_segsz;
+    int64_t  shm_atime;
+    int64_t  shm_dtime;
+    int64_t  shm_ctime;
+    int32_t  shm_cpid;
+    int32_t  shm_lpid;
     uint64_t shm_nattch;
-    uint64_t shm_cpid;
-    uint64_t shm_lpid;
+    uint64_t shm_unused4;
+    uint64_t shm_unused5;
 };
 
 void shm_init(void);

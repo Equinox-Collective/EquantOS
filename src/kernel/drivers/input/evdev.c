@@ -41,6 +41,7 @@ static void mousedev_enqueue_packet(uint8_t b0, uint8_t b1, uint8_t b2) {
     mouse_ps2_buf[mouse_ps2_head] = b2;
     mouse_ps2_head = (mouse_ps2_head + 1) % MOUSE_BUF_SIZE;
 
+    io_wake_all();
     if (mousedev_blocked_reader) {
         sched_unblock(mousedev_blocked_reader);
         mousedev_blocked_reader = NULL;

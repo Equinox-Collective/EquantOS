@@ -5,6 +5,7 @@
 #include "stdio.h"
 #include "../core/mem/memory.h"
 #include "../../equterm/term.h"
+#include "socket.h"
 
 #define MAX_UDP_SOCKETS 64
 static udp_socket_t udp_sockets[MAX_UDP_SOCKETS];
@@ -35,6 +36,8 @@ void handle_udp(net_interface_t *iface, uint8_t *packet, uint32_t ip_hdr_len) {
     uint16_t len = HTONS(udp->len) - sizeof(udp_header_t);
     uint8_t *payload = (uint8_t *)udp + sizeof(udp_header_t);
 
+    if (HTONS(udp->len) < sizeof(udp_header_t)) return;
+
     for (int i = 0; i < MAX_UDP_SOCKETS; i++) {
         if (udp_sockets[i].active && udp_sockets[i].local_port == dest_port) {
             if (udp_sockets[i].callback) {
@@ -43,6 +46,9 @@ void handle_udp(net_interface_t *iface, uint8_t *packet, uint32_t ip_hdr_len) {
             return;
         }
     }
+
+    // Not a kernel service port: hand it to a userspace socket (DNS resolver etc.)
+    sock_udp_deliver(dest_port, HTONL(ip->src_ip), src_port, payload, len);
 }
 
 void udp_send_packet(net_interface_t *iface, uint32_t dest_ip,

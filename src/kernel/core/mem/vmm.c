@@ -8,6 +8,8 @@
 #include "../../drivers/serial/serial.h"
 #include "../../proc/sched.h"
 #include "../../proc/task.h"
+
+void process_exit_current(int code); // proc/syscall.c
 // x86_64 Hardware Physical Address Mask (Bits 12..51)
 // Strictly strips flags (0..11), OS bits (52..62) and NX bit (63)
 extern void term_print(const char *str);
@@ -195,12 +197,7 @@ void vmm_page_fault_handler(cpu_state_t *state) {
      if (fault_addr < PAGE_SIZE) {
         bool from_user = (state->cs == 0x23) || ((state->error_code & 0x04) != 0);
         if (from_user && current_task && current_task->process) {
-            current_task->process->exit_code = 139;
-            current_task->process->exited = true;
-            current_task->state = TASK_STATE_ZOMBIE;
-            current_task->running = false;
-            sched_yield();
-            for (;;) { __asm__ volatile("hlt"); }
+            process_exit_current(139); // 128 + SIGSEGV; closes descriptors, wakes parent
         }
         kernel_panic(state, __FILE__, __LINE__, "Fatal NULL pointer dereference (#PF)");
     }
@@ -276,10 +273,7 @@ void vmm_page_fault_handler(cpu_state_t *state) {
         term_print("\n\033[31mSegmentation fault (core dumped)\033[0m\n");
 
         if (current_task && current_task->process) {
-            current_task->process->exit_code = 139; // 128 + SIGSEGV
-            current_task->process->exited = true;
-            current_task->state = TASK_STATE_ZOMBIE;
-            current_task->running = false;
+            process_exit_current(139); // 128 + SIGSEGV; closes descriptors, wakes parent
         }
 
         sched_yield();
@@ -296,6 +290,31 @@ void vmm_page_fault_handler(cpu_state_t *state) {
     serial_puts(COM1, "\n");
 
     kernel_panic(state, __FILE__, __LINE__, "Fatal Kernel Page Fault (#PF)");
+}
+
+bool vmm_protect(page_table_t *pml4, uint64_t virt, bool user, bool writable) {
+    uint64_t pml4_idx = (virt >> 39) & 0x1FF;
+    uint64_t pdpt_idx = (virt >> 30) & 0x1FF;
+    uint64_t pd_idx   = (virt >> 21) & 0x1FF;
+    uint64_t pt_idx   = (virt >> 12) & 0x1FF;
+
+    if (!(pml4[pml4_idx] & PTE_PRESENT)) return false;
+    page_table_t *pdpt = (page_table_t *)VIRT(pml4[pml4_idx] & PTE_ADDR_MASK);
+    if (!(pdpt[pdpt_idx] & PTE_PRESENT)) return false;
+    page_table_t *pd = (page_table_t *)VIRT(pdpt[pdpt_idx] & PTE_ADDR_MASK);
+    if (!(pd[pd_idx] & PTE_PRESENT) || (pd[pd_idx] & PTE_HUGE)) return false;
+    page_table_t *pt = (page_table_t *)VIRT(pd[pd_idx] & PTE_ADDR_MASK);
+
+    uint64_t pte = pt[pt_idx];
+    if (!(pte & PTE_PRESENT)) return false;
+
+    pte &= ~(PTE_USER | PTE_WRITABLE);
+    if (user) pte |= PTE_USER;
+    // A copy-on-write page stays read-only: the fault handler makes the private copy
+    if (user && writable && !(pte & PTE_COW)) pte |= PTE_WRITABLE;
+    pt[pt_idx] = pte;
+    invlpg(virt);
+    return true;
 }
 
 uint64_t vmm_get_phys(page_table_t *pml4, uint64_t virt) {

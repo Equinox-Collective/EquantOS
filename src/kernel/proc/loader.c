@@ -8,6 +8,7 @@
 #include "string.h"
 #include "stdio.h"
 #include "../fs/vfs.h"
+#include "../misc/random.h"
 
 task_t *last_spawned_task = NULL;
 
@@ -235,7 +236,13 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
         sp -= 8;
     }
 
-    uint64_t vector_table[128];
+    uint64_t *vector_table = (uint64_t *)kmalloc((size_t)total_words * sizeof(uint64_t));
+    if (!vector_table) {
+        kfree(argv_u);
+        kfree(envp_u);
+        vmm_destroy_address_space(PHYS(new_pml4));
+        return false;
+    }
     int idx = 0;
     vector_table[idx++] = (uint64_t)argc;
     for (int i = 0; i < argc; i++) vector_table[idx++] = argv_u[i];
@@ -245,6 +252,9 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     for (int i = 0; i < an; i++)   vector_table[idx++] = aux[i];
 
     push_to_user_stack(new_pml4, &sp, vector_table, total_words * sizeof(uint64_t));
+    kfree(vector_table);
+    kfree(argv_u);
+    kfree(envp_u);
 
     uint64_t initial_user_rsp = sp;
 
@@ -311,7 +321,9 @@ bool elf_load_args(void *elf_data, uint64_t size, int argc, char **argv) {
     return true;
 }
 
-bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, uint64_t *out_entry, uint64_t *out_rsp, uint64_t *out_cr3) {
+bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv,
+                        int envc, char **envp,
+                        uint64_t *out_entry, uint64_t *out_rsp, uint64_t *out_cr3) {
     if (!elf_data || size < sizeof(Elf64_Ehdr)) return false;
 
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)elf_data;
@@ -376,19 +388,21 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         }
     }
 
+    // Only the top of the 8 MB stack is mapped now (arguments, environment,
+    // auxv); the page fault handler grows it downwards on demand.
     uint32_t stack_pages = 2048;
+    uint32_t eager_pages = (EXEC_ARG_MAX / PAGE_SIZE) + 16;
     uint64_t user_stack_top = 0x7FFFF0000000ULL;
-    uint64_t user_stack_bottom = user_stack_top - ((uint64_t)stack_pages * PAGE_SIZE);
 
-    for (uint32_t j = 0; j < stack_pages; j++) {
+    for (uint32_t j = 1; j <= eager_pages && j <= stack_pages; j++) {
         void *phys = pmm_alloc();
         if (!phys) {
             vmm_destroy_address_space(PHYS(new_pml4));
             return false;
         }
         memset((void *)VIRT(phys), 0, PAGE_SIZE);
-        vmm_map(new_pml4, user_stack_bottom + ((uint64_t)j * PAGE_SIZE), 
-                (uint64_t)phys, 
+        vmm_map(new_pml4, user_stack_top - ((uint64_t)j * PAGE_SIZE),
+                (uint64_t)phys,
                 PTE_PRESENT | PTE_WRITABLE | PTE_USER);
     }
 
@@ -398,18 +412,8 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         argc = 1;
         argv = (char *[]){ "app", NULL };
     }
-    if (argc > 16) argc = 16;
 
-    uint64_t argv_u[17];
-    for (int i = 0; i < argc; i++) {
-        const char *s = argv[i] ? argv[i] : "";
-        size_t len = strlen(s) + 1;
-        push_to_user_stack(new_pml4, &sp, s, len);
-        argv_u[i] = sp;
-    }
-    argv_u[argc] = 0;
-
-    const char *default_env[] = {
+    static char *default_env[] = {
         "PATH=/bin:/usr/bin:/sys/bin:/",
         "USER=root",
         "HOME=/",
@@ -418,19 +422,40 @@ bool elf_execve_replace(void *elf_data, uint64_t size, int argc, char **argv, ui
         "DISPLAY=:0",
         NULL
     };
-    int envc = 0;
-    while (default_env[envc]) envc++;
+    if (!envp) {
+        envp = default_env;
+        envc = 0;
+        while (default_env[envc]) envc++;
+    }
 
-    uint64_t envp_u[16];
+    uint64_t *argv_u = (uint64_t *)kmalloc(((size_t)argc + 1) * sizeof(uint64_t));
+    uint64_t *envp_u = (uint64_t *)kmalloc(((size_t)envc + 1) * sizeof(uint64_t));
+    if (!argv_u || !envp_u) {
+        if (argv_u) kfree(argv_u);
+        if (envp_u) kfree(envp_u);
+        vmm_destroy_address_space(PHYS(new_pml4));
+        return false;
+    }
+
+    for (int i = 0; i < argc; i++) {
+        const char *s = argv[i] ? argv[i] : "";
+        size_t len = strlen(s) + 1;
+        push_to_user_stack(new_pml4, &sp, s, len);
+        argv_u[i] = sp;
+    }
+    argv_u[argc] = 0;
+
     for (int i = 0; i < envc; i++) {
-        size_t len = strlen(default_env[i]) + 1;
-        push_to_user_stack(new_pml4, &sp, default_env[i], len);
+        const char *s = envp[i] ? envp[i] : "";
+        size_t len = strlen(s) + 1;
+        push_to_user_stack(new_pml4, &sp, s, len);
         envp_u[i] = sp;
     }
     envp_u[envc] = 0;
 
+    // AT_RANDOM seeds musl's stack protector and pointer mangling
     uint8_t rand_bytes[16];
-    memset(rand_bytes, 0x42, 16);
+    random_fill(rand_bytes, sizeof(rand_bytes));
     push_to_user_stack(new_pml4, &sp, rand_bytes, 16);
     uint64_t at_random = sp;
 

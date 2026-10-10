@@ -1,4 +1,6 @@
+prog "NetSurf" web-browser /usr/bin/netsurf-x
 prog "XEyes" - /bin/xeyes.elf
+separator
 prog "Package Manager" - /bin/epacmg.elf
 prog "Diagnostics" - /bin/kdiag.elf sysinfo
 prog "MemTest" - /bin/equantmemtest.elf
@@ -6,5 +8,5 @@ separator
 prog "Installer" - /bin/kdiag.elf installer
 prog "Partitions" - /bin/kdiag.elf diskinfo
 separator
-prog "Reboot" - /bin/kdiag.elf reboot
-prog "Shutdown" - /bin/kdiag.elf shutdown
+prog "Reboot" reboot /bin/kdiag.elf reboot
+prog "Shutdown" shutdown /bin/kdiag.elf shutdown

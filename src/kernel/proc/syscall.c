@@ -1,7 +1,11 @@
 // src/kernel/proc/syscall.c - Native x86_64 Linux System Call Dispatcher
 #include "syscall.h"
 
-#define STRACE_DEBUG_ENABLED 0
+// Syscall tracing to COM1 is compiled in but off; "kdiag strace <pid>" turns it on
+// for one process ("kdiag strace all" for every process, "kdiag strace 0" off)
+#define STRACE_DEBUG_ENABLED 1
+static uint64_t strace_pid = 0;
+#define STRACE_ALL ((uint64_t)-1)
 
 static void strace_log(const char *fmt, ...) {
 #if STRACE_DEBUG_ENABLED
@@ -84,32 +88,79 @@ static int alloc_fd(vfs_node_t *node, uint32_t flags) {
     return -EMFILE;
 }
 
+// AF_INET sockets keep (socket id + 1) in node->ptr
+static int inet_sock_id(vfs_node_t *node) {
+    return (node && node->ptr) ? (int)(uintptr_t)node->ptr - 1 : -1;
+}
+
+static int64_t inet_socket_read_op(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)offset;
+    if (!node || !node->ptr) return -EBADF;
+    return sock_recvfrom(inet_sock_id(node), buffer, (uint32_t)size, NULL, NULL, 0, false);
+}
+
+static int64_t inet_socket_write_op(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
+    (void)offset;
+    if (!node || !node->ptr) return -EBADF;
+    return sock_sendto(inet_sock_id(node), buffer, (uint32_t)size, NULL, NULL, false);
+}
+
+static void inet_socket_close_op(vfs_node_t *node) {
+    if (node && node->ptr) {
+        sock_close(inet_sock_id(node));
+        node->ptr = NULL;
+    }
+}
+
+static vfs_file_operations_t inet_socket_vfs_ops = {
+    .read    = inet_socket_read_op,
+    .write   = inet_socket_write_op,
+    .open    = NULL,
+    .close   = inet_socket_close_op,
+    .readdir = NULL,
+    .finddir = NULL,
+    .create  = NULL,
+    .ioctl   = NULL,
+    .mmap    = NULL
+};
+
 // ============================================================================
 // 1. File Descriptor & I/O Handlers
 // ============================================================================
+static void reap_orphan_zombies(void);
+static void process_terminate_task(task_t *task, int code);
+static int64_t sys_exit_handler(int code);
+
 static int64_t sys_kill_handler(int pid, int sig) {
     if (sig < 0 || sig >= NSIG) return -EINVAL;
     extern task_t *task_list;
+    reap_orphan_zombies();
     if (!task_list) return -ESRCH;
 
     task_t *curr = task_list;
     bool found = false;
+    bool kill_self = false;
     do {
-        if (curr->process && (pid <= 0 || (int)curr->process->pid == pid)) {
+        task_t *next = curr->next;
+        if (curr->process && curr->state != TASK_STATE_ZOMBIE &&
+            (pid <= 0 || (int)curr->process->pid == pid)) {
             found = true;
             if (sig == SIGKILL || sig == SIGTERM) {
-                curr->process->exit_code = 128 + sig;
-                curr->process->exited = true;
-                curr->state = TASK_STATE_ZOMBIE;
+                if (curr == current_task) {
+                    kill_self = true; // finish everyone else first
+                } else {
+                    process_terminate_task(curr, 128 + sig);
+                }
             } else if (sig == SIGSTOP) {
                 sched_block(curr);
             } else if (sig == SIGCONT) {
                 sched_unblock(curr);
             }
         }
-        curr = curr->next;
+        curr = next;
     } while (curr && curr != task_list);
 
+    if (kill_self) sys_exit_handler(128 + sig);
     return found ? 0 : -ESRCH;
 }
 
@@ -145,6 +196,12 @@ static int64_t sys_read_handler(int fd, void *buf, size_t count) {
     // Fast-path: AF_UNIX sockets with explicit non-blocking awareness
     if (node->ops == &unix_socket_vfs_ops && node->ptr) {
         return unix_socket_read((unix_socket_t *)node->ptr, buf, count, nonblock);
+    }
+    if (node->ops == &inet_socket_vfs_ops && node->ptr) {
+        return sock_recvfrom(inet_sock_id(node), buf, (uint32_t)count, NULL, NULL, 0, nonblock);
+    }
+    if (node->ops == &eventfd_vfs_ops) {
+        return eventfd_read(node, buf, count, nonblock);
     }
 
     // Only a real terminal waits for keyboard input; a redirected stdin (pipe, file) reads directly
@@ -188,6 +245,12 @@ static int64_t sys_write_handler(int fd, const void *user_buf, size_t count) {
     // Fast-path: AF_UNIX sockets
     if (node->ops == &unix_socket_vfs_ops && node->ptr) {
         return unix_socket_write((unix_socket_t *)node->ptr, user_buf, count, nonblock);
+    }
+    if (node->ops == &inet_socket_vfs_ops && node->ptr) {
+        return sock_sendto(inet_sock_id(node), user_buf, (uint32_t)count, NULL, NULL, nonblock);
+    }
+    if (node->ops == &eventfd_vfs_ops) {
+        return eventfd_write(node, user_buf, count, nonblock);
     }
 
     if (!node->ops->write) return -EBADF;
@@ -432,9 +495,13 @@ static int64_t sys_fcntl_handler(int fd, int cmd, uint64_t arg) {
             return 0;
         case F_GETFL:
             return current_task->process->file_flags[fd];
-        case F_SETFL:
-            current_task->process->file_flags[fd] = (uint32_t)arg;
+        case F_SETFL: {
+            // Only the status flags change; access mode and FD_CLOEXEC stay
+            const uint32_t settable = O_APPEND | O_NONBLOCK;
+            uint32_t flags = current_task->process->file_flags[fd];
+            current_task->process->file_flags[fd] = (flags & ~settable) | ((uint32_t)arg & settable);
             return 0;
+        }
         default:
             return -EINVAL;
     }
@@ -445,6 +512,21 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
+
+    // Generic descriptor ioctls
+    if (req == 0x5421 /* FIONBIO */ && node) {
+        if (!arg) return -EFAULT;
+        if (*(int *)arg) current_task->process->file_flags[fd] |= O_NONBLOCK;
+        else current_task->process->file_flags[fd] &= ~O_NONBLOCK;
+        return 0;
+    }
+    if (req == 0x541B /* FIONREAD */ && node && node->ops == &inet_socket_vfs_ops && node->ptr) {
+        if (!arg) return -EFAULT;
+        uint8_t probe[1];
+        int64_t n = sock_recvfrom(inet_sock_id(node), probe, 1, NULL, NULL, SOCK_MSG_PEEK, true);
+        *(int *)arg = (n > 0) ? (int)sock_rx_available(inet_sock_id(node)) : 0;
+        return 0;
+    }
 
     // Check if this fd is a terminal or console (fd 0..2 OR /dev/tty, /dev/tty0)
     bool is_tty = (fd >= 0 && fd <= 2);
@@ -981,53 +1063,6 @@ static int64_t sys_mmap_handler(uint64_t addr, size_t length, int prot, int flag
     return -EINVAL;
 }
 
-static int64_t inet_socket_read_op(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    (void)offset;
-    if (!node || !node->ptr) return -EBADF;
-    int sock_id = (int)(uintptr_t)node->ptr - 1; // <-- ВЫЧИТАЕМ 1
-
-    int res = sock_recv(sock_id, buffer, (uint32_t)size);
-    if (res < 0) {
-        if (res == SOCK_ERR_TIMEOUT || res == SOCK_ERR_AGAIN) return -EAGAIN;
-        if (res == SOCK_ERR_CLOSED || res == SOCK_ERR_NOTCONN) return 0;
-        return -EIO;
-    }
-    return res;
-}
-
-static int64_t inet_socket_write_op(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer) {
-    (void)offset;
-    if (!node || !node->ptr) return -EBADF;
-    int sock_id = (int)(uintptr_t)node->ptr - 1; // <-- ВЫЧИТАЕМ 1
-
-    int res = sock_send(sock_id, buffer, (uint32_t)size);
-    if (res < 0) {
-        if (res == SOCK_ERR_NOTCONN || res == SOCK_ERR_CLOSED) return -EPIPE;
-        return -EIO;
-    }
-    return res;
-}
-
-static void inet_socket_close_op(vfs_node_t *node) {
-    if (node && node->ptr) {
-        int sock_id = (int)(uintptr_t)node->ptr - 1; // <-- ВЫЧИТАЕМ 1
-        sock_close(sock_id);
-        node->ptr = NULL;
-    }
-}
-
-static vfs_file_operations_t inet_socket_vfs_ops = {
-    .read    = inet_socket_read_op,
-    .write   = inet_socket_write_op,
-    .open    = NULL,
-    .close   = inet_socket_close_op,
-    .readdir = NULL,
-    .finddir = NULL,
-    .create  = NULL,
-    .ioctl   = NULL,
-    .mmap    = NULL
-};
-
 static int64_t sys_munmap_handler(uint64_t addr, size_t length) {
     if (length == 0 || (addr & (PAGE_SIZE - 1)) != 0) return -EINVAL;
     if (!current_task || !current_task->process) return -EINVAL;
@@ -1047,7 +1082,18 @@ static int64_t sys_munmap_handler(uint64_t addr, size_t length) {
 }
 
 static int64_t sys_mprotect_handler(uint64_t addr, size_t len, int prot) {
-    (void)addr; (void)len; (void)prot;
+    if (addr & (PAGE_SIZE - 1)) return -EINVAL;
+    if (!current_task || !current_task->process) return -EINVAL;
+    if (len == 0) return 0;
+
+    // musl maps thread stacks PROT_NONE and opens them up with mprotect()
+    page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
+    uint64_t end = (addr + len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    bool user = (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) != 0;
+    bool writable = (prot & PROT_WRITE) != 0;
+    for (uint64_t page = addr; page < end; page += PAGE_SIZE) {
+        vmm_protect(pml4, page, user, writable);
+    }
     return 0;
 }
 
@@ -1158,6 +1204,56 @@ static bool process_has_other_live_tasks(process_t *proc) {
     return false;
 }
 
+// Release every descriptor of a process (the last task of it is going away)
+static void close_process_files(process_t *proc) {
+    for (int fd = 0; fd < MAX_OPEN_FILES; fd++) {
+        vfs_node_t *node = proc->files[fd];
+        if (!node) continue;
+        proc->files[fd] = NULL;
+        proc->file_offsets[fd] = 0;
+        proc->file_flags[fd] = 0;
+        if (node->refcount > 1) {
+            node->refcount--;
+        } else {
+            node->refcount = 0;
+            vfs_close(node);
+        }
+    }
+}
+
+static void wake_parent_of(process_t *proc) {
+    extern task_t *task_list;
+    if (!task_list) return;
+    task_t *curr = task_list;
+    do {
+        if (curr->process && curr->process->pid == proc->parent_pid &&
+            curr->state == TASK_STATE_BLOCKED) {
+            sched_unblock(curr);
+        }
+        curr = curr->next;
+    } while (curr && curr != task_list);
+}
+
+// Terminate a task other than the current one (kill): it never runs again
+static void process_terminate_task(task_t *task, int code) {
+    process_t *proc = task->process;
+    task->state = TASK_STATE_ZOMBIE;
+    task->running = false;
+    sched_forget(task);
+    if (!proc) return;
+    proc->exit_code = code;
+    proc->exited = true;
+    if (!process_has_other_live_tasks(proc)) {
+        close_process_files(proc);
+        wake_parent_of(proc);
+    }
+}
+
+// Fatal fault in user mode: same cleanup as exit(), never returns
+void process_exit_current(int code) {
+    sys_exit_handler(code);
+}
+
 static int64_t sys_exit_handler(int code) {
     if (current_task) {
         // POSIX Thread Termination Notification (CLONE_CHILD_CLEARTID)
@@ -1216,33 +1312,172 @@ struct msghdr {
     int msg_flags;
 };
 
+// fd -> AF_INET socket id, or -1 for anything else
+static int fd_inet_sock(int fd) {
+    if (!current_task || !current_task->process) return -1;
+    if (fd < 0 || fd >= MAX_OPEN_FILES) return -1;
+    vfs_node_t *node = current_task->process->files[fd];
+    if (!node || node->ops != &inet_socket_vfs_ops || !node->ptr) return -1;
+    return inet_sock_id(node);
+}
+
+static bool fd_nonblock(int fd) {
+    return (current_task->process->file_flags[fd] & O_NONBLOCK) != 0;
+}
+
+// Copy an IPv4 address out to a user sockaddr, honouring the buffer size given
+static void put_sockaddr_in(void *addr, uint32_t *addrlen, uint32_t ip, uint16_t port) {
+    if (!addr || !addrlen) return;
+    struct linux_sockaddr_in in;
+    memset(&in, 0, sizeof(in));
+    in.sin_family = AF_INET;
+    in.sin_port = HTONS(port);
+    in.sin_addr = HTONL(ip);
+    uint32_t n = *addrlen < sizeof(in) ? *addrlen : (uint32_t)sizeof(in);
+    memcpy(addr, &in, n);
+    *addrlen = sizeof(in);
+}
+
+static int get_sockaddr_in(const void *addr, uint32_t addrlen, uint32_t *ip, uint16_t *port) {
+    if (!addr || addrlen < sizeof(uint16_t)) return -EINVAL;
+    const struct linux_sockaddr_in *in = (const struct linux_sockaddr_in *)addr;
+    if (in->sin_family == 0) { // AF_UNSPEC: dissolve a UDP association
+        *ip = 0;
+        *port = 0;
+        return 0;
+    }
+    if (in->sin_family != AF_INET) return -EAFNOSUPPORT;
+    if (addrlen < 8) return -EINVAL;
+    *ip = HTONL(in->sin_addr);
+    *port = HTONS(in->sin_port);
+    return 0;
+}
+
+static int64_t sys_sendto_handler(int fd, const void *buf, size_t len, int flags,
+                                  const void *dest, uint32_t destlen) {
+    int sid = fd_inet_sock(fd);
+    if (sid < 0) return sys_write_handler(fd, buf, len);
+    if (len && !validate_user_memory(buf, len, false)) return -EFAULT;
+
+    uint32_t ip;
+    uint16_t port;
+    bool nonblock = fd_nonblock(fd) || (flags & SOCK_MSG_DONTWAIT);
+    if (dest && destlen && sock_type(sid) == SOCK_TYPE_DGRAM) {
+        int err = get_sockaddr_in(dest, destlen, &ip, &port);
+        if (err) return err;
+        return sock_sendto(sid, buf, (uint32_t)len, &ip, &port, nonblock);
+    }
+    return sock_sendto(sid, buf, (uint32_t)len, NULL, NULL, nonblock);
+}
+
+static int64_t sys_recvfrom_handler(int fd, void *buf, size_t len, int flags,
+                                    void *src, uint32_t *srclen) {
+    int sid = fd_inet_sock(fd);
+    if (sid < 0) return sys_read_handler(fd, buf, len);
+    if (len && !validate_user_memory(buf, len, true)) return -EFAULT;
+
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    int64_t n = sock_recvfrom(sid, buf, (uint32_t)len, &ip, &port, flags, fd_nonblock(fd));
+    if (n >= 0 && src && srclen) put_sockaddr_in(src, srclen, ip, port);
+    return n;
+}
+
 static int64_t sys_sendmsg_handler(int fd, const struct msghdr *msg, int flags) {
-    (void)flags;
-    if (!msg || !msg->msg_iov || msg->msg_iovlen == 0) return -EINVAL;
-    return sys_writev_handler(fd, msg->msg_iov, (int)msg->msg_iovlen);
+    if (!msg || (!msg->msg_iov && msg->msg_iovlen)) return -EINVAL;
+    int sid = fd_inet_sock(fd);
+    if (sid < 0) {
+        if (msg->msg_iovlen == 0) return 0;
+        return sys_writev_handler(fd, msg->msg_iov, (int)msg->msg_iovlen);
+    }
+
+    // Gather the iovecs: a datagram must leave in one piece
+    size_t total = 0;
+    for (size_t i = 0; i < msg->msg_iovlen; i++) total += msg->msg_iov[i].iov_len;
+    if (total > 65536) return -EMSGSIZE;
+    uint8_t *kbuf = (uint8_t *)kmalloc(total ? total : 1);
+    if (!kbuf) return -ENOMEM;
+    size_t off = 0;
+    for (size_t i = 0; i < msg->msg_iovlen; i++) {
+        memcpy(kbuf + off, msg->msg_iov[i].iov_base, msg->msg_iov[i].iov_len);
+        off += msg->msg_iov[i].iov_len;
+    }
+    int64_t ret = sys_sendto_handler(fd, kbuf, total, flags, msg->msg_name, msg->msg_namelen);
+    kfree(kbuf);
+    return ret;
 }
 
 static int64_t sys_recvmsg_handler(int fd, struct msghdr *msg, int flags) {
-    (void)flags;
-    if (!msg || !msg->msg_iov || msg->msg_iovlen == 0) return -EINVAL;
-    return sys_readv_handler(fd, msg->msg_iov, (int)msg->msg_iovlen);
+    if (!msg || (!msg->msg_iov && msg->msg_iovlen)) return -EINVAL;
+    int sid = fd_inet_sock(fd);
+    if (sid < 0) {
+        if (msg->msg_iovlen == 0) return 0;
+        return sys_readv_handler(fd, msg->msg_iov, (int)msg->msg_iovlen);
+    }
+
+    size_t total = 0;
+    for (size_t i = 0; i < msg->msg_iovlen; i++) total += msg->msg_iov[i].iov_len;
+    if (total > 262144) total = 262144;
+    uint8_t *kbuf = (uint8_t *)kmalloc(total ? total : 1);
+    if (!kbuf) return -ENOMEM;
+
+    uint32_t ip = 0;
+    uint16_t port = 0;
+    int64_t n = sock_recvfrom(sid, kbuf, (uint32_t)total, &ip, &port, flags, fd_nonblock(fd));
+    if (n > 0) {
+        size_t off = 0;
+        for (size_t i = 0; i < msg->msg_iovlen && off < (size_t)n; i++) {
+            size_t chunk = msg->msg_iov[i].iov_len;
+            if (chunk > (size_t)n - off) chunk = (size_t)n - off;
+            memcpy(msg->msg_iov[i].iov_base, kbuf + off, chunk);
+            off += chunk;
+        }
+    }
+    kfree(kbuf);
+    if (n >= 0) {
+        if (msg->msg_name) put_sockaddr_in(msg->msg_name, &msg->msg_namelen, ip, port);
+        msg->msg_controllen = 0;
+        msg->msg_flags = 0;
+    }
+    return n;
 }
 
 static int64_t sys_setsockopt_handler(int fd, int level, int optname, const void *optval, uint32_t optlen) {
-    (void)fd; (void)level; (void)optname; (void)optval; (void)optlen;
-    return 0; // Pretend all socket options are set successfully
+    int sid = fd_inet_sock(fd);
+    if (sid < 0) return 0; // AF_UNIX: options are accepted and ignored
+    return sock_setsockopt(sid, level, optname, optval, optlen);
 }
 
 static int64_t sys_getsockopt_handler(int fd, int level, int optname, void *optval, uint32_t *optlen) {
-    (void)fd; (void)level; (void)optname;
+    int sid = fd_inet_sock(fd);
+    if (sid >= 0) return sock_getsockopt(sid, level, optname, optval, optlen);
+    if (level == 1 /* SOL_SOCKET */ && optname == 17 /* SO_PEERCRED */) {
+        // struct ucred { pid, uid, gid }: everything runs as root here
+        if (!optval || !optlen || *optlen < 12) return -EINVAL;
+        int32_t *cred = (int32_t *)optval;
+        cred[0] = current_task && current_task->process ? (int32_t)current_task->process->pid : 1;
+        cred[1] = 0;
+        cred[2] = 0;
+        *optlen = 12;
+        return 0;
+    }
     if (optval && optlen && *optlen >= sizeof(int)) {
-        *(int *)optval = 0; // Return SO_ERROR = 0 (No error)
+        *(int *)optval = 0; // SO_ERROR = 0 (No error)
+        *optlen = sizeof(int);
     }
     return 0;
 }
 
 static int64_t sys_getpeername_handler(int fd, struct sockaddr_un *addr, uint32_t *addrlen) {
-    (void)fd;
+    int sid = fd_inet_sock(fd);
+    if (sid >= 0) {
+        uint32_t ip;
+        uint16_t port;
+        int err = sock_getname(sid, true, &ip, &port);
+        if (err) return err;
+        put_sockaddr_in(addr, addrlen, ip, port);
+        return 0;
+    }
     if (addr && addrlen && *addrlen >= sizeof(struct sockaddr_un)) {
         addr->sun_family = AF_UNIX;
         strcpy(addr->sun_path, "/tmp/.X11-unix/X0");
@@ -1252,17 +1487,28 @@ static int64_t sys_getpeername_handler(int fd, struct sockaddr_un *addr, uint32_
 }
 
 static int64_t sys_getsockname_handler(int fd, struct sockaddr_un *addr, uint32_t *addrlen) {
+    int sid = fd_inet_sock(fd);
+    if (sid >= 0) {
+        uint32_t ip;
+        uint16_t port;
+        int err = sock_getname(sid, false, &ip, &port);
+        if (err) return err;
+        put_sockaddr_in(addr, addrlen, ip, port);
+        return 0;
+    }
     return sys_getpeername_handler(fd, addr, addrlen);
 }
 
 static int64_t sys_shutdown_handler(int fd, int how) {
-    (void)fd; (void)how;
+    int sid = fd_inet_sock(fd);
+    if (sid >= 0) return sock_shutdown(sid, how);
     return 0;
 }
 
 static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent_tid, int *child_tid, uint64_t tls, syscall_regs_t *regs) {
     if (!current_task || !current_task->process) return -EAGAIN;
 
+    reap_orphan_zombies();
     if (pmm_get_free_pages() < PMM_RESERVE_PAGES) {
         return -EAGAIN;
     }
@@ -1409,11 +1655,119 @@ static int64_t sys_readlink_handler(const char *path, char *buf, size_t bufsiz) 
     return procfs_readlink(path, buf, bufsiz);
 }
 
+// Unlink a task from the task list and free it with its kernel stack
+static void free_task_struct(task_t *task) {
+    extern task_t *task_list;
+
+    sched_forget(task);
+    if (task->next == task) {
+        task_list = NULL;
+    } else {
+        task->prev->next = task->next;
+        task->next->prev = task->prev;
+        if (task_list == task) task_list = task->next;
+    }
+    if (task->kstack_at_bottom) {
+        kfree((void *)(task->kstack_at_bottom - 16384));
+        task->kstack_at_bottom = 0;
+    }
+    kfree(task);
+}
+
+// Unlink a dead task and free its process, address space and kernel stack.
+// Other threads of the same process go with it: they cannot outlive it.
+static void release_task(task_t *child) {
+    extern task_t *task_list;
+    extern uint64_t kernel_cr3;
+
+    if (child->process) {
+        bool again = true;
+        while (again && task_list) {
+            again = false;
+            task_t *t = task_list;
+            do {
+                if (t != child && t != current_task && t->process == child->process) {
+                    free_task_struct(t);
+                    again = true;
+                    break;
+                }
+                t = t->next;
+            } while (t && t != task_list);
+        }
+    }
+
+    sched_forget(child);
+    if (child->next == child) {
+        task_list = NULL;
+    } else {
+        child->prev->next = child->next;
+        child->next->prev = child->prev;
+        if (task_list == child) task_list = child->next;
+    }
+
+    if (child->process) {
+        if (child->process->cr3 != 0 && child->process->cr3 != kernel_cr3 && !child->process->vm_shared) {
+            vmm_destroy_address_space(child->process->cr3);
+        }
+        kfree(child->process);
+        child->process = NULL;
+    }
+
+    if (child->kstack_at_bottom) {
+        kfree((void *)(child->kstack_at_bottom - 16384));
+        child->kstack_at_bottom = 0;
+    }
+
+    kfree(child);
+}
+
+static bool process_alive(uint64_t pid) {
+    extern task_t *task_list;
+    if (!task_list || pid == 0) return false;
+    task_t *curr = task_list;
+    do {
+        if (curr->process && curr->process->pid == pid && curr->state != TASK_STATE_ZOMBIE) {
+            return true;
+        }
+        curr = curr->next;
+    } while (curr && curr != task_list);
+    return false;
+}
+
+// Zombies whose parent is gone can never be waited for: release them (the job
+// init does on Linux). Thread groups are left alone.
+static void reap_orphan_zombies(void) {
+    extern task_t *task_list;
+    bool again = true;
+    while (again && task_list) {
+        again = false;
+        task_t *curr = task_list;
+        do {
+            task_t *next = curr->next;
+            // parent_pid 0: started by the kernel itself (initproc watches those)
+            if (curr != current_task && curr->state == TASK_STATE_ZOMBIE && curr->process &&
+                curr->process->parent_pid != 0 && !process_alive(curr->process->parent_pid)) {
+                bool shared = false;
+                task_t *other = task_list;
+                do {
+                    if (other != curr && other->process == curr->process) shared = true;
+                    other = other->next;
+                } while (other && other != task_list && !shared);
+                if (!shared) {
+                    release_task(curr);
+                    again = true;
+                    break;
+                }
+            }
+            curr = next;
+        } while (curr && curr != task_list);
+    }
+}
+
 static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
     if (!current_task || !current_task->process) return -ECHILD;
 
     extern task_t *task_list;
-    extern uint64_t kernel_cr3;
 
     for (;;) {
         bool have_child = false;
@@ -1440,29 +1794,7 @@ static int64_t sys_wait4_handler(int pid, int *wstatus, int options) {
             if (wstatus) {
                 *wstatus = (child->process->exit_code & 0xFF) << 8;
             }
-
-            if (child->next == child) {
-                task_list = NULL;
-            } else {
-                child->prev->next = child->next;
-                child->next->prev = child->prev;
-                if (task_list == child) task_list = child->next;
-            }
-
-            if (child->process) {
-                if (child->process->cr3 != 0 && child->process->cr3 != kernel_cr3 && !child->process->vm_shared) {
-                    vmm_destroy_address_space(child->process->cr3);
-                }
-                kfree(child->process);
-                child->process = NULL;
-            }
-
-            if (child->kstack_at_bottom) {
-                kfree((void *)(child->kstack_at_bottom - 16384));
-                child->kstack_at_bottom = 0;
-            }
-
-            kfree(child);
+            release_task(child);
             return child_pid;
         }
 
@@ -1616,8 +1948,25 @@ static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
             if (!node) continue;
             bool pipe_readable, pipe_writable, pipe_hangup, pipe_error;
 
+            // eventfd counters
+            if (node->ops == &eventfd_vfs_ops) {
+                if ((fds[i].events & (POLLIN | POLLRDNORM)) && eventfd_readable(node)) {
+                    fds[i].revents |= (fds[i].events & (POLLIN | POLLRDNORM));
+                }
+                fds[i].revents |= (fds[i].events & (POLLOUT | POLLWRNORM));
+                if (fds[i].revents) ready++;
+            }
+            // IPv4 sockets
+            else if (node->ops == &inet_socket_vfs_ops && node->ptr) {
+                int ev = sock_poll(inet_sock_id(node));
+                short want = fds[i].events | POLLERR | POLLHUP;
+                if (ev & SOCK_POLLIN) ev |= POLLRDNORM;
+                if (ev & SOCK_POLLOUT) ev |= POLLWRNORM;
+                fds[i].revents |= (short)(ev & want);
+                if (fds[i].revents) ready++;
+            }
             // UNIX Domain Sockets
-            if (node->ops == &unix_socket_vfs_ops && node->ptr) {
+            else if (node->ops == &unix_socket_vfs_ops && node->ptr) {
                 unix_socket_t *s = (unix_socket_t *)node->ptr;
 
                 if ((fds[i].events & (POLLIN | POLLRDNORM)) && unix_socket_can_read(s)) {
@@ -1662,6 +2011,8 @@ static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
 static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int timeout) {
     if (!fds && nfds > 0) return -EFAULT;
 
+    rtl8139_poll(); // fresh network state before reporting socket readiness
+
     // Fast path: Check immediately without sleeping
     int ready = poll_scan_fds(fds, nfds);
     if (ready > 0 || timeout == 0) {
@@ -1677,9 +2028,13 @@ static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int tim
             break;
         }
 
-        sched_make_sleep(current_task, tick + 1);
+        // Producers wake us at once; the short deadline covers sources without hooks
+        io_wait_prepare();
+        sched_make_sleep(current_task, tick + 2);
         sched_yield();
+        io_wait_done();
 
+        rtl8139_poll();
         ready = poll_scan_fds(fds, nfds);
     }
 
@@ -1777,12 +2132,22 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
                     vfs_node_t *node = current_task->process->files[fd];
                     if (node) {
                         // Sockets
-                        if (node->ops == &unix_socket_vfs_ops && node->ptr) {
+                        if (node->ops == &eventfd_vfs_ops) {
+                            can_read = eventfd_readable(node);
+                        } else if (node->ops == &inet_socket_vfs_ops && node->ptr) {
+                            can_read = (sock_poll(inet_sock_id(node)) & (SOCK_POLLIN | SOCK_POLLERR | SOCK_POLLHUP)) != 0;
+                        } else if (node->ops == &unix_socket_vfs_ops && node->ptr) {
                             can_read = unix_socket_can_read((unix_socket_t *)node->ptr);
                         }
                         // Mouse (/dev/mouse, /dev/psaux, /dev/input/mice)
                         else if (node->ops == &g_mousedev_fops || node->ops == &g_evdev_mouse_fops) {
                             can_read = evdev_mouse_can_read();
+                        }
+                        else {
+                            bool hup = false, err = false, w = false;
+                            if (pipe_poll_state(node, &can_read, &w, &hup, &err)) {
+                                can_read = can_read || hup;
+                            }
                         }
                     }
                 }
@@ -1802,8 +2167,14 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
                 } else if (current_task && current_task->process && fd < MAX_OPEN_FILES) {
                     vfs_node_t *node = current_task->process->files[fd];
                     if (node) {
-                        if (node->ops == &unix_socket_vfs_ops && node->ptr) {
+                        if (node->ops == &inet_socket_vfs_ops && node->ptr) {
+                            can_write = (sock_poll(inet_sock_id(node)) & (SOCK_POLLOUT | SOCK_POLLERR)) != 0;
+                        } else if (node->ops == &unix_socket_vfs_ops && node->ptr) {
                             can_write = unix_socket_can_write((unix_socket_t *)node->ptr);
+                        } else if (pipe_poll_state(node, &(bool){0}, &can_write, &(bool){0}, &(bool){0})) {
+                            // pipe write end
+                        } else if (!(node->flags & FS_SOCKET)) {
+                            can_write = true; // regular files never block
                         }
                     }
                 }
@@ -1829,9 +2200,11 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
             return 0;
         }
 
-        // Put task to sleep until next timer tick instead of burning CPU cycles
-        sched_make_sleep(current_task, tick + 1);
+        // Sleep until a producer wakes us (or two ticks pass)
+        io_wait_prepare();
+        sched_make_sleep(current_task, tick + 2);
         sched_yield();
+        io_wait_done();
     }
 }
 
@@ -1926,6 +2299,12 @@ static int64_t sys_getpgid_handler(int pid) {
 static int64_t sys_socket_handler(int domain, int type, int protocol) {
     (void)protocol;
 
+    // SOCK_NONBLOCK / SOCK_CLOEXEC ride in the type argument
+    uint32_t fd_flags = O_RDWR;
+    if (type & 04000) fd_flags |= O_NONBLOCK;
+    if (type & 02000000) fd_flags |= O_CLOEXEC;
+    type &= 0xF;
+
     // 1. Local Unix Domain Sockets (X11 / IPC)
     if (domain == AF_UNIX) {
         unix_socket_t *sock = unix_socket_create(type);
@@ -1942,13 +2321,14 @@ static int64_t sys_socket_handler(int domain, int type, int protocol) {
         node->ops = &unix_socket_vfs_ops;
         node->ptr = (struct vfs_node *)sock;
 
-        return alloc_fd(node, O_RDWR);
+        return alloc_fd(node, fd_flags);
     }
 
-    // 2. Real Internet IPv4 TCP Sockets (AF_INET = 2)
+    // 2. IPv4 TCP (SOCK_STREAM) and UDP (SOCK_DGRAM) sockets
     if (domain == AF_INET) {
-        int sock_id = sock_create();
-        if (sock_id < 0) return -ENOMEM;
+        if (type != SOCK_TYPE_STREAM && type != SOCK_TYPE_DGRAM) return -ESOCKTNOSUPPORT;
+        int sock_id = sock_create(type);
+        if (sock_id < 0) return sock_id;
 
         vfs_node_t *node = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
         if (!node) {
@@ -1959,9 +2339,14 @@ static int64_t sys_socket_handler(int domain, int type, int protocol) {
         strcpy(node->name, "socket:inet");
         node->flags = FS_SOCKET;
         node->ops = &inet_socket_vfs_ops;
-        node->ptr = (void *)(uintptr_t)(sock_id + 1); // <-- СОХРАНЯЕМ sock_id + 1
+        node->ptr = (void *)(uintptr_t)(sock_id + 1);
 
-        return alloc_fd(node, O_RDWR);
+        int fd = alloc_fd(node, fd_flags);
+        if (fd < 0) {
+            sock_close(sock_id);
+            kfree(node);
+        }
+        return fd;
     }
 
     return -EAFNOSUPPORT;
@@ -1973,6 +2358,14 @@ static int64_t sys_bind_handler(int fd, const struct sockaddr_un *addr, uint32_t
     if (fd < 0 || fd >= MAX_OPEN_FILES || !current_task->process->files[fd]) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
+    int sid = fd_inet_sock(fd);
+    if (sid >= 0) {
+        uint32_t ip;
+        uint16_t port;
+        int err = get_sockaddr_in(addr, addrlen, &ip, &port);
+        if (err) return err;
+        return sock_bind(sid, ip, port);
+    }
     if (node->ops != &unix_socket_vfs_ops || !node->ptr) return -ENOTSOCK;
 
     return unix_socket_bind((unix_socket_t *)node->ptr, addr);
@@ -1983,6 +2376,7 @@ static int64_t sys_listen_handler(int fd, int backlog) {
     if (fd < 0 || fd >= MAX_OPEN_FILES || !current_task->process->files[fd]) return -EBADF;
 
     vfs_node_t *node = current_task->process->files[fd];
+    if (fd_inet_sock(fd) >= 0) return -EOPNOTSUPP; // no TCP server sockets yet
     if (node->ops != &unix_socket_vfs_ops || !node->ptr) return -ENOTSOCK;
 
     return unix_socket_listen((unix_socket_t *)node->ptr, backlog);
@@ -2035,22 +2429,13 @@ static int64_t sys_connect_handler(int fd, const struct sockaddr_un *addr, uint3
         return unix_socket_connect((unix_socket_t *)node->ptr, addr);
     }
 
-    // Handle AF_INET (TCP Connect to Internet Host)
+    // Handle AF_INET (TCP connect / UDP default destination)
     if (node->ops == &inet_socket_vfs_ops && node->ptr) {
-        if (addrlen < sizeof(struct linux_sockaddr_in)) return -EINVAL;
-        const struct linux_sockaddr_in *in = (const struct linux_sockaddr_in *)addr;
-        int sock_id = (int)(uintptr_t)node->ptr - 1; // <-- ВЫЧИТАЕМ 1
-
-        uint16_t port = HTONS(in->sin_port);
-        uint32_t ip   = HTONL(in->sin_addr);
-
-        int res = sock_connect(sock_id, ip, port);
-        if (res < 0) {
-            if (res == SOCK_ERR_TIMEOUT) return -ETIMEDOUT;
-            if (res == SOCK_ERR_REFUSED) return -ECONNREFUSED;
-            return -ECONNRESET;
-        }
-        return 0;
+        uint32_t ip;
+        uint16_t port;
+        int err = get_sockaddr_in(addr, addrlen, &ip, &port);
+        if (err) return err;
+        return sock_connect(inet_sock_id(node), ip, port, fd_nonblock(fd));
     }
 
     return -ENOTSOCK;
@@ -2146,8 +2531,37 @@ static int64_t sys_select_compat_handler(int nfds, void *rfds, void *wfds, void 
     return sys_pselect6_handler(nfds, rfds, wfds, efds, pts, NULL);
 }
 
+// Copy a NULL-terminated string vector (argv/envp) into one kernel block:
+// the pointer array followed by the strings. *budget limits the total size.
+static char **copy_string_vector(char *const *vec, int *out_count, size_t *budget) {
+    int n = 0;
+    size_t bytes = 0;
+    if (vec) {
+        while (vec[n]) {
+            bytes += strlen(vec[n]) + 1 + sizeof(char *);
+            n++;
+            if (bytes > *budget) return NULL;
+        }
+    }
+    bytes += sizeof(char *);
+    if (bytes > *budget) return NULL;
+    *budget -= bytes;
+
+    char **out = (char **)kmalloc(bytes);
+    if (!out) return NULL;
+    char *strings = (char *)(out + n + 1);
+    for (int i = 0; i < n; i++) {
+        size_t len = strlen(vec[i]) + 1;
+        memcpy(strings, vec[i], len);
+        out[i] = strings;
+        strings += len;
+    }
+    out[n] = NULL;
+    *out_count = n;
+    return out;
+}
+
 static int64_t sys_execve_handler(const char *filename, char *const argv[], char *const envp[], syscall_regs_t *regs) {
-    (void)envp;
     if (!filename || !current_task || !current_task->process) return -EINVAL;
 
     char resolved[256];
@@ -2221,29 +2635,29 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
         return sys_execve_handler(interp_argv[0], interp_argv, envp, regs);
     }
 
-    // 2. Standard ELF Binary Loading
-    int argc = 0;
-    char k_argv_storage[16][128];
-    char *exec_argv[17];
-
-    if (argv) {
-        while (argv[argc] && argc < 16) {
-            strncpy(k_argv_storage[argc], argv[argc], 127);
-            k_argv_storage[argc][127] = '\0';
-            exec_argv[argc] = k_argv_storage[argc];
-            argc++;
-        }
+    // 2. Standard ELF Binary Loading: argv and envp move into kernel memory
+    // before the old address space disappears
+    int argc = 0, envc = 0;
+    size_t budget = EXEC_ARG_MAX;
+    char **exec_argv = copy_string_vector(argv, &argc, &budget);
+    char **exec_envp = (exec_argv && envp) ? copy_string_vector(envp, &envc, &budget) : NULL;
+    if (!exec_argv || (envp && !exec_envp)) {
+        if (exec_argv) kfree(exec_argv);
+        kfree(file_buf);
+        return -E2BIG;
     }
-    exec_argv[argc] = NULL;
 
     uint64_t new_entry = 0;
     uint64_t new_rsp = 0;
     uint64_t new_cr3 = 0;
 
-    bool ok = elf_execve_replace(file_buf, file->length, argc, exec_argv, &new_entry, &new_rsp, &new_cr3);
+    bool ok = elf_execve_replace(file_buf, file->length, argc, exec_argv, envc, exec_envp,
+                                 &new_entry, &new_rsp, &new_cr3);
     kfree(file_buf);
+    if (exec_envp) kfree(exec_envp);
 
     if (!ok) {
+        kfree(exec_argv);
         return -ENOEXEC;
     }
 
@@ -2259,12 +2673,21 @@ static int64_t sys_execve_handler(const char *filename, char *const argv[], char
     }
 
     for (int fd = 0; fd < MAX_OPEN_FILES; fd++) {
-        if (current_task->process->files[fd] && (current_task->process->file_flags[fd] & O_CLOEXEC)) {
+        vfs_node_t *open_node = current_task->process->files[fd];
+        if (!open_node) continue;
+        if (strace_pid && (strace_pid == STRACE_ALL || strace_pid == current_task->process->pid)) {
+            strace_log("[STRACE %lu] exec fd %d '%s' flags=0x%x refs=%u%s\n",
+                       (unsigned long)current_task->process->pid, fd, open_node->name,
+                       current_task->process->file_flags[fd], open_node->refcount,
+                       (current_task->process->file_flags[fd] & O_CLOEXEC) ? " -> close" : "");
+        }
+        if (current_task->process->file_flags[fd] & O_CLOEXEC) {
             sys_close_handler(fd);
         }
     }
 
     process_set_exec_info(current_task->process, resolved, argc, exec_argv);
+    kfree(exec_argv);
 
     // Initialize FPU/SSE control state for new binary
     task_init_fpu(current_task);
@@ -2396,14 +2819,9 @@ void syscall_handler(void *regs_ptr) {
     uint32_t pid = (current_task && current_task->process) ? (uint32_t)current_task->process->pid : 0;
     const char *name = get_syscall_name(syscall_no);
 
-    bool quiet = (syscall_no == SYS_POLL) ||
-                 (syscall_no == SYS_PPOLL) ||
-                 (syscall_no == SYS_SELECT) ||
-                 (syscall_no == SYS_PSELECT6) ||
-                 (syscall_no == SYS_CLOCK_GETTIME) ||
-                 (syscall_no == SYS_IOCTL) ||
-                 (syscall_no == SYS_READ) ||
-                 (syscall_no == SYS_WRITE);
+    bool quiet = strace_pid == 0 ||
+                 (strace_pid != STRACE_ALL && strace_pid != pid) ||
+                 (syscall_no == SYS_CLOCK_GETTIME);
 
     if (!quiet) {
         strace_log("[STRACE %u] > %s(%d) args=(0x%llx, 0x%llx, 0x%llx)\n",
@@ -2556,6 +2974,33 @@ void syscall_handler(void *regs_ptr) {
         case SYS_SOCKET:
             ret = sys_socket_handler((int)regs->rdi, (int)regs->rsi, (int)regs->rdx);
             break;
+        case SYS_GETRANDOM: {
+            void *rbuf = (void *)regs->rdi;
+            size_t rlen = (size_t)regs->rsi;
+            if (rlen > 33554431) rlen = 33554431;
+            if (rlen && !validate_user_memory(rbuf, rlen, true)) {
+                ret = -EFAULT;
+                break;
+            }
+            random_fill(rbuf, rlen);
+            ret = (int64_t)rlen;
+            break;
+        }
+        case SYS_EVENTFD:
+        case SYS_EVENTFD2: {
+            int efd_flags = (syscall_no == SYS_EVENTFD2) ? (int)regs->rsi : 0;
+            vfs_node_t *efd = eventfd_create((uint32_t)regs->rdi, efd_flags);
+            if (!efd) {
+                ret = -ENOMEM;
+                break;
+            }
+            uint32_t fl = O_RDWR;
+            if (efd_flags & 04000) fl |= O_NONBLOCK;
+            if (efd_flags & 02000000) fl |= O_CLOEXEC;
+            ret = alloc_fd(efd, fl);
+            if (ret < 0) vfs_close(efd);
+            break;
+        }
         case SYS_BIND:
             ret = sys_bind_handler((int)regs->rdi, (const struct sockaddr_un *)regs->rsi, (uint32_t)regs->rdx);
             break;
@@ -2572,14 +3017,16 @@ void syscall_handler(void *regs_ptr) {
             ret = sys_connect_handler((int)regs->rdi, (const struct sockaddr_un *)regs->rsi, (uint32_t)regs->rdx);
             break;
         case SYS_SENDTO:
-            ret = sys_write_handler((int)regs->rdi, (const void *)regs->rsi, (size_t)regs->rdx);
+            ret = sys_sendto_handler((int)regs->rdi, (const void *)regs->rsi, (size_t)regs->rdx,
+                                     (int)regs->r10, (const void *)regs->r8, (uint32_t)regs->r9);
             break;
         case SYS_GETITIMER:
         case SYS_SETITIMER:
             ret = 0; // Pretend interval timer is set
             break;
         case SYS_RECVFROM:
-            ret = sys_read_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx);
+            ret = sys_recvfrom_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx,
+                                       (int)regs->r10, (void *)regs->r8, (uint32_t *)regs->r9);
             break;
         case SYS_CLONE:
             ret = sys_clone_handler(regs->rdi, regs->rsi, (int *)regs->rdx, (int *)regs->r10, regs->r8, regs);
@@ -2597,8 +3044,24 @@ void syscall_handler(void *regs_ptr) {
         case SYS_EXECVE:
             ret = sys_execve_handler((const char *)regs->rdi, (char *const *)regs->rsi, (char *const *)regs->rdx, regs);
             break;
-        case SYS_EXIT:
         case SYS_EXIT_GROUP:
+            // Every other thread of the process stops here and now
+            if (current_task && current_task->process) {
+                extern task_t *task_list;
+                task_t *t = task_list;
+                if (t) do {
+                    if (t != current_task && t->process == current_task->process &&
+                        t->state != TASK_STATE_ZOMBIE) {
+                        t->state = TASK_STATE_ZOMBIE;
+                        t->running = false;
+                        sched_forget(t);
+                    }
+                    t = t->next;
+                } while (t && t != task_list);
+            }
+            ret = sys_exit_handler((int)regs->rdi);
+            break;
+        case SYS_EXIT:
             ret = sys_exit_handler((int)regs->rdi);
             break;
         case SYS_WAIT4:
@@ -2632,12 +3095,14 @@ void syscall_handler(void *regs_ptr) {
             for (int attempt = 0; attempt < 3 && resolved == 0; attempt++) {
                 dns_query(iface, hostname, 0x0A000203);
 
+                // Sleep between checks: a bare sched_yield() keeps interrupts off,
+                // so the tick never advances and a late reply hangs the system
                 uint32_t start_t = tick;
-                while (tick - start_t < 100) { // 1 second per attempt
+                while (tick - start_t < TIMER_HZ) { // 1 second per attempt
                     rtl8139_poll();
                     resolved = dns_get_result(hostname);
                     if (resolved != 0) break;
-                    __asm__ volatile("pause");
+                    sched_make_sleep(current_task, tick + 1);
                     sched_yield();
                 }
             }
@@ -2790,8 +3255,38 @@ void syscall_handler(void *regs_ptr) {
             ret = sys_renameat_handler((int)regs->rdi, (const char *)regs->rsi, (int)regs->rdx, (const char *)regs->r10);
             break;
         case SYS_FACCESSAT:
+        case SYS_FACCESSAT2:
             ret = sys_access_handler((const char *)regs->rsi, (int)regs->rdx);
             break;
+        case SYS_GETPRIORITY:
+            ret = 20; // kernel encoding of nice 0 (20 - nice)
+            break;
+        case SYS_SETPRIORITY:
+            ret = 0;  // single priority level: accepted and ignored
+            break;
+        case SYS_STATFS:
+        case SYS_FSTATFS: {
+            // struct statfs: one big RAM-backed filesystem is a good enough answer
+            uint64_t *st = (uint64_t *)regs->rsi;
+            if (!st || !validate_user_memory(st, 120, true)) {
+                ret = -EFAULT;
+                break;
+            }
+            memset(st, 0, 120);
+            uint64_t total = pmm_get_total_memory() / PAGE_SIZE;
+            uint64_t used = pmm_get_used_memory() / PAGE_SIZE;
+            st[0] = 0x858458f6;               // f_type: RAMFS_MAGIC
+            st[1] = PAGE_SIZE;                // f_bsize
+            st[2] = total;                    // f_blocks
+            st[3] = total > used ? total - used : 0; // f_bfree
+            st[4] = st[3];                    // f_bavail
+            st[5] = 65536;                    // f_files
+            st[6] = 65536;                    // f_ffree
+            st[8] = 255;                      // f_namelen
+            st[9] = PAGE_SIZE;                // f_frsize
+            ret = 0;
+            break;
+        }
         case SYS_DUP3:
             ret = sys_dup3_handler((int)regs->rdi, (int)regs->rsi, (int)regs->rdx);
             break;
@@ -2807,14 +3302,39 @@ void syscall_handler(void *regs_ptr) {
             ret = -EFAULT;
             break;
         }
+        if (strncmp(user_cmd, "strace", 6) == 0) {
+            const char *arg = user_cmd + 6;
+            while (*arg == ' ') arg++;
+            if (strncmp(arg, "all", 3) == 0) {
+                strace_pid = STRACE_ALL;
+            } else {
+                uint64_t v = 0;
+                while (*arg >= '0' && *arg <= '9') v = v * 10 + (uint64_t)(*arg++ - '0');
+                strace_pid = v;
+            }
+            ret = 0;
+            break;
+        }
         // Execute cleanly without spilling the kernel prompt into Bash
         shell_execute_diag(user_cmd);
         ret = 0;
         break;
     }
-        default:
+        default: {
+            // Report each missing syscall once: the usual reason a port misbehaves
+            static uint8_t reported[64];
+            uint64_t nr = syscall_no;
+            if (nr < 512 && !(reported[nr / 8] & (1u << (nr % 8)))) {
+                reported[nr / 8] |= (uint8_t)(1u << (nr % 8));
+                char msg[96];
+                snprintf(msg, sizeof(msg), "[SYSCALL] unimplemented syscall %lu (pid %lu)\n",
+                         (unsigned long)nr,
+                         (unsigned long)(current_task && current_task->process ? current_task->process->pid : 0));
+                serial_puts(COM1, msg);
+            }
             ret = -ENOSYS;
             break;
+        }
     }
 
     regs->rax = (uint64_t)ret;

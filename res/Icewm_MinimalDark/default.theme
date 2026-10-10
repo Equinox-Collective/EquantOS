@@ -59,7 +59,7 @@ ColorMinimizedTaskBarApp="#0A0A0A"
 ColorMinimizedTaskBarAppText="#DB5A67"
 #ColorNormalWorkspaceButton=" "
 #ColorNormalWorkspaceButtonText=" "
-ColorActiveWorkspaceButton="1E2030"
+ColorActiveWorkspaceButton="#1E2030"
 ColorActiveWorkspaceButtonText="white"
 
 ColorNormalButton="#0A0A0A"
