@@ -25,5 +25,6 @@ int term_get_glyph_width(void);
 int term_get_glyph_height(void);
 void term_print_raw(const char *str);
 void term_draw_rect(size_t x, size_t y, size_t w, size_t h, uint32_t color);
+void term_redraw_input_line(size_t start_x, size_t start_y, const char *line, size_t cursor_idx);
 
 #endif // TERM_H

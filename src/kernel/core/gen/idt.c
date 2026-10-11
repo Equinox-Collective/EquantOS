@@ -52,11 +52,13 @@ void init_idt(void) {
     set_idt_gate(33, (uint64_t)keyboard_handler, sel);
     idt[8].ist = 1;
 
-    // Родной сисколл int 0x80
+    // Legacy syscall fallback: int 0x80. Kept intentionally.
+    // Preferred path when CPU supports it is syscall/sysret
+    // (see syscall_entry_asm + init_syscalls). Both share syscall_handler.
     set_idt_gate(0x80, (uint64_t)syscall_interrupt_asm, sel);
     idt[0x80].flags = 0xEE; // Было 0xEF! Ставим 0xEE (Interrupt Gate, атомарно гасит IF!)
 
-    // === ШЛЮЗ ДЛЯ BASH И MUSL: INT 0x81 ===
+    // === ШЛЮЗ ДЛЯ BASH И MUSL: INT 0x81 (legacy fallback, kept) ===
     set_idt_gate(0x81, (uint64_t)linux_syscall_interrupt_asm, sel);
     idt[0x81].flags = 0xEE; // Было 0xEF! Ставим 0xEE
 

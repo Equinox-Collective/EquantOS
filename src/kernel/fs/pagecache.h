@@ -9,6 +9,8 @@
 
 #define PAGE_CACHE_HASH_SIZE 1024
 #define PAGE_CACHE_MAX_PAGES 2048 // 8MB of RAM dedicated for cache pool
+#define PAGE_CACHE_READ_AHEAD_PAGES 4 // sequential prefetch window (0 disables)
+#define PAGE_CACHE_SEQ_TRACK 16 // tracked streams for sequential detection
 
 typedef struct page_cache_entry {
     uint64_t inode;
@@ -22,6 +24,7 @@ typedef struct page_cache_entry {
 } page_cache_entry_t;
 
 void page_cache_init(void);
+void page_cache_prewarm(void);
 int64_t page_cache_read(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 int64_t page_cache_write(vfs_node_t *node, uint64_t offset, uint64_t size, uint8_t *buffer);
 void page_cache_sync_node(vfs_node_t *node);

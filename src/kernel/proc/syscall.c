@@ -22,6 +22,40 @@ static void strace_log(const char *fmt, ...) {
 
 __attribute__((aligned(16))) uint64_t syscall_user_rsp = 0;
 
+// True when CPU supports SYSCALL/SYSRET and the fast path is enabled.
+// int 0x80 / int 0x81 remain as legacy fallback regardless of this flag.
+bool g_syscall_sysret_enabled = false;
+
+// Probe that [uaddr, uaddr+4) is mapped WRITABLE user memory in the current
+// task's address space. Never faults: rejects non-canonical/kernel addresses
+// and walks the tables manually (handles 2MB huge pages, honors PRESENT and
+// WRITABLE, rejects read-only/COW pages whose write would #PF in Ring 0).
+// All direct kernel writes to user pointers (exit CLONE_CHILD_CLEARTID,
+// clone SETTID, futex) must go through this first.
+static bool user_u32_writable(const uint32_t *uaddr) {
+    uint64_t addr = (uint64_t)uaddr;
+    if (addr > 0x00007FFFFFFFFFFFULL - 3) return false;
+    if (!current_task || !current_task->process) return false;
+    page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
+
+    uint64_t e = pml4[(addr >> 39) & 0x1FF];
+    if (!(e & PTE_PRESENT)) return false;
+    page_table_t *pdpt = (page_table_t *)VIRT(e & PTE_ADDR_MASK);
+
+    e = pdpt[(addr >> 30) & 0x1FF];
+    if (!(e & PTE_PRESENT)) return false;
+    page_table_t *pd = (page_table_t *)VIRT(e & PTE_ADDR_MASK);
+
+    e = pd[(addr >> 21) & 0x1FF];
+    if (!(e & PTE_PRESENT)) return false;
+    if (e & PTE_HUGE) return (e & PTE_WRITABLE) != 0; // 2MB page
+    page_table_t *pt = (page_table_t *)VIRT(e & PTE_ADDR_MASK);
+
+    e = pt[(addr >> 12) & 0x1FF];
+    if (!(e & PTE_PRESENT) || !(e & PTE_WRITABLE)) return false;
+    return true;
+}
+
 extern void syscall_entry_asm(void);
 extern uint64_t pmm_get_total_memory(void);
 extern uint64_t pmm_get_used_memory(void);
@@ -80,6 +114,7 @@ static int alloc_fd(vfs_node_t *node, uint32_t flags) {
         if (current_task->process->files[i] == NULL) {
             current_task->process->files[i] = node;
             if (node->refcount == 0) node->refcount = 1;
+            else node->refcount++;
             current_task->process->file_offsets[i] = 0;
             current_task->process->file_flags[i] = flags;
             return i;
@@ -131,7 +166,7 @@ static void reap_orphan_zombies(void);
 static void process_terminate_task(task_t *task, int code);
 static int64_t sys_exit_handler(int code);
 
-static int64_t sys_kill_handler(int pid, int sig) {
+int64_t sys_kill_handler(int pid, int sig) {
     if (sig < 0 || sig >= NSIG) return -EINVAL;
     extern task_t *task_list;
     reap_orphan_zombies();
@@ -142,8 +177,15 @@ static int64_t sys_kill_handler(int pid, int sig) {
     bool kill_self = false;
     do {
         task_t *next = curr->next;
-        if (curr->process && curr->state != TASK_STATE_ZOMBIE &&
-            (pid <= 0 || (int)curr->process->pid == pid)) {
+        bool matches = false;
+        if (curr->process) {
+            if (pid > 0 && (int)curr->process->pid == pid) matches = true;
+            else if (pid == 0 && curr->process->pgid == current_task->process->pgid) matches = true;
+            else if (pid < -1 && (int)curr->process->pgid == -pid) matches = true;
+            else if (pid == -1) matches = true;
+        }
+
+        if (curr->process && curr->state != TASK_STATE_ZOMBIE && matches) {
             found = true;
             if (sig == SIGKILL || sig == SIGTERM) {
                 if (curr == current_task) {
@@ -151,7 +193,26 @@ static int64_t sys_kill_handler(int pid, int sig) {
                 } else {
                     process_terminate_task(curr, 128 + sig);
                 }
-            } else if (sig == SIGSTOP) {
+            } else if (sig == SIGINT || sig == SIGQUIT) {
+                if (curr->process->sigactions[sig - 1].handler == 1 /* SIG_IGN */) {
+                    // Ignored
+                } else if (curr->process->sigactions[sig - 1].handler > 1) {
+                    curr->process->sigpending |= (1ULL << (sig - 1));
+                    if (curr->state == TASK_STATE_BLOCKED || curr->state == TASK_STATE_SLEEPING) {
+                        sched_unblock(curr);
+                    }
+                } else {
+                    if (curr == current_task) kill_self = true;
+                    else process_terminate_task(curr, 128 + sig);
+                }
+            } else if (sig == SIGWINCH) {
+                if (curr->process->sigactions[sig - 1].handler > 1) {
+                    curr->process->sigpending |= (1ULL << (sig - 1));
+                    if (curr->state == TASK_STATE_BLOCKED || curr->state == TASK_STATE_SLEEPING) {
+                        sched_unblock(curr);
+                    }
+                }
+            } else if (sig == SIGSTOP || sig == SIGTSTP) {
                 sched_block(curr);
             } else if (sig == SIGCONT) {
                 sched_unblock(curr);
@@ -370,6 +431,22 @@ static int64_t sys_openat_handler(int dirfd, const char *pathname, int flags, in
     char resolved[256];
     resolve_user_path(pathname, resolved, sizeof(resolved));
 
+    if (strcmp(resolved, "/dev/ptmx") == 0 || strcmp(resolved, "/dev/pts/ptmx") == 0) {
+        vfs_node_t *master_node = pty_create_master_node();
+        if (!master_node) return -ENOSPC;
+        return alloc_fd(master_node, (uint32_t)flags);
+    }
+
+    if (strcmp(resolved, "/dev/tty") == 0) {
+        if (current_task && current_task->process && current_task->process->controlling_tty) {
+            vfs_node_t *ctty = current_task->process->controlling_tty;
+            if (ctty->ops && ctty->ops->open) {
+                ctty->ops->open(ctty);
+            }
+            return alloc_fd(ctty, (uint32_t)flags);
+        }
+    }
+
     vfs_node_t *node = vfs_open(resolved, 0);
     if (node && (flags & O_CREAT) && (flags & O_EXCL)) {
         return -EEXIST;
@@ -511,6 +588,7 @@ static int64_t sys_fcntl_handler(int fd, int cmd, uint64_t arg) {
 }
 
 static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
+    req = (uint32_t)req;
     if (!current_task || !current_task->process) return -EBADF;
     if (fd < 0 || fd >= MAX_OPEN_FILES) return -EBADF;
 
@@ -529,6 +607,14 @@ static int64_t sys_ioctl_handler(int fd, uint64_t req, void *arg) {
         int64_t n = sock_recvfrom(inet_sock_id(node), probe, 1, NULL, NULL, SOCK_MSG_PEEK, true);
         *(int *)arg = (n > 0) ? (int)sock_rx_available(inet_sock_id(node)) : 0;
         return 0;
+    }
+
+    // Pass custom ioctls (PTY master/slave, /dev/fb0, etc.) to VFS node ops
+    if (node && node->ops && node->ops->ioctl) {
+        int res = node->ops->ioctl(node, req, arg);
+        if (res != -ENOTTY) {
+            return res;
+        }
     }
 
     // Check if this fd is a terminal or console (fd 0..2 OR /dev/tty, /dev/tty0)
@@ -1145,6 +1231,7 @@ static int64_t sys_futex_handler(uint32_t *uaddr, int op, uint32_t val,
     // 1. FUTEX_WAIT / FUTEX_WAIT_BITSET
     if (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET) {
         // Atomic compare: if memory already changed, return immediately
+        if (!user_u32_writable(uaddr)) return -EFAULT;
         if (*uaddr != val) {
             return -EAGAIN;
         }
@@ -1261,12 +1348,25 @@ void process_exit_current(int code) {
 
 static int64_t sys_exit_handler(int code) {
     if (current_task) {
-        // POSIX Thread Termination Notification (CLONE_CHILD_CLEARTID)
+        // POSIX Thread Termination Notification (CLONE_CHILD_CLEARTID).
+        // The pointer lives in user memory and may be stale (unmapped after
+        // munmap/brk shrink, or never set): probe before touching it, or the
+        // Ring-0 write below turns into a fatal kernel #PF (memtest crash).
         if (current_task->clear_child_tid) {
             uint32_t *tid_ptr = (uint32_t *)current_task->clear_child_tid;
-            *tid_ptr = 0;
-            // Wake all threads blocked in pthread_join on this TID
-            sys_futex_handler(tid_ptr, FUTEX_WAKE, 1, NULL, NULL, 0);
+            if (user_u32_writable(tid_ptr)) {
+                *tid_ptr = 0;
+                // Wake all threads blocked in pthread_join on this TID
+                sys_futex_handler(tid_ptr, FUTEX_WAKE, 1, NULL, NULL, 0);
+            } else {
+                char diag[96];
+                snprintf(diag, sizeof(diag),
+                         "[EXIT] stale clear_child_tid 0x%llx ignored (pid %llu)\n",
+                         (unsigned long long)current_task->clear_child_tid,
+                         (unsigned long long)(current_task->process
+                             ? current_task->process->pid : 0));
+                serial_puts(COM1, diag);
+            }
             current_task->clear_child_tid = 0;
         }
 
@@ -1518,6 +1618,18 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
         return -EAGAIN;
     }
 
+    // Validate user TID pointers BEFORE allocating anything: these are
+    // written directly in Ring 0 below, and a stale pointer would #PF
+    // the kernel instead of failing the syscall with -EFAULT.
+    if ((flags & CLONE_PARENT_SETTID) && parent_tid &&
+        !user_u32_writable((const uint32_t *)parent_tid)) {
+        return -EFAULT;
+    }
+    if ((flags & CLONE_CHILD_SETTID) && child_tid &&
+        !user_u32_writable((const uint32_t *)child_tid)) {
+        return -EFAULT;
+    }
+
     // 1. Force save the current live FPU/SSE registers into current_task before cloning!
     __asm__ volatile("fxsave64 (%0)" :: "r"(task_fpu_area(current_task)) : "memory");
 
@@ -1550,6 +1662,7 @@ static int64_t sys_clone_handler(uint64_t flags, uint64_t stack_top, int *parent
         memcpy(child_proc->exe_path, current_task->process->exe_path, sizeof(child_proc->exe_path));
         memcpy(child_proc->cmdline, current_task->process->cmdline, sizeof(child_proc->cmdline));
         child_proc->cmdline_len = current_task->process->cmdline_len;
+        child_proc->controlling_tty = current_task->process->controlling_tty;
 
         for (int i = 0; i < MAX_OPEN_FILES; i++) {
             child_proc->files[i] = current_task->process->files[i];
@@ -2008,6 +2121,22 @@ static int poll_scan_fds(struct linux_pollfd *fds, uint64_t nfds) {
                 if (pipe_error) fds[i].revents |= POLLERR;
                 if (!counted && fds[i].revents) ready++;
             }
+            // Pseudo-Terminal (PTY) master or slave
+            else if (pty_is_master_node(node) || pty_is_slave_node(node)) {
+                bool pty_readable = false, pty_writable = false, pty_hangup = false, pty_error = false;
+                if (pty_poll_state(node, &pty_readable, &pty_writable, &pty_hangup, &pty_error)) {
+                    bool counted = fds[i].revents != 0;
+                    if ((fds[i].events & (POLLIN | POLLRDNORM)) && pty_readable) {
+                        fds[i].revents |= (fds[i].events & (POLLIN | POLLRDNORM));
+                    }
+                    if ((fds[i].events & (POLLOUT | POLLWRNORM)) && pty_writable) {
+                        fds[i].revents |= (fds[i].events & (POLLOUT | POLLWRNORM));
+                    }
+                    if (pty_hangup) fds[i].revents |= POLLHUP;
+                    if (pty_error)  fds[i].revents |= POLLERR;
+                    if (!counted && fds[i].revents) ready++;
+                }
+            }
             // Mouse device /dev/mouse or /dev/input/mice
             else if ((node->ops == &g_mousedev_fops || node->ops == &g_evdev_mouse_fops)) {
                 if ((fds[i].events & (POLLIN | POLLRDNORM)) && evdev_mouse_has_data()) {
@@ -2054,55 +2183,6 @@ static int64_t sys_poll_handler(struct linux_pollfd *fds, uint64_t nfds, int tim
     return ready;
 }
 
-static int select_scan_fds(int nfds, uint8_t *rfds, uint8_t *wfds) {
-    int ready = 0;
-    if (nfds > MAX_OPEN_FILES) nfds = MAX_OPEN_FILES;
-
-    for (int fd = 0; fd < nfds; fd++) {
-        int byte = fd / 8;
-        int bit = fd % 8;
-
-        // Check Read Readiness
-        if (rfds && (rfds[byte] & (1 << bit))) {
-            bool can_read = false;
-            if (fd == 0 && tty_has_input()) {
-                can_read = true;
-            }
-            if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
-                vfs_node_t *node = current_task->process->files[fd];
-                if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
-                    can_read = unix_socket_can_read((unix_socket_t *)node->ptr);
-                }
-            }
-            if (can_read) {
-                ready++;
-            } else {
-                rfds[byte] &= ~(1 << bit); // Clear bit if not ready
-            }
-        }
-
-        // Check Write Readiness
-        if (wfds && (wfds[byte] & (1 << bit))) {
-            bool can_write = false;
-            if (fd == 1 || fd == 2) {
-                can_write = true;
-            }
-            if (fd >= 0 && fd < MAX_OPEN_FILES && current_task && current_task->process) {
-                vfs_node_t *node = current_task->process->files[fd];
-                if (node && node->ops == &unix_socket_vfs_ops && node->ptr) {
-                    can_write = unix_socket_can_write((unix_socket_t *)node->ptr);
-                }
-            }
-            if (can_write) {
-                ready++;
-            } else {
-                wfds[byte] &= ~(1 << bit);
-            }
-        }
-    }
-    return ready;
-}
-
 static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, void *exceptfds, 
                                    const struct linux_timespec *timeout, const void *sigmask) {
     (void)exceptfds; (void)sigmask;
@@ -2144,8 +2224,15 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
                 } else if (current_task && current_task->process && fd < MAX_OPEN_FILES) {
                     vfs_node_t *node = current_task->process->files[fd];
                     if (node) {
+                        // Pseudo-terminal (PTY) master or slave
+                        if (pty_is_master_node(node) || pty_is_slave_node(node)) {
+                            bool pr = false, pw = false, ph = false, pe = false;
+                            if (pty_poll_state(node, &pr, &pw, &ph, &pe)) {
+                                can_read = pr || ph;
+                            }
+                        }
                         // Console opened by name (the X server's /dev/tty0)
-                        if (strncmp(node->name, "tty", 3) == 0) {
+                        else if (strncmp(node->name, "tty", 3) == 0) {
                             can_read = tty_has_input();
                         }
                         // Sockets
@@ -2184,7 +2271,12 @@ static int64_t sys_pselect6_handler(int nfds, void *readfds, void *writefds, voi
                 } else if (current_task && current_task->process && fd < MAX_OPEN_FILES) {
                     vfs_node_t *node = current_task->process->files[fd];
                     if (node) {
-                        if (node->ops == &inet_socket_vfs_ops && node->ptr) {
+                        if (pty_is_master_node(node) || pty_is_slave_node(node)) {
+                            bool pr = false, pw = false, ph = false, pe = false;
+                            if (pty_poll_state(node, &pr, &pw, &ph, &pe)) {
+                                can_write = pw && !ph;
+                            }
+                        } else if (node->ops == &inet_socket_vfs_ops && node->ptr) {
                             can_write = (sock_poll(inet_sock_id(node)) & (SOCK_POLLOUT | SOCK_POLLERR)) != 0;
                         } else if (node->ops == &unix_socket_vfs_ops && node->ptr) {
                             can_write = unix_socket_can_write((unix_socket_t *)node->ptr);
@@ -2536,17 +2628,6 @@ static int64_t sys_ppoll_handler(struct linux_pollfd *fds, uint64_t nfds, const 
     return sys_poll_handler(fds, nfds, timeout_ms);
 }
 
-// Fixed select handler that converts struct timeval (microseconds) to timespec (nanoseconds)
-static int64_t sys_select_compat_handler(int nfds, void *rfds, void *wfds, void *efds, const struct linux_timeval *tv) {
-    struct linux_timespec ts;
-    struct linux_timespec *pts = NULL;
-    if (tv) {
-        ts.tv_sec = tv->tv_sec;
-        ts.tv_nsec = tv->tv_usec * 1000ULL;
-        pts = &ts;
-    }
-    return sys_pselect6_handler(nfds, rfds, wfds, efds, pts, NULL);
-}
 
 // Copy a NULL-terminated string vector (argv/envp) into one kernel block:
 // the pointer array followed by the strings. *budget limits the total size.
@@ -2810,6 +2891,7 @@ static const char *get_syscall_name(uint64_t no) {
         case 202: return "futex";
         case 217: return "getdents64";
         case 218: return "set_tid_address";
+        case 221: return "fadvise64";
         case 228: return "clock_gettime";
         case 231: return "exit_group";
         case 257: return "openat";
@@ -2894,7 +2976,7 @@ void syscall_handler(void *regs_ptr) {
             ret = 0;
             break;
         case SYS_IOCTL:
-            ret = sys_ioctl_handler((int)regs->rdi, regs->rsi, (void *)regs->rdx);
+            ret = sys_ioctl_handler((int)regs->rdi, (uint32_t)regs->rsi, (void *)regs->rdx);
             break;
         case SYS_PREAD64:
             ret = sys_pread64_handler((int)regs->rdi, (void *)regs->rsi, (size_t)regs->rdx, (int64_t)regs->r10);
@@ -3230,6 +3312,7 @@ void syscall_handler(void *regs_ptr) {
         case SYS_SETSID:
             if (current_task && current_task->process) {
                 current_task->process->pgid = current_task->process->pid;
+                current_task->process->controlling_tty = NULL;
                 ret = (int64_t)current_task->process->pid;
             } else {
                 ret = 1;
@@ -3255,6 +3338,10 @@ void syscall_handler(void *regs_ptr) {
             break;
         case SYS_CLOCK_GETTIME:
             ret = sys_clock_gettime_handler((int)regs->rdi, (struct linux_timespec *)regs->rsi);
+            break;
+        case SYS_FADVISE64:
+            // posix_fadvise advisory hint: successfully accept and ignore
+            ret = 0;
             break;
         case SYS_OPENAT:
             ret = sys_openat_handler((int)regs->rdi, (const char *)regs->rsi, (int)regs->rdx, (int)regs->r10);
@@ -3365,6 +3452,24 @@ void syscall_handler(void *regs_ptr) {
 }
 
 void init_syscalls(void) {
+    // Prefer syscall/sysret fast path when available, keep int 0x80/0x81
+    // as legacy fallback (IDT setup in init_idt is unconditional).
+    uint32_t a = 0, b = 0, c = 0, d = 0;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000000), "c"(0));
+    bool has_syscall = false;
+    if (a >= 0x80000001) {
+        __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0x80000001), "c"(0));
+        // CPUID.80000001H:EDX[11] = SYSCALL/SYSRET support
+        if (d & (1u << 11))
+            has_syscall = true;
+    }
+
+    if (!has_syscall) {
+        g_syscall_sysret_enabled = false;
+        serial_puts(COM1, "[SYSCALL] SYSCALL/SYSRET not supported, using int 0x80 legacy path\n");
+        return;
+    }
+
     uint64_t efer = read_msr(0xC0000080);
     write_msr(0xC0000080, efer | 1); // SCE (Syscall Enable)
 
@@ -3376,6 +3481,9 @@ void init_syscalls(void) {
     // Standard Linux x86_64 Syscall FMASK:
     // Clears TF (0x100), IF (0x200), DF (0x400), IOPL (0x3000), NT (0x4000), AC (0x40000)
     write_msr(0xC0000084, 0x257FD5);
+
+    g_syscall_sysret_enabled = true;
+    serial_puts(COM1, "[SYSCALL] fast path syscall/sysret enabled, int 0x80 kept as fallback\n");
 }
 
 static int __init init_syscalls_initcall(void) {

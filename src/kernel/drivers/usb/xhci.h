@@ -142,5 +142,6 @@ typedef struct {
 void xhci_ring_doorbell(uint32_t slot, uint32_t target);
 void xhci_poll_event_ring(void);
 void xhci_scan_ports(void);
+void xhci_handle_events(void);
 
 #endif // XHCI_H

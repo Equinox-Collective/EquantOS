@@ -547,6 +547,32 @@ static bool deploy_file(vfs_node_t *dst_dir, const char *name, vfs_node_t *src, 
     return true;
 }
 
+// Recursive directory deploy (e.g. /cdrom/lib/tcc -> /lib/tcc,
+// /cdrom/usr/include is intentionally skipped: 1000+ files exceed the
+// mkfs_ext2 inode budget, headers stay on the ISO at /cdrom/usr/include
+// which tcc searches as a baked-in fallback path).
+static int deploy_tree(vfs_node_t *dst_parent, const char *name, vfs_node_t *src_dir,
+                       uint8_t *buf, size_t bsz, int depth) {
+    if (!dst_parent || !name || !src_dir || depth > 8) return 0;
+    if (!(src_dir->flags & FS_DIRECTORY)) return 0;
+    vfs_node_t *dst = vfs_finddir(dst_parent, name);
+    if (!dst) dst = vfs_create(dst_parent, name, FS_DIRECTORY);
+    if (!dst) return 0;
+    int done = 0;
+    uint32_t idx = 0;
+    vfs_node_t *e;
+    while ((e = vfs_readdir(src_dir, idx++)) != NULL) {
+        if (e->name[0] == '.' && (e->name[1] == '\0' ||
+            (e->name[1] == '.' && e->name[2] == '\0'))) continue;
+        if (e->flags & FS_DIRECTORY) {
+            done += deploy_tree(dst, e->name, e, buf, bsz, depth + 1);
+        } else if (e->flags & FS_FILE) {
+            if (deploy_file(dst, e->name, e, buf, bsz)) done++;
+        }
+    }
+    return done;
+}
+
 static bool commit_gpt_slot(installer_disk_t *disk, uint64_t start, uint64_t count, const uint8_t *guid, const char *label) {
     uint8_t sec[512];
     if (disk->bdev.read(1, 1, sec) != 0) return false;
@@ -741,7 +767,7 @@ static bool run_installer_engine(void) {
     render_log("Deploying Kernel and Userspace Payloads...");
     const char *payloads[] = {
         "kernel.elf", "font.psf", "bash.elf", "busybox.elf",
-        ".bashrc", "hello.elf", "start.sh"
+        ".bashrc", "hello.elf", "start.sh", "tcc.elf"
     };
     int p_count = sizeof(payloads) / sizeof(payloads[0]);
 
@@ -788,6 +814,37 @@ static bool run_installer_engine(void) {
         render_log("Deploying core BusyBox shell binary...");
         deploy_file(r_bin, "busybox", bbox_src, cbuf, COPY_CHUNK_SIZE);
         deploy_file(r_bin, "sh", bbox_src, cbuf, COPY_CHUNK_SIZE);
+    }
+
+    // On-disk caches for disk boots: font atlas + page-cache preload list.
+    // Sourced from the ISO (put there by the build from build/cache/); the
+    // same files are seeded into FAT32 images by create_disks.py (the EXT2
+    // here is freshly mkfs'd, so it needs its own copy).
+    vfs_node_t *r_cache = vfs_create(root_vfs, "cache", FS_DIRECTORY);
+    if (r_cache) {
+        render_log("Deploying font/page cache payloads...");
+        vfs_node_t *atlas_src = vfs_open("/cdrom/CACHE/FONTATLAS.BIN", 0);
+        if (atlas_src) deploy_file(r_cache, "FONTATLAS.BIN", atlas_src, cbuf, COPY_CHUNK_SIZE);
+        vfs_node_t *preload_src = vfs_open("/cdrom/CACHE/PRELOAD.TXT", 0);
+        if (preload_src) deploy_file(r_cache, "PRELOAD.TXT", preload_src, cbuf, COPY_CHUNK_SIZE);
+        vfs_node_t *cfont_src = vfs_open("/cdrom/font.psf", 0);
+        if (cfont_src) deploy_file(r_cache, "FONT.PSF", cfont_src, cbuf, COPY_CHUNK_SIZE);
+    }
+
+    // TCC toolchain tree for disk boots (/lib/tcc, musl libc.a + crt*.o).
+    // Headers stay on the ISO (/cdrom/usr/include, a baked-in fallback).
+    vfs_node_t *r_lib = vfs_create(root_vfs, "lib", FS_DIRECTORY);
+    if (r_lib) {
+        render_log("Deploying TCC toolchain libraries...");
+        const char *crt_files[] = { "libc.a", "crt1.o", "crti.o", "crtn.o" };
+        for (size_t i = 0; i < sizeof(crt_files) / sizeof(crt_files[0]); i++) {
+            char src_path[64];
+            snprintf(src_path, sizeof(src_path), "/cdrom/lib/%s", crt_files[i]);
+            vfs_node_t *csrc = vfs_open(src_path, 0);
+            if (csrc) deploy_file(r_lib, crt_files[i], csrc, cbuf, COPY_CHUNK_SIZE);
+        }
+        vfs_node_t *tcc_src = vfs_open("/cdrom/lib/tcc", 0);
+        if (tcc_src) deploy_tree(r_lib, "tcc", tcc_src, cbuf, COPY_CHUNK_SIZE, 0);
     }
 
     if (g_inst.is_uefi_mode && esp_vfs) {

@@ -15,6 +15,7 @@
 #include "../proc/syscall.h"
 #include "../drivers/tty/tty.h"
 #include "../drivers/input/evdev.h"
+#include "../drivers/tty/pty.h"
 #include "../core/uevent.h"
 #include "../misc/random.h"
 
@@ -372,6 +373,47 @@ static vfs_file_operations_t urandom_fops = {
     .write = dev_null_write
 };
 
+static vfs_node_t *devfs_pts_readdir(vfs_node_t *node, uint32_t index) {
+    (void)node;
+    uint32_t count = 0;
+    for (int i = 0; i < PTY_MAX_PAIRS; i++) {
+        vfs_node_t *s = pty_get_slave_node(i);
+        if (s) {
+            if (count == index) return s;
+            count++;
+        }
+    }
+    return NULL;
+}
+
+static vfs_node_t *devfs_pts_finddir(vfs_node_t *node, const char *name) {
+    (void)node;
+    if (!name) return NULL;
+    if (strcmp(name, "ptmx") == 0) {
+        return devfs_finddir(devfs_root, "ptmx");
+    }
+    int id = 0;
+    const char *p = name;
+    while (*p >= '0' && *p <= '9') {
+        id = id * 10 + (*p - '0');
+        p++;
+    }
+    if (*p != '\0' || p == name) return NULL;
+    return pty_get_slave_node(id);
+}
+
+static vfs_file_operations_t pts_dir_fops = {
+    .read = NULL,
+    .write = NULL,
+    .open = NULL,
+    .close = NULL,
+    .readdir = devfs_pts_readdir,
+    .finddir = devfs_pts_finddir,
+    .create = NULL,
+    .ioctl = NULL,
+    .mmap = NULL
+};
+
 void devfs_init(void) {
     devfs_root = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
     strcpy(devfs_root->name, "dev");
@@ -447,7 +489,19 @@ void devfs_init(void) {
         }
     }
 
-    serial_puts(COM1, "[DEVFS] Nodes /dev/input/event0, event1, mice and /dev/mouse active.\n");
+    // 8. Pseudo-Terminal (PTY) Subsystem & Device Nodes
+    pty_subsystem_init();
+    devfs_register_device("ptmx", &null_fops, NULL, 0666);
+
+    vfs_node_t *pts_dir = (vfs_node_t *)kzalloc(sizeof(vfs_node_t));
+    strcpy(pts_dir->name, "pts");
+    pts_dir->flags = FS_DIRECTORY;
+    pts_dir->ops = &pts_dir_fops;
+    pts_dir->parent = devfs_root;
+    pts_dir->next = devfs_root->children;
+    devfs_root->children = pts_dir;
+
+    serial_puts(COM1, "[DEVFS] Nodes /dev/input/event0, event1, mice, /dev/mouse, /dev/ptmx, /dev/pts active.\n");
 }
 
 static int __init devfs_initcall(void) {

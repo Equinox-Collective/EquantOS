@@ -45,6 +45,9 @@ typedef struct process {
     uint64_t file_offsets[MAX_OPEN_FILES];
     uint32_t file_flags[MAX_OPEN_FILES];
 
+    // POSIX Controlling Terminal (PTY slave or console)
+    struct vfs_node *controlling_tty;
+
     // POSIX Security & Permissions
     uint32_t uid;
     uint32_t gid;

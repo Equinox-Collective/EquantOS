@@ -26,9 +26,10 @@
 #include "../kernel/core/gen/io.h"
 #include "../kernel/misc/installer.h"
 #include "../kernel/misc/user.h"
+#include "../kernel/drivers/tty/tty.h"
+#include "../kernel/drivers/usb/xhci.h"
 #include "../kernel/net/net.h"
 #include "../kernel/net/icmp.h"
-#include "../kernel/net/net.h"
 #include "../kernel/net/dns.h"
 #include "../kernel/net/tcp.h"
 
@@ -917,6 +918,16 @@ static void cmd_ttytest(int argc, char **argv) {
     term_print("============================================\n");
 }
 
+static int ata_bdev_read(uint64_t lba, uint32_t count, void *buffer) {
+    read_sectors_ata_pio((uintptr_t)buffer, lba, count);
+    return 0;
+}
+
+static int ata_bdev_write(uint64_t lba, uint32_t count, void *buffer) {
+    write_sectors_ata_pio((uintptr_t)buffer, lba, count);
+    return 0;
+}
+
 static void cmd_mkfstest(int argc, char **argv) {
     if (argc < 2) {
         term_print("Usage: mkfstest <partition_num>\nExample: mkfstest 0\n");
@@ -935,8 +946,8 @@ static void cmd_mkfstest(int argc, char **argv) {
         dev = nvme_get_block_device();
     } else {
         block_device_t ata_dev = {
-            .read = (block_read_fn)read_sectors_ata_pio,
-            .write = (block_write_fn)write_sectors_ata_pio,
+            .read = ata_bdev_read,
+            .write = ata_bdev_write,
             .sector_size = 512
         };
         dev = ata_dev;
@@ -1694,7 +1705,6 @@ static void cmd_ping(int argc, char **argv) {
     }
 
     uint32_t ip = 0;
-    int a, b, c, d;
     // Простой парсер IPv4 x.x.x.x
     // Если хочешь по-простому:
     if (strcmp(argv[1], "10.0.2.2") == 0) {

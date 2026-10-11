@@ -142,6 +142,7 @@ DEP_FILES   := $(ALL_OBJECTS:.o=.d)
 # Userspace Target List (Integrated into ISO)
 ALL_USERSPACE := build/iso/hello.elf \
                  build/iso/musltest.elf \
+                 build/iso/ptytest.elf \
                  build/iso/equantmemtest.elf \
 				 build/iso/threadtest.elf \
                  build/iso/busybox.elf \
@@ -163,7 +164,30 @@ ALL_USERSPACE := build/iso/hello.elf \
 				 build/iso/fonts.conf \
                  build/iso/font.ttf \
 				 build/iso/menu \
-				 build/iso/fastfetch
+				 build/iso/fastfetch \
+				 build/iso/st.elf \
+				 build/iso/examples/hello.c \
+				 build/iso/tcc.elf \
+				 build/iso/lib/tcc/libtcc1.a \
+				 build/iso/lib/tcc/include \
+				 build/iso/lib/libc.a \
+				 build/iso/lib/crt1.o \
+				 build/iso/lib/crti.o \
+				 build/iso/lib/crtn.o \
+				 build/iso/usr/include \
+				 build/iso/CACHE/FONTATLAS.BIN \
+				 build/iso/CACHE/PRELOAD.TXT
+
+# On-disk caches (font atlas + page-cache preload list), generated from res/font.psf
+CACHE_FILES := build/cache/FONTATLAS.BIN build/cache/PRELOAD.TXT
+
+$(CACHE_FILES): res/font.psf tools/gen_font_atlas.py
+	@$(call MKDIR,build/cache)
+	$(Q)python tools/gen_font_atlas.py --out-dir build/cache
+
+build/iso/CACHE/%: build/cache/%
+	@$(call MKDIR,build/iso/CACHE)
+	$(Q)$(call CP,$<,$@)
 
 # ==============================================================================
 # Master Targets
@@ -216,7 +240,7 @@ build/iso/equantmemtest.elf: userspace/equantmemtest.c
 	@$(call MKDIR,build/iso)
 	$(call LOG_STEP,$(CLR_CC),$<)
 	$(Q)$(CC) -g -ffreestanding -fno-pie -fno-pic -nostdlib -c $< -o build/obj/userspace/equantmemtest.o
-	$(Q)$(LD) -Ttext 0x400000 build/obj/userspace/equantmemtest.o -o $@
+	$(Q)$(LD) -Ttext-segment 0x400000 build/obj/userspace/equantmemtest.o -o $@
 
 build/iso/%.elf: userspace/%.c
 	@$(call MKDIR,build/obj/userspace)
@@ -315,6 +339,61 @@ build/iso/fastfetch: res/fastfetch.elf
 	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
 	$(Q)$(call CP,res/fastfetch.elf,$@)
 
+build/iso/st.elf: res/st.elf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/st.elf,$@)
+
+# TCC example source (plain C file, compiled on EquantOS with tcc).
+build/iso/examples/hello.c: res/examples/hello.c
+	@$(call MKDIR,build/iso/examples)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,$<,$@)
+
+# TCC toolchain file tree (compiler + libtcc1.a + musl libc/crts + headers).
+# Layout mirrors the paths baked into tcc at configure time (/lib/tcc,
+# /lib, /usr/include); installer deploys the small parts to EXT2, headers
+# stay ISO-only (1000+ files exceed the mkfs_ext2 inode budget).
+build/iso/tcc.elf: res/tcc.elf
+	@$(call MKDIR,build/iso)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,res/tcc.elf,$@)
+
+build/iso/lib/tcc/libtcc1.a: res/tcc/libtcc1.a
+	@$(call MKDIR,build/iso/lib/tcc)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,$<,$@)
+
+build/iso/lib/tcc/include: ports/tcc/src/include
+	@$(call MKDIR,build/iso/lib/tcc)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP_R,$<,$@)
+
+build/iso/lib/libc.a: sdk/sysroot/lib/libc.a
+	@$(call MKDIR,build/iso/lib)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,$<,$@)
+
+build/iso/lib/crt1.o: sdk/sysroot/lib/crt1.o
+	@$(call MKDIR,build/iso/lib)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,$<,$@)
+
+build/iso/lib/crti.o: sdk/sysroot/lib/crti.o
+	@$(call MKDIR,build/iso/lib)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,$<,$@)
+
+build/iso/lib/crtn.o: sdk/sysroot/lib/crtn.o
+	@$(call MKDIR,build/iso/lib)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP,$<,$@)
+
+build/iso/usr/include: sdk/sysroot/include
+	@$(call MKDIR,build/iso/usr/include)
+	$(call LOG_STEP,$(CLR_INFO),$< -> $@)
+	$(Q)$(call CP_R,$<,$@)
+
 # Auto-Dependency Inclusion
 -include $(DEP_FILES)
 -include $(UI_DEPS)
@@ -323,7 +402,7 @@ build/iso/fastfetch: res/fastfetch.elf
 # Bootable ISO & Disks Construction
 # ==============================================================================
 
-disks:
+disks: $(CACHE_FILES)
 	$(call LOG_MSG,  $(CLR_INFO) Generating raw test disk images...)
 	$(Q)python create_disks.py
 

@@ -20,6 +20,7 @@
 #include "../misc/timer.h"
 #include "string.h"
 #include "../drivers/tty/tty.h"
+#include "../drivers/tty/pty.h"
 #include "stdio.h"
 #include "../fs/vfs.h"
 #include "../core/initcall.h"
@@ -214,6 +215,7 @@
 #define SYS_FUTEX              202
 #define SYS_GETDENTS64         217
 #define SYS_SET_TID_ADDRESS    218
+#define SYS_FADVISE64          221
 #define SYS_CLOCK_GETTIME      228
 #define SYS_CLOCK_GETRES       229
 #define SYS_CLOCK_NANOSLEEP    230
@@ -300,10 +302,19 @@
 #define TCSETS               0x5402
 #define TCSETSW              0x5403
 #define TCSETSF              0x5404
-#define TIOCGWINSZ           0x5413
+#define TIOCSCTTY            0x540E
 #define TIOCGPGRP            0x540F
 #define TIOCSPGRP            0x5410
+#define TIOCGWINSZ           0x5413
+#define TIOCSWINSZ           0x5414
 #define FIONREAD             0x541B
+#define FIONBIO              0x5421
+#define TIOCNOTTY            0x5422
+#define TIOCGSID             0x5429
+#define TIOCGPTN             0x80045430
+#define TIOCSPTLCK           0x40045431
+#define TIOCGPTLCK           0x80045439
+#define TIOCGPTPEER          0x5441
 
 #define POLLIN               0x0001
 #define POLLPRI              0x0002
@@ -383,6 +394,7 @@
 #define SIGCONT                  18
 #define SIGSTOP                  19
 #define SIGTSTP                  20
+#define SIGWINCH                 28
 
 // Linux Virtual Terminal ioctl definitions
 #define VT_OPENQRY       0x5600 // Find first available VT
@@ -478,13 +490,18 @@ struct linux_rlimit {
     uint64_t rlim_max;
 };
 
+#ifndef WINSIZE_DEFINED
+#define WINSIZE_DEFINED
 struct winsize {
     unsigned short ws_row;
     unsigned short ws_col;
     unsigned short ws_xpixel;
     unsigned short ws_ypixel;
 };
+#endif
 
+#ifndef TERMIOS_DEFINED
+#define TERMIOS_DEFINED
 struct termios {
     uint32_t c_iflag;
     uint32_t c_oflag;
@@ -495,6 +512,7 @@ struct termios {
     uint32_t c_ispeed;
     uint32_t c_ospeed;
 };
+#endif
 
 struct rusage {
     struct linux_timeval ru_utime;
@@ -561,9 +579,11 @@ struct linux_sockaddr_in {
 };
 
 void init_syscalls(void);
+extern bool g_syscall_sysret_enabled;
 // Terminate the current process as exit(code) would (used for fatal faults)
 void process_exit_current(int code);
 void syscall_handler(void *regs_ptr);
 void linux_syscall_handler(void *regs_ptr);
+int64_t sys_kill_handler(int pid, int sig);
 
 #endif // SYSCALL_H
