@@ -4,6 +4,7 @@
 #include "../misc/power.h"
 #include "gen/io.h"
 #include "../../equterm/term.h"
+#include "../../libs/string.h"
 #include "../proc/sched.h"
 #include <stdbool.h>
 
@@ -67,7 +68,13 @@ void __attribute__((noreturn)) kernel_panic(cpu_state_t *state, const char *file
         serial_puts(COM1, "Reason  : "); serial_puts(COM1, message); serial_puts(COM1, "\n");
     }
     if (file) {
-        serial_puts(COM1, "File    : "); serial_puts(COM1, file); serial_puts(COM1, "\n");
+        serial_puts(COM1, "File    : "); serial_puts(COM1, file);
+        if (line > 0) {
+            serial_puts(COM1, ":"); itoa(line, 10, buf); serial_puts(COM1, buf);
+        }
+        serial_puts(COM1, "\n");
+    } else {
+        (void)line;
     }
 
     if (state != NULL) {

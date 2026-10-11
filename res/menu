@@ -1,3 +1,4 @@
+prog "Terminal" xterm /bin/st.elf
 prog "NetSurf" web-browser /usr/bin/netsurf-x
 prog "XEyes" - /bin/xeyes.elf
 separator

@@ -1073,6 +1073,65 @@ void fat32_init(void) {
     }
 }
 
+// Toolchain mounts for tcc: tccdir (/lib/tcc) is a single baked path with
+// no fallback list, so mount /lib and /usr/include into place. Prefer an
+// installed EXT2 tree, fall back to the LiveCD. ramfs has no /lib or /usr,
+// so nothing is shadowed.
+//
+// Runs as late_initcall: /cdrom itself is mounted by another fs_initcall
+// (ramfs_populate_modules_initcall), and same-level ordering is link order,
+// so doing this here would race it and silently mount nothing.
+static void toolchain_mount_tree(const char *mnt_path, const char *const *srcs, bool require_tcc) {
+    // Ensure every level of mnt_path ("/lib", "/usr/include") exists.
+    vfs_node_t *parent = vfs_root;
+    char sub[64];
+    const char *seg = mnt_path + 1;
+    for (const char *p = seg; ; p++) {
+        if (*p == '/' || *p == '\0') {
+            size_t len = (size_t)(p - seg);
+            if (len == 0 || len >= sizeof(sub)) return;
+            memcpy(sub, seg, len);
+            sub[len] = '\0';
+            vfs_node_t *next = vfs_finddir(parent, sub);
+            if (!next) next = ramfs_create_directory(parent, sub);
+            if (!next) return;
+            parent = next;
+            if (*p == '\0') break;
+            seg = p + 1;
+        }
+    }
+    if (parent->flags & FS_MOUNTPOINT) return;
+    for (int i = 0; srcs[i]; i++) {
+        vfs_node_t *src = vfs_open(srcs[i], 0);
+        // Require the tcc marker so a stray empty /lib never wins.
+        if (src && (!require_tcc || vfs_finddir(src, "tcc"))) {
+            if (vfs_mount(mnt_path, src)) {
+                serial_puts(COM1, "[STORAGE] Mounted toolchain ");
+                serial_puts(COM1, mnt_path);
+                serial_puts(COM1, " from ");
+                serial_puts(COM1, srcs[i]);
+                serial_puts(COM1, "\n");
+            }
+            break;
+        }
+    }
+}
+
+static int __init toolchain_mount_initcall(void) {
+    if (!vfs_root) return 0;
+    static const char *lib_srcs[] = {
+        "/drives/ext2_nvme/lib", "/drives/ext2_ata/lib", "/cdrom/lib", NULL,
+    };
+    static const char *inc_srcs[] = {
+        "/drives/ext2_nvme/usr/include", "/drives/ext2_ata/usr/include",
+        "/cdrom/usr/include", NULL,
+    };
+    toolchain_mount_tree("/lib", lib_srcs, true);
+    toolchain_mount_tree("/usr/include", inc_srcs, false);
+    return 0;
+}
+late_initcall(toolchain_mount_initcall);
+
 static int __init fat32_fs_initcall(void) {
     fat32_init();
     return 0;

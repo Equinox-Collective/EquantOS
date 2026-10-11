@@ -170,6 +170,8 @@ sched_yield_asm:
     iretq
 
 [global syscall_interrupt_asm]
+; Legacy fallback path (int 0x80). Kept for compatibility.
+; Preferred path is syscall_entry_asm below (syscall/sysret) when CPU supports it.
 syscall_interrupt_asm:
     push rax
     push rbx
@@ -262,6 +264,8 @@ page_fault_asm:
     iretq
 
 [global syscall_entry_asm]
+; Preferred fast path (syscall/sysret) when CPU supports SYSCALL/SYSRET.
+; int 0x80 remains as legacy fallback; both dispatch to syscall_handler.
 syscall_entry_asm:
     ; 1. При входе CPU сохраняет User RIP в RCX, User RFLAGS в R11.
     ; Сохраняем User RSP в переменную в секции .data ядра

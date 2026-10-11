@@ -22,6 +22,8 @@ extern uint64_t hhdm_offset;
 #define PTE_HUGE      (1ULL << 7)
 #define PTE_PAGE_SIZE PTE_HUGE // Backward compatibility alias for vmm.c
 #define PTE_COW       (1ULL << 9)
+#define PTE_ADDR_MASK 0x000FFFFFFFFFF000ULL // x86-64 HW phys mask (bits 12..51)
+#define PTE_FLAGS_MASK (~PTE_ADDR_MASK)
 #define PTE_PAT_2MB   (1ULL << 12)
 
 // PA1 is programmed to 0x01 (WC) in pat_init().
